@@ -390,6 +390,7 @@ void main(inout Payload payload) {
         } else {
             galaxy = milkyWay(skyDir);
         }
+        if ((lookSwitches(worldPush.torchControl.w) & LOOK_SWITCH_NO_NEBULA) != 0u) galaxy = float3(0.0, 0.0, 0.0);
         col += (galaxy + meteor(dir, worldPush.waterParams.w)) * nightStrength
                 * clear * smoothstep(0.0, 0.18, dir.y) * exp(-0.06 / max(dir.y, 0.03));
     }
@@ -397,11 +398,31 @@ void main(inout Payload payload) {
     // Sun & moon: round, physically shaded bodies instead of the vanilla square sprites. squareBody gives
     // the body-local tangent coordinate (in units of the vanilla quad half-width); the round body fills
     // the bright core of that quad. Visible appearance only: NEE keeps its own small light radius.
+    // Night brightness (slider, packed above the glow in torchControl.w) dims the night sky that lights the
+    // outdoors, so moonlit ground no longer outshines a torch-lit room; the moon disc below keeps its look.
+    float glowAndNight = lookGlowNight(worldPush.torchControl.w);
+    float nightDim = floor(glowAndNight / 4.0) / 100.0;
+    col *= lerp(1.0, nightDim, saturate(nightStrength));
     if (showCelestial) {
         bool skyReady = skyTextureReady();
         float2 local;
         squareBody(dir, sd, SUN_DISC_HALF_ANGLE, worldPush.celestial.xyz, local);
-        float3 sunDisc = realSun(local);
+        // torchControl.z: visible size multiplier, negative for the square shape; .w: glow strength.
+        float sunScale = abs(worldPush.torchControl.z);
+        local /= max(sunScale, 0.01);
+        float3 sunDisc;
+        if (worldPush.torchControl.z < 0.0) {
+            float edge = max(abs(local.x), abs(local.y));
+            sunDisc = float3(1.0 - smoothstep(SUN_BODY_RADIUS * 0.97, SUN_BODY_RADIUS * 1.02, edge));
+        } else {
+            sunDisc = realSun(local);
+        }
+        // Forward scattering in the air around the sun, the same two-lobe shape as the moon's aureole below.
+        float sunGlow = glowAndNight - 4.0 * floor(glowAndNight / 4.0);
+        if (sunGlow > 0.0 && sunUp > 0.0) {
+            float a2 = max(2.0 * (1.0 - dot(dir, sd)), 0.0) / max(sunScale * sunScale, 0.01);
+            col += SUN_DISC_RADIANCE * transmittanceToSpace(dir) * (0.05 * exp(-a2 / 0.02) + 0.012 * exp(-a2 / 0.18)) * sunGlow * sunUp;
+        }
         // transmittanceToSpace reddens+dims the disc through the sunset on the sky's own curve.
         if (any(sunDisc > 0.0)) col += SUN_DISC_RADIANCE * transmittanceToSpace(dir) * sunDisc * sunUp;
         // Same horizon gate as the sun: with the soft-horizon change, below-horizon rays no longer clip
@@ -411,12 +432,19 @@ void main(inout Payload payload) {
             float night = pow2(1.0 - day) * moonUp;
             float3 moonT = transmittanceToSpace(dir);
             squareBody(dir, worldPush.moonDir.xyz, MOON_DISC_HALF_ANGLE, worldPush.celestial.xyz, local);
-            float3 moonA = realMoon(local, worldPush.moonDir.w, skyReady);
-            if (any(moonA > 0.0)) col += MOON_DISC_RADIANCE * 0.32 * moonT * moonA * night; // lit side stays below clipping so the surface reads
+            float3 moonA;
+            if (worldPush.torchControl.z < 0.0) {
+                float moonEdge = max(abs(local.x), abs(local.y));
+                // The whole moon inside the square, with its texture and phase; 0.7 keeps the corners within the disc.
+                moonA = realMoon(local * 0.7, worldPush.moonDir.w, skyReady) * (1.0 - smoothstep(MOON_BODY_RADIUS * 0.97, MOON_BODY_RADIUS * 1.02, moonEdge));
+            } else {
+                moonA = realMoon(local, worldPush.moonDir.w, skyReady);
+            }
+            if (any(moonA > 0.0)) col += MOON_DISC_RADIANCE * 0.2 * moonT * moonA * night; // lit side stays below clipping so the surface reads
             // Aureole: forward scattering in the air around the moon, scaled by how much of it is lit.
             float lit = 1.0 - abs(worldPush.moonDir.w - 4.0) / 4.0;
             float a2 = max(2.0 * (1.0 - dot(dir, worldPush.moonDir.xyz)), 0.0);
-            col += MOON_DISC_RADIANCE * moonT * (0.004 * exp(-a2 / 0.012) + 0.0012 * exp(-a2 / 0.10)) * lit * night;
+            col += MOON_DISC_RADIANCE * moonT * (0.02 * exp(-a2 / 0.012) + 0.006 * exp(-a2 / 0.10)) * sunGlow * lit * night;
         }
     }
 

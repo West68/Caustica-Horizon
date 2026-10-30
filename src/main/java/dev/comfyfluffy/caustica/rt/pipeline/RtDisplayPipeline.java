@@ -239,11 +239,14 @@ public final class RtDisplayPipeline {
             push.putFloat(44,bloomBlend);
             var level=net.minecraft.client.Minecraft.getInstance().level;
             boolean overworld=level!=null && level.dimension().equals(net.minecraft.world.level.Level.OVERWORLD);
+            // Night brightness fades in with the night sky and only applies in the Overworld.
+            if (overworld) push.putFloat(16,dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.BRIGHTNESS.value()
+                    * (1f + ((float) Math.sqrt(dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS.value()) - 1f) * Math.clamp(nightStrength, 0f, 1f)));
             push.putFloat(48,itrpLook && overworld ? dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.DETAIL_SHARPEN.value() : 0f);
             invViewProj.get(64, push);
             push.putFloat(128, axisX).putFloat(132, axisY).putFloat(136, axisZ).putFloat(140, angle);
             push.putFloat(144, overworld ? nightStrength : 0f).putFloat(148, time).putFloat(152, rain)
-                .putFloat(156, boundSkyView != 0L ? 1f : 0f);
+                .putFloat(156, boundSkyView != 0L && dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.NEBULA.value() ? 1f : 0f);
             prevViewProj.get(160, push);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);

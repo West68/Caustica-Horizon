@@ -212,7 +212,7 @@ Surface evaluateMaterial(MaterialHeader header, float2 atlasUv, float lod, float
     bool useHeightNormal=false;
     float3 heightNormal=geometricNormal;
     // A constant/missing alpha was compiled to height=1 on the CPU. OFF never samples a height.
-    if (allowParallax && (header.features & MATERIAL_FEATURE_NORMAL) != 0u && lod < 2.0) {
+    if (allowParallax && (header.features & MATERIAL_FEATURE_NORMAL) != 0u && lod < 2.0 && !diffuseRay) {
         ConstPtr<WorldPush> parallaxPush=ConstPtr<WorldPush>(pc.worldPushAddr);
         uint mode=(parallaxPush[0].flags >> PARALLAX_FLAG_SHIFT)&PARALLAX_FLAG_MASK;
         float4 options=parallaxPush[0].materialParams;

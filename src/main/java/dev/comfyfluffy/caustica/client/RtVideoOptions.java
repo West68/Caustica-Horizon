@@ -66,7 +66,13 @@ public final class RtVideoOptions {
                     row(toggle("caustica.enhanced.itrpStars", CausticaConfig.Rt.Look.STARS), CausticaConfig.Rt.Look.STARS),
                     row(scalar("detailSharpen", CausticaConfig.Rt.Look.DETAIL_SHARPEN, 0f, 3f), CausticaConfig.Rt.Look.DETAIL_SHARPEN),
                     row(scalar("sunRims", CausticaConfig.Rt.Look.SUN_RIMS, 0f, 3f), CausticaConfig.Rt.Look.SUN_RIMS),
+                    row(scalar("sunDiscSize", CausticaConfig.Rt.Look.SUN_DISC_SIZE, .2f, 3f), CausticaConfig.Rt.Look.SUN_DISC_SIZE),
+                    row(sunShape(), CausticaConfig.Rt.Look.SUN_SHAPE),
+                    row(toggle("caustica.enhanced.nebula", CausticaConfig.Rt.Look.NEBULA), CausticaConfig.Rt.Look.NEBULA),
+                    row(toggle("caustica.enhanced.cloudShadow", CausticaConfig.Rt.Look.CLOUD_SHADOW), CausticaConfig.Rt.Look.CLOUD_SHADOW),
+                    row(scalar("sunGlow", CausticaConfig.Rt.Look.SUN_GLOW, 0f, 3f), CausticaConfig.Rt.Look.SUN_GLOW),
                     row(scalar("brightness", CausticaConfig.Rt.Look.BRIGHTNESS, .25f, 2f), CausticaConfig.Rt.Look.BRIGHTNESS),
+                    row(scalar("nightBrightness", CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS, .1f, 2f), CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS),
                     row(scalar("contrast", CausticaConfig.Rt.Look.CONTRAST, .5f, 1.5f), CausticaConfig.Rt.Look.CONTRAST),
                     row(scalar("saturation", CausticaConfig.Rt.Look.SATURATION, 0f, 2f), CausticaConfig.Rt.Look.SATURATION),
                     row(scalar("temperature", CausticaConfig.Rt.Look.TEMPERATURE, -1f, 1f), CausticaConfig.Rt.Look.TEMPERATURE),
@@ -342,6 +348,14 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(-50, 50),
             Math.clamp(Math.round(setting.value() * 10.0f), -50, 50),
             tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<Integer> sunShape() {
+        return new OptionInstance<>("caustica.enhanced.sunShape", OptionInstance.cachedConstantTooltip(
+            Component.translatable("caustica.enhanced.sunShape.tooltip")),
+            (caption, value) -> Component.translatable("caustica.enhanced.sunShape." + value),
+            new OptionInstance.Enum<>(List.of(0, 1), Codec.INT),
+            Math.clamp(CausticaConfig.Rt.Look.SUN_SHAPE.value(), 0, 1), CausticaConfig.Rt.Look.SUN_SHAPE::set);
     }
 
     private static OptionInstance<Integer> lightSampling() {

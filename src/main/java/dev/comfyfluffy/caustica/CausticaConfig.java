@@ -828,6 +828,12 @@ public final class CausticaConfig {
             public static final FloatSetting DETAIL_SHARPEN=clampedFloat("caustica.rt.look.detailSharpen","look.detail-sharpen",1f,0f,3f);
             /** ITRP SUNLIGHT_RIMS strength: sun rim light on silhouettes facing away from the sun; 0 disables. */
             public static final FloatSetting SUN_RIMS=clampedFloat("caustica.rt.look.sunRims","look.sun-rims",1f,0f,3f);
+            public static final FloatSetting SUN_DISC_SIZE=clampedFloat("caustica.rt.look.sunDiscSize","look.sun-disc-size",1f,.2f,3f);
+            public static final FloatSetting NIGHT_BRIGHTNESS=clampedFloat("caustica.rt.look.nightBrightness","look.night-brightness",.6f,.1f,2f);
+            public static final FloatSetting SUN_GLOW=clampedFloat("caustica.rt.look.sunGlow","look.sun-glow",1f,0f,3f);
+            public static final BooleanSetting NEBULA=bool("caustica.rt.look.nebula","look.nebula",true);
+            public static final BooleanSetting CLOUD_SHADOW=bool("caustica.rt.look.cloudShadow","look.cloud-shadow",true);
+            public static final IntSetting SUN_SHAPE=clampedInt("caustica.rt.look.sunShape","look.sun-shape",0,0,1);
             public static final FloatSetting TORCH_KELVIN=clampedFloat("caustica.rt.look.torchKelvin","look.torch-kelvin",3000f,1000f,12000f);
             /**
              * View transform: false keeps the official AgX display mapping, true switches the display pass to

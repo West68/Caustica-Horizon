@@ -1109,7 +1109,10 @@ public final class RtComposite {
                     new Float4(CausticaConfig.Rt.Visuals.SPECULAR.value(),CausticaConfig.Rt.Visuals.NORMAL.value(),CausticaConfig.Rt.Visuals.PORTAL.value(),CausticaConfig.Rt.Visuals.RELIEF_SHADOW.value()),
                     new Float4(CausticaConfig.Rt.Visuals.END_CYCLE.value(),CausticaConfig.Rt.Visuals.NETHER_BRIGHTNESS.value(),CausticaConfig.Rt.Visuals.PUDDLE.value(),CausticaConfig.Rt.Visuals.RIPPLES.value()),
                     new Float4(CausticaConfig.Rt.Visuals.TORCH_BRIGHTNESS.value(),
-                            CausticaConfig.Rt.Look.ITRP.value() && dimension==0 ? CausticaConfig.Rt.Look.SUN_RIMS.value() : 0f,0,0),
+                            CausticaConfig.Rt.Look.ITRP.value() && dimension==0 ? CausticaConfig.Rt.Look.SUN_RIMS.value() : 0f,
+                            CausticaConfig.Rt.Look.SUN_DISC_SIZE.value() * (CausticaConfig.Rt.Look.SUN_SHAPE.value() == 1 ? -1f : 1f),
+                            CausticaConfig.Rt.Look.SUN_GLOW.value() + 4f * Math.round(CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS.value() * 100f)
+                                    + 4000f * ((CausticaConfig.Rt.Look.NEBULA.value() ? 0 : 1) + (CausticaConfig.Rt.Look.CLOUD_SHADOW.value() ? 0 : 2))), // see lookSwitches
                     torchGuideAddress,
                     new Float4(torchGuidance.originX() - terrain.blockX, torchGuidance.originY() - terrain.blockY,
                             torchGuidance.originZ() - terrain.blockZ, TorchGuidanceGrid.CELL_SIZE),
@@ -1175,6 +1178,7 @@ public final class RtComposite {
                     terrain.lightLocalAliasBufferAddress(), terrain.lightGridCellBufferAddress(),
                     terrain.lightGridSpanBufferAddress(),
                     (int) frameCounter, debugView).write(pushConstants);
+            EnhancedGpuTimings.mark(cmd,0,frameCounter);
             EnhancedGpuTimings.mark(cmd,1,frameCounter);
             if (skyLutOn) {
                 // Build this frame's sky LUT (one exact miss per texel) before any pass samples it.
@@ -1421,6 +1425,7 @@ public final class RtComposite {
             float rain=mc.level==null?0f:mc.level.getRainLevel(partial);
             float[] reference=ItrpDirectLight.evaluate(ly,rain,moon);
             rr=reference[0];rg=reference[1];rb=reference[2];
+            if(moon) { float night=CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS.value(); rr*=night;rg*=night;rb*=night; }
             lightRadius=moon?CausticaConfig.Rt.Composite.MOON_ANGULAR_RADIUS.value():CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.value();
         }
         CelestialUv uv = celestialUv(moonPhase);

@@ -158,6 +158,11 @@ public static const uint PAYLOAD_HAS_RELIEF = 0x10000000u;
 public static const uint PAYLOAD_RELIEF_QUERY = 0x20000000u;
 // Static glass may supply RR guides from its actual optical continuation, rather than the front pane.
 public static const uint PAYLOAD_STATIC_GLASS = 0x40000000u;
+// torchControl.w packs, low to high: sun glow (below 4), night brightness * 4 in hundredths (below 4000), switches * 4000.
+public static const uint LOOK_SWITCH_NO_NEBULA = 1u;
+public static const uint LOOK_SWITCH_NO_CLOUD_SHADOW = 2u;
+public uint lookSwitches(float packed) { return uint(floor(packed / 4000.0)); }
+public float lookGlowNight(float packed) { return packed - 4000.0 * floor(packed / 4000.0); }
 // Hit output in payload.rayCone for a Distant Horizons LOD surface (never a valid packed cone or relief depth).
 public static const uint DH_HIT_MARK = 0xFFFFD4D4u;
 

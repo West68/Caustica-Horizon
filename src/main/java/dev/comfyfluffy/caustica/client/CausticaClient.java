@@ -23,6 +23,19 @@ public final class CausticaClient implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
 		BetterPlayerModelCompat.init();
+		// Same default as Iris' shader toggle.
+		net.minecraft.client.KeyMapping toggleKey = net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper.registerKeyMapping(
+				new net.minecraft.client.KeyMapping("caustica.enhanced.key.toggle", com.mojang.blaze3d.platform.InputConstants.Type.KEYSYM,
+						org.lwjgl.glfw.GLFW.GLFW_KEY_K, net.minecraft.client.KeyMapping.Category.MISC));
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			while (toggleKey.consumeClick()) {
+				boolean enabled = !dev.comfyfluffy.caustica.CausticaConfig.Rt.ENABLED.value();
+				dev.comfyfluffy.caustica.CausticaConfig.Rt.ENABLED.set(enabled);
+				dev.comfyfluffy.caustica.CausticaConfig.save();
+				if (client.player != null) client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable(
+						enabled ? "caustica.enhanced.key.toggle.on" : "caustica.enhanced.key.toggle.off"));
+			}
+		});
 		// Developer tools (performance survey, probes, showcase filming) are not shipped in a release jar.
 		boolean devTools = !dev.comfyfluffy.caustica.CausticaBuild.RELEASE;
 		if (devTools) PerfSweep.init();

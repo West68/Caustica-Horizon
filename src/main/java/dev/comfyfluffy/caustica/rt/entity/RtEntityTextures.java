@@ -41,7 +41,8 @@ import java.util.WeakHashMap;
 public final class RtEntityTextures {
     /** Bindless array capacity (slot 0 reserved as a fallback texture). {@code -Dcaustica.rt.maxEntityTextures}. */
     public static int maxTextures() {
-        return CausticaConfig.Rt.EntityTextures.MAX_TEXTURES.value();
+        // Older configs stored 256, which a server with custom skins and heads runs through.
+        return Math.max(CausticaConfig.Rt.EntityTextures.MAX_TEXTURES.value(), 4096);
     }
 
     /** Enable pack-compiled entity materials; disabled entities use the canonical neutral header. */
@@ -85,6 +86,7 @@ public final class RtEntityTextures {
     // Descriptor array capacity of the currently alive world pipeline. A higher config value applies after
     // reset/recreate; a lower value stops allocating new slots immediately without invalidating old ones.
     private int capacity = maxTextures();
+    private boolean exhaustionLogged;
     private int nextSlot = 1;
     private boolean loggedFailure;
     private boolean loggedMaterialFailure;
@@ -110,7 +112,21 @@ public final class RtEntityTextures {
         if (renderType == null) {
             return 0;
         }
-        return slotForView(resolveView(renderType));
+        // Slot 0 is the block atlas: entity UVs on it show as a scramble of unrelated block textures (servers with
+        // many skins, heads and pack textures filled the array). An unresolved or unplaceable texture draws plain.
+        long view = resolveView(renderType);
+        if (view == 0L) {
+            return whiteSlot();
+        }
+        int slot = slotForView(view);
+        if (slot == 0 && !viewSlotCache.containsKey(view)) {
+            if (!exhaustionLogged) {
+                exhaustionLogged = true;
+                CausticaMod.LOGGER.warn("Entity texture array is full ({} slots)", slotLimit());
+            }
+            return whiteSlot();
+        }
+        return slot;
     }
 
     /** Canonical material ID for a full entity texture, or the neutral runtime-texture fallback. */
