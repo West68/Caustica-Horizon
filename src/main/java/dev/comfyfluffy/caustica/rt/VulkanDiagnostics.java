@@ -152,6 +152,7 @@ public final class VulkanDiagnostics {
     /** Add device-fault only when both the extension and its required feature bit are supported. */
     public static void addDeviceFaultExtension(Collection<String> extensions, VulkanPhysicalDevice physicalDevice) {
         logStartup(physicalDevice);
+        if (CausticaConfig.Rt.Diagnostics.HEAVY_CRASH_DIAGNOSTICS.value()) AftermathCapture.initialize();
         FaultSupport faultSupport = physicalDevice.hasDeviceExtension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)
                 ? queryDeviceFaultSupport(physicalDevice) : new FaultSupport(false, false);
         deviceFaultRequested = faultSupport.fault();
@@ -301,6 +302,7 @@ public final class VulkanDiagnostics {
             return;
         }
         CausticaMod.LOGGER.error("Vulkan device lost while {}", operation);
+        AftermathCapture.awaitCrashDump();
         logRuntimeSnapshot();
         if (!deviceFaultEnabled || device == null || device.getCapabilities().vkGetDeviceFaultInfoEXT == 0L) {
             CausticaMod.LOGGER.error("VK_EXT_device_fault is unavailable; no driver fault details can be queried");
@@ -377,6 +379,23 @@ public final class VulkanDiagnostics {
             if (vendorBinary != null) {
                 MemoryUtil.memFree(vendorBinary);
             }
+        }
+    }
+
+    /** Transition-only snapshot. Values are allocator estimates, not measured resident/process VRAM. */
+    public static void logResizeMemory(RtContext context,String phase) {
+        if(context==null || memoryHeapCount<=0)return;
+        try(MemoryStack stack=MemoryStack.stackPush()) {
+            VmaBudget.Buffer budgets=VmaBudget.calloc(memoryHeapCount,stack);
+            Vma.vmaGetHeapBudgets(context.vma(),budgets);
+            for(int i=0;i<memoryHeapCount;i++) {
+                var b=budgets.get(i);
+                CausticaMod.LOGGER.info("[CAUSTICA-MEM] {} RT allocator heap[{}]: allocations={}, reserved={}, estimatedUsage={}, estimatedBudget={}",
+                        phase,i,formatBytes(b.statistics().allocationBytes()),formatBytes(b.statistics().blockBytes()),
+                        formatBytes(b.usage()),formatBytes(b.budget()));
+            }
+        } catch(Throwable diagnosticFailure) {
+            CausticaMod.LOGGER.debug("Resize memory snapshot unavailable",diagnosticFailure);
         }
     }
 

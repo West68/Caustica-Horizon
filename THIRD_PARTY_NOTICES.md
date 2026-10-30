@@ -30,3 +30,26 @@ Bundled NVIDIA SDK runtime libraries may include files matching:
 
 Caustica's `ngxshim` native library is project-owned glue code and follows
 Caustica's project license unless otherwise noted.
+
+## Optional Streamline backend
+
+The opt-in `withStreamline` build profile includes NVIDIA Streamline SDK 2.14.1
+runtime components in `caustica/streamline-natives/windows-x64/`, independently
+of the original NGX runtime bundle. The SDK MIT license and third-party notices
+are included in `META-INF/streamline/`; the DLSS and Reflex notices accompany
+their DLLs. NVIDIA component terms remain separate from this project's license.
+
+Project-owned Streamline bridge/controller code was adapted from the local
+IterationRTX reference renderer. SDK source: https://github.com/NVIDIA-RTX/Streamline/tree/v2.14.1
+
+The community RTXMFG DLL is **not redistributed**. The optional bootstrap loads
+only the user-installed, explicitly enabled v1.4.2 asset from the current game
+instance's `native-experiments` directory after checking its pinned SHA-256.
+Upstream: https://github.com/dashdogy/RTX40MFG-Unlock/tree/v1.4.2
+
+## Shader pack noise textures (release jars only)
+
+Caustica Enhanced release jars include two 64×64 noise textures used for clouds and the End sky:
+`assets/caustica/external/seus_blue_noise.png` (from SEUS PTGI) and `assets/caustica/external/itrp_noise.png`
+(from ITRP). They are not part of this source repository, are not covered by the LGPL, and remain the property of
+their original authors. Please support the original shader packs.

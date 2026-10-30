@@ -11,6 +11,8 @@ import org.lwjgl.vulkan.VkDevice;
 public final class RtImage {
     public final long image;
     public final long allocation;
+    public final long memory;
+    public final int format, usage;
     public final long view;
     public final int width;
     public final int height;
@@ -20,6 +22,10 @@ public final class RtImage {
     private boolean destroyed;
 
     public RtImage(long vma, VkDevice vk, long image, long allocation, long view, int width, int height) {
+        this(vma,vk,image,allocation,0L,view,width,height,0,0);
+    }
+    public RtImage(long vma,VkDevice vk,long image,long allocation,long memory,long view,int width,int height,int format,int usage) {
+        this.memory=memory;this.format=format;this.usage=usage;
         this.vma = vma;
         this.vk = vk;
         this.image = image;

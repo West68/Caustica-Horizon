@@ -122,12 +122,15 @@ public final class RtContext {
             // BDA-enabled allocator (vanilla's createVma omits the flag).
             VmaVulkanFunctions fns = VmaVulkanFunctions.calloc(stack).set(phys.getInstance(), vk);
             VmaAllocatorCreateInfo aci = VmaAllocatorCreateInfo.calloc(stack)
-                    .flags(Vma.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT)
+                    .flags(Vma.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT | RtMemoryResidency.vmaAllocatorFlags())
                     .instance(phys.getInstance())
                     .vulkanApiVersion(VK12.VK_API_VERSION_1_2)
                     .device(vk)
                     .physicalDevice(phys)
-                    .pVulkanFunctions(fns);
+                    .pVulkanFunctions(fns)
+                    // Smaller blocks than VMA's 256 MiB default: terrain/DH BLAS churn otherwise leaves hundreds of
+                    // MiB of reserved-but-unused VRAM inside half-empty blocks (measured ~310 MiB on an 8 GB GPU).
+                    .preferredLargeHeapBlockSize(Long.getLong("caustica.vma.blockSizeMiB", 32L) << 20);
             PointerBuffer pVma = stack.mallocPointer(1);
             check(Vma.vmaCreateAllocator(aci, pVma), "vmaCreateAllocator(RT)");
 
@@ -161,6 +164,12 @@ public final class RtContext {
                     rtProps.shaderGroupHandleAlignment(), rtProps.shaderGroupBaseAlignment(),
                     Integer.toUnsignedLong(rtProps.maxShaderGroupStride()),
                     asProps.minAccelerationStructureScratchOffsetAlignment(), combinedImageSamplerLimit);
+
+            // Only buffers actually used by both families need sharing/ownership handling.
+            // Queue-local scratch and staging may remain EXCLUSIVE, regardless of host allocation thread.
+            CausticaMod.LOGGER.info("RT queues: graphicsFamily={}, computeFamily={}, crossFamily={}",
+                    device.graphicsQueue().queueFamilyIndex(), RtDeviceBringup.computeQueueFamilyIndex(),
+                    device.graphicsQueue().queueFamilyIndex() != RtDeviceBringup.computeQueueFamilyIndex());
 
             return new RtContext(device, pVma.get(0), rtProps.shaderGroupHandleSize(), rtProps.shaderGroupBaseAlignment(),
                     rtProps.shaderGroupHandleAlignment(), rtProps.maxShaderGroupStride(),
@@ -261,12 +270,6 @@ public final class RtContext {
                 Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, 0L);
     }
 
-    /** Create a transient, persistently mapped buffer for synchronous GPU-to-CPU transfers. */
-    public RtBuffer createReadbackBuffer(long size, String label) {
-        return createBuffer(size, VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, label, false,
-                Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT, 0L);
-    }
-
     private RtBuffer createBuffer(long size, int usage, boolean hostVisible, String label, boolean asyncShared,
                                   int hostAccessFlags, long addressAlignment) {
         if (addressAlignment < 0L
@@ -289,6 +292,8 @@ public final class RtContext {
                     : Vma.VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
             if (hostVisible) {
                 aci.flags(hostAccessFlags | Vma.VMA_ALLOCATION_CREATE_MAPPED_BIT);
+            } else {
+                aci.priority(RtMemoryResidency.RT_PRIORITY); // ignored unless VK_EXT_memory_priority is enabled
             }
             LongBuffer pBuf = stack.mallocLong(1);
             PointerBuffer pAlloc = stack.mallocPointer(1);
@@ -300,6 +305,7 @@ public final class RtContext {
             handle = pBuf.get(0);
             allocation = pAlloc.get(0);
             RtDebugLabels.nameBuffer(this, handle, label);
+            VramInventory.name(vma, allocation, label);
             VkBufferDeviceAddressInfo bdai = VkBufferDeviceAddressInfo.calloc(stack).sType$Default().buffer(handle);
             long address = VK12.vkGetBufferDeviceAddress(vk, bdai);
             if (address == 0L) {
@@ -345,6 +351,19 @@ public final class RtContext {
      * see {@code VUID-VkRenderingInfo-colorAttachmentCount-06087}).
      */
     public RtImage createStorageImage(int width, int height, int format, String label, int extraUsage) {
+        return createStorageImage(width, height, format, label, extraUsage, null);
+    }
+
+    /** Record first-use layout transition on the consuming graphics command buffer, without a host wait.
+     * The caller must enqueue this command buffer before any other command uses the returned image. */
+    public RtImage createStorageImageDeferred(int width, int height, int format, String label,
+            VkCommandBuffer initializationCommands) {
+        java.util.Objects.requireNonNull(initializationCommands);
+        return createStorageImage(width, height, format, label, 0, initializationCommands);
+    }
+
+    private RtImage createStorageImage(int width, int height, int format, String label, int extraUsage,
+            VkCommandBuffer initializationCommands) {
         int usage = VK10.VK_IMAGE_USAGE_STORAGE_BIT | VK10.VK_IMAGE_USAGE_SAMPLED_BIT
                 | VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT | extraUsage;
         requireStorageImageSupport(width, height, format, usage, label);
@@ -360,24 +379,32 @@ public final class RtContext {
                     .usage(usage)
                     .sharingMode(VK10.VK_SHARING_MODE_EXCLUSIVE).initialLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED);
             ici.extent().set(width, height, 1);
-            VmaAllocationCreateInfo iaci = VmaAllocationCreateInfo.calloc(stack).usage(Vma.VMA_MEMORY_USAGE_AUTO);
+            VmaAllocationCreateInfo iaci = VmaAllocationCreateInfo.calloc(stack).usage(Vma.VMA_MEMORY_USAGE_AUTO)
+                    .flags(dev.comfyfluffy.caustica.rt.accel.RtAllocationPolicy.storageImageFlags(width,height))
+                    .priority(RtMemoryResidency.RT_PRIORITY);
             LongBuffer pImage = stack.mallocLong(1);
             PointerBuffer pAlloc = stack.mallocPointer(1);
             check(Vma.vmaCreateImage(vma, ici, iaci, pImage, pAlloc, null), "vmaCreateImage");
             image = pImage.get(0);
             allocation = pAlloc.get(0);
             RtDebugLabels.nameImage(this, image, label);
+            VramInventory.name(vma, allocation, label);
 
             VkImageViewCreateInfo vci = VkImageViewCreateInfo.calloc(stack).sType$Default()
                     .image(image).viewType(VK10.VK_IMAGE_VIEW_TYPE_2D).format(format);
             vci.subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
             LongBuffer pView = stack.mallocLong(1);
-            check(VK10.vkCreateImageView(vk, vci, null, pView), "vkCreateImageView");
+            int viewResult=VK10.vkCreateImageView(vk, vci, null, pView);
+            if(viewResult!=VK10.VK_SUCCESS) {
+                // No command references this new image yet. Do not leak it on view-allocation failure.
+                Vma.vmaDestroyImage(vma,image,allocation);
+                check(viewResult,"vkCreateImageView");
+            }
             view = pView.get(0);
             RtDebugLabels.nameImageView(this, view, label + " view");
         }
         long imageFinal = image;
-        submitSync(cmd -> {
+        Consumer<VkCommandBuffer> initialize = cmd -> {
             try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(this, cmd, "init " + label)) {
                 VkImageMemoryBarrier.Buffer b = VkImageMemoryBarrier.calloc(1, stack);
                 b.get(0).sType$Default().oldLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK10.VK_IMAGE_LAYOUT_GENERAL)
@@ -389,8 +416,18 @@ public final class RtContext {
                 VK10.vkCmdPipelineBarrier(cmd, VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                         0, null, null, b);
             }
-        });
-        return new RtImage(vma, vk, image, allocation, view, width, height);
+        };
+        if (initializationCommands == null) submitSync(initialize);
+        else initialize.accept(initializationCommands);
+        return describedImage(image,allocation,view,width,height,format,usage);
+    }
+
+    private RtImage describedImage(long image,long allocation,long view,int width,int height,int format,int usage) {
+        try(MemoryStack stack=MemoryStack.stackPush()) {
+            var info=org.lwjgl.util.vma.VmaAllocationInfo.calloc(stack);
+            Vma.vmaGetAllocationInfo(vma,allocation,info);
+            return new RtImage(vma,vk,image,allocation,info.deviceMemory(),view,width,height,format,usage);
+        }
     }
 
     private void requireStorageImageSupport(int width, int height, int format, int usage, String label) {
@@ -448,13 +485,15 @@ public final class RtContext {
                     .usage(VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK10.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT)
                     .sharingMode(VK10.VK_SHARING_MODE_EXCLUSIVE).initialLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED);
             ici.extent().set(width, height, 1);
-            VmaAllocationCreateInfo iaci = VmaAllocationCreateInfo.calloc(stack).usage(Vma.VMA_MEMORY_USAGE_AUTO);
+            VmaAllocationCreateInfo iaci = VmaAllocationCreateInfo.calloc(stack).usage(Vma.VMA_MEMORY_USAGE_AUTO)
+                    .priority(RtMemoryResidency.RT_PRIORITY);
             LongBuffer pImage = stack.mallocLong(1);
             PointerBuffer pAlloc = stack.mallocPointer(1);
             check(Vma.vmaCreateImage(vma, ici, iaci, pImage, pAlloc, null), "vmaCreateImage");
             image = pImage.get(0);
             allocation = pAlloc.get(0);
             RtDebugLabels.nameImage(this, image, label);
+            VramInventory.name(vma, allocation, label);
 
             VkImageViewCreateInfo vci = VkImageViewCreateInfo.calloc(stack).sType$Default()
                     .image(image).viewType(VK10.VK_IMAGE_VIEW_TYPE_2D).format(format);
@@ -477,7 +516,7 @@ public final class RtContext {
                         0, null, null, b);
             }
         });
-        return new RtImage(vma, vk, image, allocation, view, width, height);
+        return describedImage(image,allocation,view,width,height,format,VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK10.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT);
     }
 
     /**
@@ -519,7 +558,7 @@ public final class RtContext {
     public void waitIdle() {
         // vkDeviceWaitIdle is externally synchronized against every queue owned by the device.
         synchronized (deviceQueueHostLock) {
-            check(VK10.vkDeviceWaitIdle(vk), "vkDeviceWaitIdle");
+            check(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()?dev.comfyfluffy.caustica.streamline.StreamlineRuntime.vkDeviceWaitIdle(vk,"RT resource retirement",false):VK10.vkDeviceWaitIdle(vk), "vkDeviceWaitIdle");
         }
     }
 

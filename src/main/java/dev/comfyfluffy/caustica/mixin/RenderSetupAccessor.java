@@ -22,6 +22,9 @@ public interface RenderSetupAccessor {
     @Accessor("textures")
     Map<String, ?> caustica$textures();
 
+    @Accessor("textureTransform")
+    net.minecraft.client.renderer.rendertype.TextureTransform caustica$textureTransform();
+
     @Accessor("pipeline")
     RenderPipeline caustica$pipeline();
 }

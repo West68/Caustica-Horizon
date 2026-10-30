@@ -15,7 +15,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * Mutable GPU section-table state owned by the render thread. This class centralizes the table buffer, slot
+ * Mutable GPU section-table state owned by the render thread. M0 centralizes the table buffer, slot
  * registry, and published static-instance list here while {@link RtTerrain} retains publication order.
  */
 final class RtSectionTable {
@@ -114,7 +114,7 @@ final class RtSectionTable {
             if (generation.capacity >= minCapacity) {
                 return generation;
             }
-            ctx.gpuExecutor().retireUnpublished(generation.buffer::destroy);
+            ctx.gpuExecutor().enqueueDestroyUnpublished(generation.buffer::destroy);
         }
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         RtBuffer buffer = ctx.createBuffer((long) minCapacity * SECTION_ENTRY_BYTES, storage, true,
@@ -163,8 +163,8 @@ final class RtSectionTable {
     void write(SectionGeom geom) {
         long offset = (long) geom.slot * SECTION_ENTRY_BYTES;
         long base = buffer.mapped + offset;
-        MemoryUtil.memPutLong(base, geom.material.deviceAddress);
-        MemoryUtil.memPutLong(base + 8, geom.uvs.deviceAddress);
+        MemoryUtil.memPutLong(base, geom.material.deviceAddress | (geom.indexedMaterials ? 1L : 0L));
+        MemoryUtil.memPutLong(base + 8, geom.uvs.deviceAddress | (geom.indexedUvs ? 1L : 0L));
         MemoryUtil.memPutInt(base + 16, geom.triBase[0]);
         MemoryUtil.memPutInt(base + 20, geom.triBase[1]);
         MemoryUtil.memPutInt(base + 24, geom.triBase[2]);
@@ -198,27 +198,30 @@ final class RtSectionTable {
         final long key;
         final RtBuffer uvs;
         final RtBuffer material;
+        final boolean indexedMaterials;
+        final boolean indexedUvs;
         final RtAccel blas;
         final int[] triBase;
+        final float[] torchCenters;
         final int sx;
         final int sy;
         final int sz;
-        /** Packed section-local RIS light records (possibly empty); flattened at publish. */
-        final float[] lights;
         int slot = -1;
         int instanceIndex = -1;
 
         SectionGeom(long key, RtBuffer uvs, RtBuffer material,
-                    RtAccel blas, int[] triBase, int sx, int sy, int sz, float[] lights) {
+                    RtAccel blas, int[] triBase, float[] torchCenters, int sx, int sy, int sz, boolean indexedMaterials, boolean indexedUvs) {
             this.key = key;
             this.uvs = uvs;
             this.material = material;
+            this.indexedMaterials = indexedMaterials;
+            this.indexedUvs = indexedUvs;
             this.blas = blas;
             this.triBase = triBase;
+            this.torchCenters = torchCenters;
             this.sx = sx;
             this.sy = sy;
             this.sz = sz;
-            this.lights = lights;
         }
 
         void destroy() {

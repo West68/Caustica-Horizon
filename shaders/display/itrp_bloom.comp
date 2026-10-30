@@ -1,0 +1,46 @@
+#version 460
+layout(local_size_x=8,local_size_y=8,local_size_z=1) in;
+layout(binding=0) uniform sampler2D highImage;
+layout(binding=1) uniform sampler2D lowImage;
+layout(binding=2,rgba16f) uniform writeonly image2D outputImage;
+layout(binding=3,r32f) uniform readonly image2D exposureImage; // 1x1 linear exposure scale
+layout(push_constant) uniform Filter { float lowMix; int upsample; int clampHighlights; } pc;
+
+vec3 finiteRadiance(vec3 value) {
+    return vec3(isnan(value.r)||isinf(value.r)?0.0:clamp(value.r,0.0,65504.0),
+                isnan(value.g)||isinf(value.g)?0.0:clamp(value.g,0.0,65504.0),
+                isnan(value.b)||isinf(value.b)?0.0:clamp(value.b,0.0,65504.0));
+}
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy),size=imageSize(outputImage);
+    if(any(greaterThanEqual(p,size)))return;
+    vec2 uv=(vec2(p)+.5)/vec2(size);
+    vec3 color;
+    if(pc.upsample==0) {
+        // Normalized 4-tap low pass, evaluated in scene-linear HDR, never thresholded/clipped to SDR.
+        vec2 d=.5/vec2(textureSize(highImage,0));
+        color=finiteRadiance(textureLod(highImage,uv+vec2(-d.x,-d.y),0).rgb)*.25
+             +finiteRadiance(textureLod(highImage,uv+vec2(d.x,-d.y),0).rgb)*.25
+             +finiteRadiance(textureLod(highImage,uv+vec2(-d.x,d.y),0).rgb)*.25
+             +finiteRadiance(textureLod(highImage,uv+d,0).rgb)*.25;
+        if(pc.clampHighlights!=0) {
+            // Reference BLOOM_CLAMP_STRENGTH=1 on the first half-resolution level: a soft knee that limits
+            // a pixel's bloom contribution to ~21*exposure^0.85, so the sun disc and hot speculars do not
+            // flood the wide levels. Values below half the limit pass unchanged.
+            float limit=pow(max(imageLoad(exposureImage,ivec2(0)).r,0.0),0.85)*21.0+5e-5;
+            float l=length(color)+1e-13;
+            vec3 dir=color/l;
+            l=min(l/limit,1.5);
+            if(l>0.5){l-=1.5;l=1.0-l*l*0.5;}
+            color=dir*l*limit;
+        }
+    } else {
+        // 3x3 separable tent, DC gain exactly 1. Distinct output avoids sampled/storage feedback.
+        vec2 d=1.0/vec2(textureSize(lowImage,0));
+        vec3 low=vec3(0);
+        for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)
+            low+=textureLod(lowImage,uv+vec2(x,y)*d,0).rgb*float((x==0?2:1)*(y==0?2:1))*.0625;
+        color=mix(textureLod(highImage,uv,0).rgb,low,pc.lowMix);
+    }
+    imageStore(outputImage,p,vec4(finiteRadiance(color),1));
+}

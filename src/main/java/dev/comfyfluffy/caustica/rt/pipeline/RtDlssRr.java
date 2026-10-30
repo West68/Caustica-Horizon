@@ -23,11 +23,12 @@ import java.lang.foreign.ValueLayout;
  */
 public final class RtDlssRr {
     public static final RtDlssRr INSTANCE = new RtDlssRr();
+    public static boolean srOnly() { return CausticaConfig.Rt.DlssRr.SR_ONLY.value(); }
     public static boolean enabled() {
         return CausticaConfig.Rt.DlssRr.ENABLED.value();
     }
 
-    // DLSS feature flags. IsHDR (bit 0): color is scene-linear ACEScg HDR (rgba16f) — RR requires it ("HDR Color
+    // DLSS feature flags. IsHDR (bit 0): color is linear HDR (rgba16f) — RR requires it ("HDR Color
     // required"). MVLowRes (bit 1): motion vectors are at render/input resolution, not display — RR
     // requires it ("Low resolution Motion Vectors required"). DepthInverted (bit 3): the depth guide is
     // HW reversed-Z (near=1, far=0). AutoExposure (bit 6): in HDR mode DLSS needs the scene exposure
@@ -41,7 +42,10 @@ public final class RtDlssRr {
             | FEATURE_FLAG_DEPTH_INVERTED | FEATURE_FLAG_AUTO_EXPOSURE;
     // 0 = let the RR DLL pick its per-mode default preset.
     private static int renderPreset() {
-        return CausticaConfig.Rt.DlssRr.PRESET.value();
+        int requested = CausticaConfig.Rt.DlssRr.PRESET.value();
+        // The bundled legacy NGX runtime is 310.7.0; do not advertise the new F
+        // request as effective on this fallback. Streamline has its own D/E/F mapping.
+        return requested == 4 || requested == 5 ? requested : 0;
     }
 
     public static int quality() {
@@ -61,13 +65,42 @@ public final class RtDlssRr {
     private int featureQuality = Integer.MIN_VALUE;
     private int featurePreset = Integer.MIN_VALUE;
 
+    private final ReconstructionRequestGate requestGate = new ReconstructionRequestGate();
+    private void observeRequest(int displayWidth, int displayHeight) {
+        if (requestGate.changed(displayWidth, displayHeight, quality(), srOnly() ? 100 + CausticaConfig.Rt.DlssRr.SR_PRESET.value() : CausticaConfig.Rt.DlssRr.PRESET.value())) {
+            failed = false;
+            resetHistory = true;
+            RtStreamlineRr.INSTANCE.resetFailureLatch();
+            RtStreamlineSr.INSTANCE.resetFailureLatch();
+        }
+    }
+
     private boolean resetHistory;
     private long lastFrameNanos;
 
     private RtDlssRr() {
     }
 
+    /** Compact size summary for the perf log; never touches the GPU or the NGX runtime. */
+    public String featureSizeSummary() {
+        if (feature == null) {
+            return "none";
+        }
+        return featureRenderWidth + "x" + featureRenderHeight + "->" + featureDisplayWidth + "x" + featureDisplayHeight;
+    }
+
+    /** Reset temporal accumulation across a world/dimension transition without recreating the feature. */
+    public void requestHistoryReset() {
+        if (dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()) {
+            RtStreamlineRr.INSTANCE.requestHistoryReset();
+            RtStreamlineSr.INSTANCE.requestHistoryReset();
+        } else {
+            resetHistory = true;
+        }
+    }
+
     public boolean isReady() {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())return RtStreamlineRr.INSTANCE.isReady();
         return initialized && !failed && !isNull(feature);
     }
 
@@ -133,6 +166,9 @@ public final class RtDlssRr {
      * silently falling back, so a broken render/display sync is never masked.
      */
     public int[] queryOptimalRenderSize(int displayWidth, int displayHeight) {
+        observeRequest(displayWidth, displayHeight);
+        if (srOnly()) return RtStreamlineSr.INSTANCE.queryOptimalRenderSize(displayWidth, displayHeight);
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())return RtStreamlineRr.INSTANCE.queryOptimalRenderSize(displayWidth,displayHeight);
         if (!enabled() || failed) {
             return null;
         }
@@ -167,6 +203,9 @@ public final class RtDlssRr {
      * caller falls back to the non-RR path.
      */
     public boolean ensureFeature(long cmd, int renderWidth, int renderHeight, int displayWidth, int displayHeight) {
+        observeRequest(displayWidth, displayHeight);
+        if (srOnly()) return RtStreamlineSr.INSTANCE.ensureFeature(cmd,renderWidth,renderHeight,displayWidth,displayHeight);
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())return RtStreamlineRr.INSTANCE.ensureFeature(cmd,renderWidth,renderHeight,displayWidth,displayHeight);
         if (!enabled() || failed) {
             return false;
         }
@@ -232,10 +271,14 @@ public final class RtDlssRr {
      * teardown ({@code NgxRuntime.shutdown()} in {@code CausticaClient.shutdownRt}), so FG can keep using NGX.
      */
     public void destroy() {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()){RtStreamlineRr.INSTANCE.destroy();RtStreamlineSr.INSTANCE.destroy();return;}
         if (((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
             releaseFeature(device);
         }
         initialized = false;
+        failed = false;
+        resetHistory = true;
+        lastFrameNanos = 0L;
         lib = null;
     }
 

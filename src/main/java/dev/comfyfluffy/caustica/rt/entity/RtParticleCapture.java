@@ -27,6 +27,17 @@ public final class RtParticleCapture implements VertexConsumer {
     // One buffered vertex: the chained protocol calls addVertex first, then setUv/setColor/setLight for the
     // SAME vertex, so the vertex is only complete at the next addVertex (or flush()).
     private boolean pending;
+    // Billboards arrive as 4-vertex quads with one colour. Vanilla's ambient effect swirls (beacon effects)
+    // are drawn at ~15% alpha and are barely visible; stochastic alpha + denoising turned them into solid
+    // bright spirals around the camera. Drop near-transparent quads whole.
+    private int quadVertex;
+    private boolean skipQuad;
+    private boolean rainStyle,weatherStyle;
+    private double weatherCamX,weatherCamY,weatherCamZ,weatherTime;
+    public void weatherStyle(boolean enabled,double cx,double cy,double cz,double time) {
+        weatherStyle=enabled;weatherCamX=cx;weatherCamY=cy;weatherCamZ=cz;weatherTime=time;
+    }
+    public void rainStyle(boolean enabled) { rainStyle=enabled; }
     private float x, y, z, u, v;
     private int color = 0xFFFFFFFF;
     private int light = FULL_BRIGHT;
@@ -47,16 +58,28 @@ public final class RtParticleCapture implements VertexConsumer {
         if (!pending) {
             return;
         }
-        out.addVertex(x, y, z, color, u, v, 0, 0, 0f, 0f, 0f);
+        // ITRP weather writes dark neutral streaks; retain the original alpha/shape, not blue cubes.
+        // A small coverage, not a dark opaque wall. Snow and ordinary particles keep their colours.
+        int tint=rainStyle ? (Math.round((color>>>24)*.18f)<<24)|0xB0B4B8 : color;
+        if((quadVertex++&3)==0)skipQuad=!rainStyle && (color>>>24)<64;
+        if(skipQuad){pending=false;return;}
+        int before=out.prim.size();
+        out.addVertex(x, y, z, tint, u, v, 0, 0, 0f, 0f, 0f);
+        if(rainStyle && out.prim.size()>before) {
+            for(int p=before;p<out.prim.size();p+=12)
+                out.prim.set(p+9,Float.intBitsToFloat(Float.floatToRawIntBits(out.prim.getFloat(p+9))|32768));
+        }
         pending = false;
     }
 
     @Override
     public VertexConsumer addVertex(float vx, float vy, float vz) {
         flush(); // finalize the previous vertex (setUv/setColor follow addVertex in the chained protocol)
-        x = vx + ox;
+        // ITRP Weather_VS: camera-relative wind displacement and world-pinned angular disturbance.
+        double angle=(vx+weatherCamX)*3+(vy+weatherCamY)*.5+(vz+weatherCamZ)*3+weatherTime*.2;
+        x = vx + ox + (weatherStyle?(float)((.1+Math.sin(angle)*.05)*vy):0);
         y = vy + oy;
-        z = vz + oz;
+        z = vz + oz + (weatherStyle?(float)((.05+Math.cos(angle)*.05)*vy):0);
         u = 0f;
         v = 0f;
         color = 0xFFFFFFFF;

@@ -56,7 +56,21 @@ public final class RtEntityTextures {
     // texture transform makes RenderTypes.energySwirl() allocate a new RenderType each frame). A weak map
     // lets those dead identities be collected instead of accumulating; stable singletons (zombie.png, …)
     // stay cached and skip the costly RenderType.prepare().
-    private final Map<RenderType, Long> viewCache = new WeakHashMap<>();
+    // Cached as the view object, not just its handle: a mod may close a texture and register a new one under
+    // the same Identifier (Better Player Model reloading YSM models; the RenderType is memoized per id). A
+    // closed view's handle is a destroyed VkImageView — sampling it, or a new view that reuses the same handle
+    // value hitting the stale slot, crashed the driver with no report. Closed views are re-resolved.
+    private final Map<RenderType, GpuTextureView> viewCache = new WeakHashMap<>();
+    // Lazily uploaded textures (e.g. YSM models) have no view on first use: retry instead of caching 0 forever.
+    private final Map<RenderType, Long> unresolved = new WeakHashMap<>();
+    // When each cached view was last confirmed against the render type's live binding. A mod can register a
+    // different texture under the same id without closing the old one (Better Player Model swaps the model's
+    // texture in after first use on joining a world); a cached view would then keep the placeholder forever.
+    private final Map<RenderType, Long> confirmedAt = new WeakHashMap<>();
+    private static final long RECONFIRM_FRAMES = 120;
+    // Slots of closed views, reusable once every frame that could still sample them has retired.
+    private final java.util.ArrayDeque<long[]> retiredSlots = new java.util.ArrayDeque<>();
+    private static final long SLOT_REUSE_FRAMES = 8;
     private final Map<RenderType, Identifier> locationCache = new WeakHashMap<>();
     // Resolved image-view handle → bindless slot. The slot identifies a *texture*, not a RenderType, so
     // many render types that differ only by a texture transform we don't replicate (the swirl's scroll)
@@ -101,8 +115,25 @@ public final class RtEntityTextures {
 
     /** Canonical material ID for a full entity texture, or the neutral runtime-texture fallback. */
     public int materialIdFor(RenderType renderType, boolean stochasticAlpha) {
-        if (!entityPbr()) return RtMaterialRegistry.INSTANCE.entityFallbackId(stochasticAlpha);
-        return RtMaterialRegistry.INSTANCE.resolveEntityTexture(textureLocation(renderType), stochasticAlpha);
+        var texture=textureLocation(renderType);
+        int id=entityPbr() || dev.comfyfluffy.caustica.rt.material.PortalMaterials.flags(texture==null?null:texture.toString())!=0
+            ?RtMaterialRegistry.INSTANCE.resolveEntityTexture(textureLocation(renderType), stochasticAlpha)
+            :RtMaterialRegistry.INSTANCE.entityFallbackId(stochasticAlpha);
+        Object setup=((RenderTypeAccessor)renderType).caustica$state();
+        var pipeline=((RenderSetupAccessor)setup).caustica$pipeline();
+        String pass=pipeline.getLocation().toString();String name=texture==null?"":texture.toString();
+        boolean brightOnly=name.contains("/blaze")||name.contains("magmacube")||name.contains("magma_cube");
+        boolean additive=pass.contains("eyes")||pass.contains("energy_swirl")||pass.contains("glint");
+        boolean crystal=name.contains("end_crystal")&&!name.contains("beam");
+        // Verified against 26.2 renderer getBlockLightLevel overrides, not scene lightmap brightness.
+        boolean fullBright=name.contains("/allay/")||name.contains("/illager/vex")
+                ||name.contains("dragon_fireball")||name.contains("shulker/spark")||name.contains("experience_orb")
+                ||name.contains("end_crystal_beam")||pass.contains("beacon_beam")||pass.contains("lightning");
+        if(CausticaConfig.Rt.Visuals.VANILLA_ENTITY_EMISSION.value() && (crystal || fullBright || brightOnly || additive || pass.contains("emissive") || pass.contains("dragon_rays") || name.contains("dragon_exploding") || name.contains("glow_squid")))
+            id=RtMaterialRegistry.INSTANCE.withEntityEmission(id,brightOnly,additive,crystal);
+        else if(additive)id=RtMaterialRegistry.INSTANCE.withAdditiveEntityAlpha(id);
+        if(pass.contains("glint"))id=RtMaterialRegistry.INSTANCE.withSubtleGlint(id);
+        return id;
     }
 
     /**
@@ -115,8 +146,8 @@ public final class RtEntityTextures {
             return 0;
         }
         Integer cached = atlasSlotCache.get(atlasLocation);
-        if (cached != null) {
-            return cached;
+        if (cached != null && cached == 0) {
+            return 0; // block atlas
         }
         long view = 0L;
         try {
@@ -128,9 +159,10 @@ public final class RtEntityTextures {
                 CausticaMod.LOGGER.warn("RT atlas texture resolution failed for {}", atlasLocation, t);
             }
         }
-        int slot = slotForView(view);
-        atlasSlotCache.put(atlasLocation, slot);
-        return slot;
+        // Resolve the live view every call: an atlas that was not ready yet (first frames, mid resource
+        // reload) used to cache slot 0 forever, so particles sampled the BLOCK atlas with particle UVs
+        // (bright stray block-texture shapes at torches/campfires), and a reload left a dead view's slot.
+        return slotForView(view);
     }
 
     /**
@@ -158,6 +190,24 @@ public final class RtEntityTextures {
      * array is full. Deduping by handle is what bounds slot use: distinct render types backed by the same
      * texture share a slot instead of each consuming one.
      */
+    private final Map<String, Pending> externalSlots = new HashMap<>();
+
+    /** Stable named slots for optional renderer-owned views; caller drains old readers before replacement. */
+    public int externalSlot(String name,long view) {
+        if(view==0)return 0;
+        Pending previous=externalSlots.get(name);
+        if(previous!=null && previous.view()==view)return previous.slot();
+        int slot;
+        if(previous!=null)slot=previous.slot();
+        else {
+            // Dedicated tail slots do not consume the user's entity/material texture budget.
+            if(capacity<maxTextures()+2 || externalSlots.size()>=2)return 0;
+            slot=capacity-1-externalSlots.size();
+        }
+        Pending update=new Pending(slot,view);externalSlots.put(name,update);pending.add(update);
+        return slot;
+    }
+
     private int slotForView(long view) {
         if (view == 0L) {
             return 0;
@@ -166,10 +216,16 @@ public final class RtEntityTextures {
         if (cached != null) {
             return cached;
         }
-        if (nextSlot >= slotLimit()) {
+        int slot;
+        long[] retired = retiredSlots.peekFirst();
+        if (retired != null && dev.comfyfluffy.caustica.rt.RtComposite.frameCounter() - retired[1] >= SLOT_REUSE_FRAMES) {
+            retiredSlots.pollFirst();
+            slot = (int) retired[0];
+        } else if (nextSlot < slotLimit()) {
+            slot = nextSlot++;
+        } else {
             return 0;
         }
-        int slot = nextSlot++;
         viewSlotCache.put(view, slot);
         pending.add(new Pending(slot, view));
         return slot;
@@ -195,12 +251,19 @@ public final class RtEntityTextures {
     public void reset(int descriptorCapacity) {
         capacity = Math.max(1, descriptorCapacity);
         viewCache.clear();
+        unresolved.clear();
+        retiredSlots.clear();
         locationCache.clear();
         viewSlotCache.clear();
+        externalSlots.clear();
         atlasSlotCache.clear();
         atlasSlotCache.put(TextureAtlas.LOCATION_BLOCKS, 0); // block atlas = the slot-0 fallback
         pending.clear();
         nextSlot = 1;
+    }
+
+    public static int descriptorCapacity() {
+        return maxTextures()+(net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("distanthorizons")?2:0);
     }
 
     private int slotLimit() {
@@ -247,30 +310,33 @@ public final class RtEntityTextures {
         if (renderType == null) {
             return 0L;
         }
-        Long cached = viewCache.get(renderType);
+        GpuTextureView cached = viewCache.get(renderType);
         if (cached != null) {
-            return cached;
+            long frame = dev.comfyfluffy.caustica.rt.RtComposite.frameCounter();
+            Long confirmed = confirmedAt.get(renderType);
+            boolean fresh = confirmed != null && frame - confirmed < RECONFIRM_FRAMES;
+            GpuTextureView live = cached;
+            if (!fresh) {
+                try { live = liveView(renderType); } catch (Throwable ignored) { live = cached; }
+            }
+            if (!cached.isClosed() && !cached.texture().isClosed() && (live == null || live == cached)) {
+                if (!fresh) confirmedAt.put(renderType, frame);
+                return vkImageView(cached);
+            }
+            viewCache.remove(renderType);
+            // The handle may be reused by the replacement view; never let it find the stale slot.
+            Integer stale = viewSlotCache.remove(vkImageView(cached));
+            if (stale != null) retiredSlots.addLast(new long[]{stale, dev.comfyfluffy.caustica.rt.RtComposite.frameCounter()});
+        } else {
+            Long failedAt = unresolved.get(renderType);
+            if (failedAt != null && dev.comfyfluffy.caustica.rt.RtComposite.frameCounter() - failedAt < 30) return 0L;
         }
         long handle = 0L;
         try {
-            PreparedRenderType prepared = renderType.prepare();
-            GpuTextureView chosen = null;
-            GpuTextureView firstNonAux = null;
-            for (PreparedRenderType.Texture t : prepared.textures()) {
-                String name = t.name();
-                if ("Sampler0".equals(name)) {
-                    chosen = t.textureView();
-                    break;
-                }
-                if (firstNonAux == null && !"Sampler1".equals(name) && !"Sampler2".equals(name)) {
-                    firstNonAux = t.textureView();
-                }
-            }
-            if (chosen == null) {
-                chosen = firstNonAux;
-            }
-            if (chosen != null) {
+            GpuTextureView chosen = liveView(renderType);
+            if (chosen != null && !chosen.isClosed() && !chosen.texture().isClosed()) {
                 handle = vkImageView(chosen);
+                if (handle != 0L) { viewCache.put(renderType, chosen); confirmedAt.put(renderType, dev.comfyfluffy.caustica.rt.RtComposite.frameCounter()); }
             }
         } catch (Throwable t) {
             if (!loggedFailure) {
@@ -278,8 +344,23 @@ public final class RtEntityTextures {
                 CausticaMod.LOGGER.warn("RT entity texture resolution failed for {}", renderType, t);
             }
         }
-        viewCache.put(renderType, handle);
+        if (handle == 0L) unresolved.put(renderType, dev.comfyfluffy.caustica.rt.RtComposite.frameCounter());
+        else unresolved.remove(renderType);
         return handle;
+    }
+
+    /** The albedo view the render type binds right now (Sampler1 for portal layers), or null. */
+    private GpuTextureView liveView(RenderType renderType) {
+        PreparedRenderType prepared = renderType.prepare();
+        GpuTextureView firstNonAux = null;
+        Identifier resource=textureLocation(renderType);
+        boolean portal=dev.comfyfluffy.caustica.rt.material.PortalMaterials.flags(resource==null?null:resource.toString())==32;
+        for (PreparedRenderType.Texture t : prepared.textures()) {
+            String name = t.name();
+            if ((portal ? "Sampler1" : "Sampler0").equals(name)) return t.textureView();
+            if (firstNonAux == null && !"Sampler1".equals(name) && !"Sampler2".equals(name)) firstNonAux = t.textureView();
+        }
+        return firstNonAux;
     }
 
     private static long vkImageView(GpuTextureView view) {

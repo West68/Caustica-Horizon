@@ -55,6 +55,7 @@ public final class RtEntityCapture implements VertexConsumer {
     // region — the work vanilla's sprite-coordinate-expander VertexConsumer does, which we bypass.
     // Off for full-texture models (mobs, sprite == null) and for baked quads (already atlas-space).
     private boolean uvRemap;
+    org.joml.Matrix4fc textureTransform;
     private float uvU0, uvV0, uvDU, uvDV;
 
     private int n; // quad vertex accumulator (0..3)
@@ -84,6 +85,7 @@ public final class RtEntityCapture implements VertexConsumer {
         currentMaterialId = 0;
         currentAlphaBucket = RtAccel.ENTITY_BUCKET_ANY_HIT;
         currentOrder = 0;
+        textureTransform = null;
         uvRemap = false;
     }
 
@@ -119,6 +121,7 @@ public final class RtEntityCapture implements VertexConsumer {
 
     /** Remap subsequent {@link #addVertex} (ModelPart) UVs from 0..1 into a sprite's atlas region. */
     public void setUvRemap(float u0, float v0, float u1, float v1) {
+        textureTransform = null;
         uvRemap = true;
         uvU0 = u0;
         uvV0 = v0;
@@ -128,11 +131,13 @@ public final class RtEntityCapture implements VertexConsumer {
 
     /** Use ModelPart UVs as-is (full-texture models). */
     public void clearUvRemap() {
+        textureTransform = null;
         uvRemap = false;
     }
 
     /** Copy the per-submission material/UV state into a second capture used by the parity harness. */
     void copySubmissionStateTo(RtEntityCapture target) {
+        target.textureTransform = textureTransform;
         target.currentTexSlot = currentTexSlot;
         target.currentMaterialId = currentMaterialId;
         target.currentAlphaBucket = currentAlphaBucket;
@@ -304,6 +309,66 @@ public final class RtEntityCapture implements VertexConsumer {
         }
     }
 
+    /** Foil is a separate additive decal; never replace the item's base atlas with the foil texture. */
+    void addFoilQuad(Matrix4f pose,BakedQuad quad,net.minecraft.client.renderer.texture.TextureAtlasSprite sprite,int baseSlot,int baseColor) {
+        int primStart=prim.size(),vertexStart=verts.size()/3;
+        for(int i=0;i<4;i++) {
+            Vector3fc p=quad.position(i);var m=pose;
+            qx[n]=m.m00()*p.x()+m.m10()*p.y()+m.m20()*p.z()+m.m30();
+            qy[n]=m.m01()*p.x()+m.m11()*p.y()+m.m21()*p.z()+m.m31();
+            qz[n]=m.m02()*p.x()+m.m12()*p.y()+m.m22()*p.z()+m.m32();
+            long packed=quad.packedUV(i);float u=Float.intBitsToFloat((int)(packed>>>32)),v=Float.intBitsToFloat((int)packed);
+            qu[n]=sprite==null?u:(u-sprite.getU0())/(sprite.getU1()-sprite.getU0());
+            qv[n]=sprite==null?v:(v-sprite.getV0())/(sprite.getV1()-sprite.getV0());
+            qnx[n]=qny[n]=qnz[n]=0;qcol[n]=baseColor;
+            if(++n==4){emitQuad();n=0;}
+        }
+        markFoilCoverage(primStart,vertexStart,baseSlot,
+                quadUv(quad,0,true),quadUv(quad,0,false),quadUv(quad,1,true),quadUv(quad,1,false),
+                quadUv(quad,2,true),quadUv(quad,2,false),quadUv(quad,3,true),quadUv(quad,3,false));
+    }
+    private static float quadUv(BakedQuad q,int i,boolean u) {
+        return Float.intBitsToFloat((int)(u?q.packedUV(i)>>>32:q.packedUV(i)));
+    }
+    private int packedEffectUv(int vertex) {
+        return (Float.floatToFloat16(uvList.getFloat(vertex*2))&65535)
+                |(Float.floatToFloat16(uvList.getFloat(vertex*2+1))&65535)<<16;
+    }
+    void markFoilCoverage(int primStart,int vertexStart,int baseSlot,
+            float u0,float v0,float u1,float v1,float u2,float v2,float u3,float v3) {
+        for(int t=0;t<2;t++) {
+            int p=primStart+t*12,b=vertexStart+(t==0?1:2),c=vertexStart+(t==0?2:3);
+            prim.set(p+3,Float.intBitsToFloat(packedEffectUv(vertexStart)));
+            prim.set(p+9,Float.intBitsToFloat(16384|(baseSlot<<16)));
+            prim.set(p+10,Float.intBitsToFloat(packedEffectUv(b)));
+            prim.set(p+11,Float.intBitsToFloat(packedEffectUv(c)));
+        }
+        int v=vertexStart*2;
+        uvList.set(v,u0);uvList.set(v+1,v0);uvList.set(v+2,u1);uvList.set(v+3,v1);
+        uvList.set(v+4,u2);uvList.set(v+5,v2);uvList.set(v+6,u3);uvList.set(v+7,v3);
+    }
+
+    void addTriangleVertex(float x,float y,float z,int color,float u,float v,float nx,float ny,float nz) {
+        addVertex(x,y,z,color,u,v,0,0,nx,ny,nz);
+        if(n==3) {
+            qx[3]=qx[2];qy[3]=qy[2];qz[3]=qz[2];qu[3]=qu[2];qv[3]=qv[2];
+            emitQuad();
+            idx.size(idx.size()-3);prim.size(prim.size()-12);alphaBuckets.size(alphaBuckets.size()-1);
+            verts.size(verts.size()-3);uvList.size(uvList.size()-2);
+            int alpha=(qcol[0]>>>24)|((qcol[1]>>>24)<<8)|((qcol[2]>>>24)<<16);
+            if(alpha!=0xFFFFFF)alphaBuckets.set(alphaBuckets.size()-1,RtAccel.ENTITY_BUCKET_ANY_HIT);
+            int start=prim.size()-12;
+            // Triangle effects need barycentric alpha AND colour, e.g. the dragon's fading death rays.
+            // RGB1 replaces the otherwise unused custom-triangle emission float; RGB2 uses aux1.
+            // 24-bit RGB is always a finite float bit-pattern; do not pack ARGB NaNs here.
+            prim.set(start+9,Float.intBitsToFloat(512|1024));
+            prim.set(start+10,Float.intBitsToFloat(alpha));
+            prim.set(start+3,Float.intBitsToFloat(qcol[1]&0xFFFFFF));
+            prim.set(start+11,Float.intBitsToFloat(qcol[2]&0xFFFFFF));
+            n=0;
+        }
+    }
+
     private void emitQuad() {
         appendQuad(qx, qy, qz, null, qu, qv, qnx[0], qny[0], qnz[0], qcol[0], false, 0f);
     }
@@ -376,8 +441,13 @@ public final class RtEntityCapture implements VertexConsumer {
             verts.add(offset ? x[p] + nx * off : x[p]);
             verts.add(offset ? y[p] + ny * off : y[p]);
             verts.add(offset ? z[p] + nz * off : z[p]);
-            uvList.add(remapUv ? uvU0 + u[i] * uvDU : u[i]);
-            uvList.add(remapUv ? uvV0 + v[i] * uvDV : v[i]);
+            float tu=remapUv ? uvU0 + u[i]*uvDU : u[i];
+            float tv=remapUv ? uvV0 + v[i]*uvDV : v[i];
+            if(textureTransform!=null) {
+                float transformedU=textureTransform.m00()*tu+textureTransform.m10()*tv+textureTransform.m30();
+                tv=textureTransform.m01()*tu+textureTransform.m11()*tv+textureTransform.m31();tu=transformedU;
+            }
+            uvList.add(tu);uvList.add(tv);
         }
         idx.add(base);
         idx.add(base + 1);
@@ -400,10 +470,11 @@ public final class RtEntityCapture implements VertexConsumer {
             prim.add(tb);
             prim.add((float) currentTexSlot); // tint.w = bindless texture slot
             prim.add(Float.intBitsToFloat(currentMaterialId));
-            prim.add(0f); // flags
-            prim.add(0f); // aux0
+            int vertexAlpha=c>>>24;
+            prim.add(Float.intBitsToFloat(vertexAlpha==255?0:512)); // uniform vertex alpha
+            prim.add(Float.intBitsToFloat(vertexAlpha==255?0:vertexAlpha|(vertexAlpha<<8)|(vertexAlpha<<16))); // aux0
             prim.add(0f); // aux1
-            alphaBuckets.add(currentAlphaBucket);
+            alphaBuckets.add((c>>>24)==255?currentAlphaBucket:RtAccel.ENTITY_BUCKET_ANY_HIT);
         }
     }
 

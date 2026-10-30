@@ -26,8 +26,6 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
-import dev.comfyfluffy.caustica.rt.RtGpuExecutor.GraphicsUse;
-import dev.comfyfluffy.caustica.rt.RtGpuExecutor.TrackedGraphicsUse;
 
 import java.util.List;
 
@@ -45,6 +43,7 @@ import static org.lwjgl.vulkan.EXTOpacityMicromap.vkCreateMicromapEXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.vkDestroyMicromapEXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.vkGetMicromapBuildSizesEXT;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_TYPE_AABBS_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
@@ -86,6 +85,8 @@ public final class RtAccel {
 
     private static RtBuffer createScratchBuffer(RtContext ctx, long requiredSize, String label) {
         long alignment = ctx.accelerationStructureScratchAlignment();
+        // Scratch is private to one build lane. EXCLUSIVE acquires ownership on first device use;
+        // unlike resident AS backing, this allocation never crosses compute/graphics families.
         return ctx.createAlignedBuffer(Math.max(requiredSize, alignment), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 false, label, alignment);
     }
@@ -127,7 +128,7 @@ public final class RtAccel {
         this.opacityMicromap = opacityMicromap;
     }
 
-    public void destroy() {
+    public synchronized void destroy() {
         if (destroyed) {
             return;
         }
@@ -149,7 +150,7 @@ public final class RtAccel {
         destroyed = true;
     }
 
-    private OpacityMicromap detachOpacityMicromap() {
+    private synchronized OpacityMicromap detachOpacityMicromap() {
         OpacityMicromap result = opacityMicromap;
         opacityMicromap = null;
         return result;
@@ -216,7 +217,7 @@ public final class RtAccel {
             this.bytesPerTriangle = bytesPerTriangle;
         }
 
-        void freeBuildInputs() {
+        synchronized void freeBuildInputs() {
             if (scratch != null) {
                 scratch.destroy();
                 scratch = null;
@@ -231,7 +232,7 @@ public final class RtAccel {
             }
         }
 
-        void destroy() {
+        synchronized void destroy() {
             if (destroyed) {
                 return;
             }
@@ -275,6 +276,7 @@ public final class RtAccel {
         // use closest-hit-only records for solid/translucent/water and an any-hit record for true cutout;
         // shadow rays use any-hit records for cutout/translucent/water.
         // Both split flags false ⇒ the legacy single-geometry path keyed on triangleCount.
+        private boolean proceduralAabbs;
         private final boolean terrainSplit;
         private final int[] terrainTris; // per-bucket triangle counts in TERRAIN_BUCKETS order (null if !terrainSplit)
         private final boolean entitySplit;
@@ -356,7 +358,8 @@ public final class RtAccel {
     public static final int SBT_TERRAIN_RADIANCE_OFFSET = SBT_RAY_RADIANCE * TERRAIN_BUCKETS;
     public static final int SBT_TERRAIN_SHADOW_OFFSET = SBT_RAY_SHADOW * TERRAIN_BUCKETS;
     public static final int SBT_ENTITY_OFFSET = TERRAIN_BUCKETS * 2;
-    public static final int SBT_HIT_GROUP_COUNT = SBT_ENTITY_OFFSET + TERRAIN_BUCKETS * 2;
+    public static final int SBT_DH_OFFSET = SBT_ENTITY_OFFSET + TERRAIN_BUCKETS * 2;
+    public static final int SBT_HIT_GROUP_COUNT = SBT_DH_OFFSET + TERRAIN_BUCKETS * 2;
 
     /**
      * Result of {@link #prepareUpdatableBlasBuild}: the per-frame BUILD op to record, plus the persistent
@@ -603,6 +606,47 @@ public final class RtAccel {
                                                                    long indexAddr, int[] bucketTris, String label) {
         PreparedBlas op = prepareEntityBlas(ctx, vertexAddr, vertexCount, indexAddr, bucketTris, label);
         return new PersistentBuild(op, op.accel, op.externalBacking, op.scratch);
+    }
+
+    private static VkAccelerationStructureGeometryKHR.Buffer dhGeometry(MemoryStack stack,long address){
+        var geometry=VkAccelerationStructureGeometryKHR.calloc(1,stack);
+        geometry.get(0).sType$Default().geometryType(VK_GEOMETRY_TYPE_AABBS_KHR)
+                .flags(VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR);
+        var aabbs=geometry.get(0).geometry().aabbs();
+        aabbs.sType$Default().stride(32);aabbs.data().deviceAddress(address);
+        return geometry;
+    }
+    private static VkAccelerationStructureBuildSizesInfoKHR dhBuildSizes(RtContext ctx,MemoryStack stack,int count){
+        var build=VkAccelerationStructureBuildGeometryInfoKHR.calloc(stack).sType$Default()
+                .type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR).flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
+                // pGeometries does NOT set geometryCount in LWJGL (it also supports ppGeometries).
+                .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(1).pGeometries(dhGeometry(stack,0));
+        var sizes=VkAccelerationStructureBuildSizesInfoKHR.calloc(stack).sType$Default();
+        vkGetAccelerationStructureBuildSizesKHR(ctx.vk(),VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,build,stack.ints(count),sizes);
+        return sizes;
+    }
+    /** Exact driver size query before allocating immutable DH build resources. */
+    public static long dhBuildBytes(RtContext ctx,int count){
+        try(var stack=MemoryStack.stackPush()){
+            var sizes=dhBuildSizes(ctx,stack,count);
+            return sizes.accelerationStructureSize()+Math.max(sizes.buildScratchSize(),ctx.accelerationStructureScratchAlignment());
+        }
+    }
+    /** Hardware BVH over exact DH rectangles, joining the existing batched build/barrier lane. */
+    public static PersistentBuild prepareDhBlasBuild(RtContext ctx,long address,int count,String label){
+        RtBuffer backing=null,scratch=null;RtAccel accel=null;
+        try(var stack=MemoryStack.stackPush()){
+            var sizes=dhBuildSizes(ctx,stack,count);
+            backing=ctx.createBuffer(sizes.accelerationStructureSize(),VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,false,label+" backing");
+            scratch=createScratchBuffer(ctx,sizes.buildScratchSize(),label+" scratch");
+            accel=createBlasOn(ctx,stack,backing,sizes.accelerationStructureSize(),false,label);
+            var op=new PreparedBlas(accel,scratch,backing,address,0,0,count,false,label,false,false);
+            op.proceduralAabbs=true;
+            return new PersistentBuild(op,accel,backing,scratch);
+        }catch(Throwable failure){
+            if(accel!=null)destroyEntityAccel(accel,backing);else if(backing!=null)backing.destroy();
+            if(scratch!=null)scratch.destroy();throw failure;
+        }
     }
 
     /**
@@ -929,8 +973,7 @@ public final class RtAccel {
         private final int instanceCount;
         private final String label;
 
-        private PreparedTlas(RtAccel accel, RtBuffer instanceBuffer, RtBuffer scratch, int instanceCount,
-                             String label) {
+        private PreparedTlas(RtAccel accel, RtBuffer instanceBuffer, RtBuffer scratch, int instanceCount, String label) {
             this.accel = accel;
             this.instanceBuffer = instanceBuffer;
             this.scratch = scratch;
@@ -940,12 +983,16 @@ public final class RtAccel {
     }
 
     /**
-     * Owns {@value #RING} reusable per-frame TLAS slots. Each slot contains a capacity-sized instance
-     * buffer, acceleration structure, and scratch buffer. Graphics timeline completion guards reuse;
-     * instance-count growth recreates the selected slot with a larger capacity.
+     * Reusable per-frame TLAS resources. Allocating the instance buffer + AS backing + scratch fresh every
+     * frame (and defer-destroying them 4 frames later) occasionally hit VMA's slow path — a fresh
+     * VkDeviceMemory block allocation + map — observed as rare 20–50ms prepareTlas spikes. The ring keeps
+     * {@value #RING} slots, each sized for a capacity instance count, and rebuilds the same AS in place: a
+     * slot is reused every {@value #RING} frames (the established frames-in-flight horizon), so its
+     * previous build/trace is off all queues before the instance buffer is rewritten. A slot is recreated
+     * only when the instance count outgrows its capacity.
      */
     public static final class TlasRing {
-        private static final int RING = 4;           // depth avoids routine reuse waits
+        private static final int RING = 4;           // = the frames-in-flight KEEP_FRAMES horizon
         private static final float GROWTH = 1.25f;   // capacity headroom on (re)size
         private static final int MIN_CAPACITY = 1024;
         private final Slot[] slots = new Slot[RING];
@@ -956,7 +1003,7 @@ public final class RtAccel {
             RtBuffer instanceBuffer;
             RtBuffer scratch;
             int capacity;
-            final TrackedGraphicsUse graphicsUse = new TrackedGraphicsUse();
+            final InstancePrefixCache prefix = new InstancePrefixCache();
 
             void destroy() {
                 accel.destroy();
@@ -981,19 +1028,41 @@ public final class RtAccel {
      * rebuilt in place — BUILD mode overwrites). Do NOT call {@link PreparedTlas#destroyAll} on the
      * result: the ring owns the resources.
      */
-    /** Pack terrain and dynamic instances as two contiguous ranges without a composite-list get per item. */
+    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> instances, TlasRing ring) {
+        return prepareTlas(ctx, instances, List.of(), ring);
+    }
+
+    /** Per-slot cache; the owner advances revision on every prefix mutation. */
+    public static final class InstancePrefixCache {
+        private Object source;
+        private long revision;
+        private int count;
+        public boolean matches(Object source, long revision, int count) {
+            return source != null && revision >= 0 && this.source == source
+                    && this.revision == revision && this.count == count;
+        }
+        public void remember(Object source, long revision, int count) {
+            this.source = source;
+            this.revision = revision;
+            this.count = count;
+        }
+    }
+
+    /** Pack terrain and dynamic instances as two contiguous ranges. */
     public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> baseInstances,
-                                           List<Instance> dynamicInstances, TlasRing ring, GraphicsUse graphicsUse) {
+                                           List<Instance> dynamicInstances, TlasRing ring) {
+        return prepareTlas(ctx, baseInstances, dynamicInstances, ring, -1L);
+    }
+
+    /** Only versioned terrain may skip uploads; dynamic instances are always rewritten. */
+    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> baseInstances,
+            List<Instance> dynamicInstances, TlasRing ring, long baseRevision) {
         int baseCount = baseInstances.size();
         int count = Math.addExact(baseCount, dynamicInstances.size());
         TlasRing.Slot slot = ring.slots[ring.cursor];
-        // Complete the slot's prior graphics use before rewriting, rebuilding, or resizing it.
-        if (slot != null) {
-            ctx.gpuExecutor().graphicsUseWaiter().await(slot.graphicsUse);
-        }
         if (slot == null || count > slot.capacity) {
-            // Outgrown (or first use). The slot's previous use is confirmed off all queues by the wait
-            // above, so immediate destroy is safe.
+            // Outgrown (or first use). The slot's previous use is RING frames behind — off all queues by
+            // the same convention the old per-frame deferred free relied on — so immediate destroy is safe.
             if (slot != null) {
                 slot.destroy();
             }
@@ -1002,12 +1071,17 @@ public final class RtAccel {
         }
         ring.cursor = (ring.cursor + 1) % TlasRing.RING;
 
-        writeTlasInstances(baseInstances, slot.instanceBuffer.mapped, 0);
-        writeTlasInstances(dynamicInstances, slot.instanceBuffer.mapped, baseCount);
-        if (count > 0) {
-            slot.instanceBuffer.flush(0L, (long) count * VkAccelerationStructureInstanceKHR.SIZEOF);
+        boolean reusePrefix = slot.prefix.matches(baseInstances, baseRevision, baseCount);
+        if (!reusePrefix) {
+            writeTlasInstances(baseInstances, slot.instanceBuffer.mapped, 0);
+            slot.prefix.remember(baseInstances, baseRevision, baseCount);
         }
-        slot.graphicsUse.mark(graphicsUse);
+        writeTlasInstances(dynamicInstances, slot.instanceBuffer.mapped, baseCount);
+        int firstWritten = reusePrefix ? baseCount : 0;
+        if (count > firstWritten) {
+            slot.instanceBuffer.flush((long) firstWritten * VkAccelerationStructureInstanceKHR.SIZEOF,
+                    (long) (count - firstWritten) * VkAccelerationStructureInstanceKHR.SIZEOF);
+        }
         return new PreparedTlas(slot.accel, slot.instanceBuffer, slot.scratch, count,
                 "frame TLAS " + count + " instances");
     }
@@ -1153,10 +1227,11 @@ public final class RtAccel {
             recordEntityBlasBuild(ctx, cmd, stack, b);
             return;
         }
-        VkAccelerationStructureGeometryKHR.Buffer geom = triangleGeometry(stack, b.vertexAddr, b.indexAddr, b.maxVertex + 1, b.opaque);
+        VkAccelerationStructureGeometryKHR.Buffer geom = b.proceduralAabbs ? dhGeometry(stack,b.vertexAddr)
+                : triangleGeometry(stack, b.vertexAddr, b.indexAddr, b.maxVertex + 1, b.opaque);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                .flags(buildFlags(b.updatable))
+                .flags(b.proceduralAabbs?VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR:buildFlags(b.updatable))
                 .mode(b.update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
                 .geometryCount(1).pGeometries(geom)
                 .dstAccelerationStructure(b.accel.handle);

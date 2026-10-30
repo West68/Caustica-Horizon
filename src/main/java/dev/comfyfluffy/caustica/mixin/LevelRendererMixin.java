@@ -22,6 +22,9 @@ public abstract class LevelRendererMixin {
 	@Shadow
 	@Final
 	private LevelRenderState levelRenderState;
+	@Shadow
+	@Final
+	private net.minecraft.client.renderer.RenderBuffers renderBuffers;
 
 	@Inject(method = "render", at = @At("HEAD"), cancellable = true)
 	private void caustica$cancelVanillaWorld(
@@ -49,6 +52,10 @@ public abstract class LevelRendererMixin {
 			return;
 		}
 
+		// Cancellation may bypass Xaero's own HEAD notification depending on mixin order.
+		dev.comfyfluffy.caustica.client.XaeroRenderCompat.beforeCancelWorld(modelViewMatrix);
+		dev.comfyfluffy.caustica.client.LitematicaCompat.prepare(cameraState, modelViewMatrix, terrainFog, deltaTracker);
+		dev.comfyfluffy.caustica.client.RtRasterFallback.capture(cameraState, modelViewMatrix, terrainFog, fogColor, this.renderBuffers);
 		VanillaRenderController.INSTANCE.markWorldSkipped();
 		ci.cancel();
 	}

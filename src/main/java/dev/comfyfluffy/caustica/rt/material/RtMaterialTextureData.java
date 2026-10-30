@@ -48,7 +48,7 @@ final class RtMaterialTextureData {
     /**
      * Reduce already-decoded physical channels. Emission is energy-averaged, normals are averaged then
      * renormalized, and lost normal length raises roughness so distant normal detail does not become a
-     * falsely smooth surface. Roughness is linear (GGX alpha) throughout — see {@link RtLabPbr}.
+     * falsely smooth surface.
      */
     static Level reduce(Level src) {
         int width = Math.max(1, (src.width + 1) / 2);
@@ -58,10 +58,10 @@ final class RtMaterialTextureData {
         float[] surface1 = new float[surface0.length];
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
-                float alphaSum = 0.0f;
+                float roughSq = 0.0f;
                 float metal = 0.0f, emission = 0.0f, sss = 0.0f;
                 float nx = 0.0f, ny = 0.0f, nz = 0.0f, ao = 0.0f, heightValue = 0.0f;
-                float f0r = 0.0f, f0g = 0.0f, f0b = 0.0f, transmission = 0.0f;
+                float f0r = 0.0f, f0g = 0.0f, f0b = 0.0f, auxiliaryAlpha = 0.0f;
                 int samples = 0;
                 for (int oy = 0; oy < 2; oy++) {
                     int sy = y * 2 + oy;
@@ -70,7 +70,8 @@ final class RtMaterialTextureData {
                         int sx = x * 2 + ox;
                         if (sx >= src.width) continue;
                         int si = (sy * src.width + sx) * CHANNELS;
-                        alphaSum += src.surface0[si];
+                        float rough = src.surface0[si];
+                        roughSq += rough * rough;
                         metal += src.surface0[si + 1];
                         emission += src.surface0[si + 2];
                         sss += src.surface0[si + 3];
@@ -87,7 +88,7 @@ final class RtMaterialTextureData {
                         f0r += src.surface1[si];
                         f0g += src.surface1[si + 1];
                         f0b += src.surface1[si + 2];
-                        transmission += src.surface1[si + 3];
+                        auxiliaryAlpha += src.surface1[si + 3];
                         samples++;
                     }
                 }
@@ -104,10 +105,8 @@ final class RtMaterialTextureData {
                 }
                 int di = (y * width + x) * CHANNELS;
                 // Toksvig-style variance term. This is intentionally conservative and monotonic.
-                // Both terms are in linear-roughness (GGX alpha) space, which is where normal-map
-                // variance adds: alpha behaves like a variance, so averaging and widening are both
-                // plain sums here — no perceptual round-trip.
-                surface0[di] = clamp01(alphaSum * inv + Math.max(0.0f, 1.0f - normalLength));
+                surface0[di] = clamp01((float) Math.sqrt(Math.min(1.0f,
+                        roughSq * inv + Math.max(0.0f, 1.0f - normalLength))));
                 surface0[di + 1] = clamp01(metal * inv);
                 surface0[di + 2] = clamp01(emission * inv);
                 surface0[di + 3] = clamp01(sss * inv);
@@ -118,7 +117,7 @@ final class RtMaterialTextureData {
                 surface1[di] = clamp01(f0r * inv);
                 surface1[di + 1] = clamp01(f0g * inv);
                 surface1[di + 2] = clamp01(f0b * inv);
-                surface1[di + 3] = clamp01(transmission * inv);
+                surface1[di + 3] = clamp01(auxiliaryAlpha * inv);
             }
         }
         return new Level(width, height, surface0, normalAo, surface1);

@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"caustica-enhanced-tests","version":"0.1.0","environment":"client","entrypoints":{"fabric-client-gametest":["dev.comfyfluffy.caustica.enhanced.test.BaselineTest"],"client":["dev.comfyfluffy.caustica.enhanced.test.OptionsSeeder"]},"mixins":["ce-test.mixins.json"]}

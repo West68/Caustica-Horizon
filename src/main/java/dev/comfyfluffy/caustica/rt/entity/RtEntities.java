@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt.entity;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import dev.comfyfluffy.caustica.CausticaConfig;
+import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.mixin.ParticleEngineAccessor;
 import dev.comfyfluffy.caustica.mixin.ParticleGroupAccessor;
 import net.minecraft.client.Camera;
@@ -35,10 +36,6 @@ import org.lwjgl.system.MemoryUtil;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
-import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
-import dev.comfyfluffy.caustica.rt.RtGpuExecutor.GraphicsUse;
-import dev.comfyfluffy.caustica.rt.RtGpuExecutor.GraphicsUseWaiter;
-import dev.comfyfluffy.caustica.rt.RtGpuExecutor.TrackedGraphicsUse;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
@@ -46,7 +43,6 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
-import it.unimi.dsi.fastutil.longs.LongArrayList;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -71,8 +67,8 @@ import java.util.Queue;
  *
  * <p>Per-frame cost is real (per-entity capture + buffer uploads + a BLAS build); capped by {@code
  * -Dcaustica.rt.maxEntities}. Changed-entity geometry and refit scratch reuse the existing per-entity
- * graphics-timeline-guarded ring; motion uploads suballocate from a guarded per-frame-slot arena. Other
- * transient allocations use VMA directly.
+ * frames-in-flight ring; motion uploads suballocate from a per-frame-slot arena. A generic size-bucketed
+ * recycling free-list was tried and measured slower per-call than trusting VMA's own allocator.
  */
 public final class RtEntities {
     public static final RtEntities INSTANCE = new RtEntities();
@@ -91,7 +87,9 @@ public final class RtEntities {
     /** Default mask: visible to every ray (terrain and ordinary entities use this). */
     private static final int MASK_ALL = 0xFF;
     /** Particles are primary-ray-only: visible/lit by the camera path, invisible to shadows/GI/reflections. */
-    private static final int PARTICLE_MASK = MASK_PRIMARY;
+    // 0x10: also visible to specular continuations (mirrors, glass and water) — never to the dominant
+    // diffuse/shadow rays, which keep skipping particles (world.rgen CULL_SPECULAR_PARTICLES).
+    private static final int PARTICLE_MASK = MASK_PRIMARY | 0x10;
     public static boolean particlesEnabled() {
         return CausticaConfig.Rt.Entities.PARTICLES_ENABLED.value();
     }
@@ -142,10 +140,10 @@ public final class RtEntities {
 
     // EntityGeom: four addresses + rigid displacement + three geometry triangle bases + padding = 64 B.
     private static final int TABLE_ENTRY_BYTES = 64;
-    // Fixed-size geometry-table ring. Timeline completion guards host writes; ring depth avoids routine waits.
+    // Ring of fixed-size geometry tables: each frame fills the next slot so the GPU read of this frame's
+    // trace never races a later frame's host write. > frames-in-flight (mirrors RtPipeline RING).
     private static final int TABLE_RING = 6;
-    // Stale-cache eviction horizon and default reusable-resource ring depth.
-    // Graphics timeline completion guards GPU reuse and destruction.
+    // Frames a superseded cache or per-frame entity resource must outlive before it is freed.
     private static final int KEEP_FRAMES = 4;
     private static final int FRAME_LIST_RING = KEEP_FRAMES;
     // Refit (UPDATE-mode) BLAS: persistent per-entity AS, refit in place each frame (cheap) while
@@ -160,8 +158,8 @@ public final class RtEntities {
     // Well below a texel (1/16 block) and DLSS-RR jitter; float pose math noise is ~1e-5.
     private static final float RIGID_FIT_EPS = 2.0e-3f;
 
-    // Each per-entity ring slot owns one persistent AS. Timeline completion guards cursor reuse,
-    // mapped writes, refits, rebuilds, and destruction.
+    // Per-entity ring depth: a slot is reused every REFIT_RING frames, so it must be off all queues by
+    // then. = KEEP_FRAMES (the established frames-in-flight-safe horizon). Each slot holds one persistent AS.
     private static final int REFIT_RING = KEEP_FRAMES;
     // Force a periodic full rebuild of a slot's AS to bound BVH-quality degradation from repeated refits
     // (an entity that deforms a lot would otherwise refit the same BVH topology forever). Per-slot count.
@@ -189,9 +187,12 @@ public final class RtEntities {
     // shared entity mesh). We extract each live particle into `particleScratch`, accumulate per-vertex
     // motion-vector displacements in `particleDisp`, and key the previous-frame center off particle
     // identity in `particlePrev` (rebuilt each frame → prunes dead particles).
+    private int billboardParticlesCaptured;
+    private int modelParticleFailures;
     private final RtParticleCapture particleCapture = new RtParticleCapture(capture);
     private final QuadParticleRenderState particleScratch = new QuadParticleRenderState();
     private final FloatArrayList particleDisp = new FloatArrayList();
+    private final FloatArrayList beDispScratch = new FloatArrayList();
     private IdentityHashMap<Particle, ParticlePrev> particlePrev = new IdentityHashMap<>();
     private IdentityHashMap<Particle, ParticlePrev> particleCur = new IdentityHashMap<>();
     private final float[] particleCenterScratch = new float[3];
@@ -211,7 +212,8 @@ public final class RtEntities {
         }
     }
 
-    private TableSlot[] tableRing;
+    private static final int DH_COVERAGE_BYTES=net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("distanthorizons")?131072:0;
+    private RtBuffer[] tableRing;
     private int tableCapacity;
     private int tableSlot;
 
@@ -266,9 +268,11 @@ public final class RtEntities {
     private static final class EntityPrev {
         float[] verts = new float[0];
         int size;
-        float anchorX, anchorY, anchorZ;
+        double anchorX, anchorY, anchorZ;
     }
 
+    // Per-frame entity GPU resources awaiting a frames-in-flight-safe free.
+    private final List<Deferred> deferred = new ArrayList<>();
     private long retainedGeometryBytes;
 
     // Persistent per-entity acceleration structures, keyed by entity id, for refit.
@@ -305,7 +309,6 @@ public final class RtEntities {
         long meshHash;                           // hash of the captured mesh — rebuild only when it changes
         long lastSeen;                           // last frame this BE was in the scan window — for eviction
         float[] prevVerts;                       // block-local verts at this build, for the per-vertex MV diff
-        final TrackedGraphicsUse graphicsUse = new TrackedGraphicsUse();
     }
 
     /** One persistent updatable AS in an entity's ring: its own backing buffer + the topology it
@@ -324,7 +327,6 @@ public final class RtEntities {
         int indexCount;
         long updateScratchSize;
         int updatesSinceBuild;
-        final TrackedGraphicsUse graphicsUse = new TrackedGraphicsUse();
     }
 
     /** A per-entity ring of {@link EntitySlot}s, cycled one-per-frame so a refit never writes an AS still
@@ -337,10 +339,9 @@ public final class RtEntities {
         long lastSeen;
         // Rigid-reuse reference (refAccel == null → no reusable build yet). refVerts are the exact
         // positions the AS was last built/refit from; a frame whose capture is a rigid transform of them
-        // reuses the AS through the TLAS instance transform. Reuse frames only READ the AS, so referencing
-        // the last-written ring slot while it is in flight is safe.
+        // reuses the AS via the TLAS instance transform instead of re-uploading + refitting. Reuse frames
+        // only READ the AS, so referencing the last-written ring slot while it is in flight is safe.
         RtAccel refAccel;
-        EntitySlot refSlot;
         float[] refVerts;
         int refVertCount = -1;
         int refIdxCount = -1;
@@ -348,23 +349,12 @@ public final class RtEntities {
         long refIndexAddr, refUvAddr, refPrimAddr;
         int[] refBucketTris;
         long retryYawFitAfter;
+        float[] lastLocal;                      // local transform of the last emitted instance (throttled re-emit)
     }
 
     /** This frame's terrain and dynamic instance segments, entity BLAS builds, and geometry-table address. */
     public record FrameEntities(List<RtAccel.Instance> baseInstances, List<RtAccel.Instance> dynamicInstances,
-                                List<RtAccel.PreparedBlas> blas, long geomTableAddr, FrameUse use) {
-    }
-
-    private record FrameUse(FrameLists lists, TableSlot table) {
-    }
-
-    private static final class TableSlot {
-        final RtBuffer buffer;
-        final TrackedGraphicsUse graphicsUse = new TrackedGraphicsUse();
-
-        TableSlot(RtBuffer buffer) {
-            this.buffer = buffer;
-        }
+                                List<RtAccel.PreparedBlas> blas, long geomTableAddr) {
     }
 
     /** One glowing entity's body mesh (rebased-space positions, copied out of {@link #capture} before the
@@ -379,25 +369,37 @@ public final class RtEntities {
     public record NameTagEntity(Component text, float x, float y, float z) {
     }
 
+    private record Deferred(long freeFrame, Runnable free) {
+    }
+
     private record Motion(long dispAddr, float rigidX, float rigidY, float rigidZ) {
     }
 
     private static final class MotionSlice {
+        RtBuffer buffer;
+        long offset;
         long mapped;
         long deviceAddress;
+        long size;
 
-        MotionSlice set(RtBuffer buffer, long offset) {
+        MotionSlice set(RtBuffer buffer, long offset, long size) {
+            this.buffer = buffer;
+            this.offset = offset;
             this.mapped = buffer.mapped + offset;
             this.deviceAddress = buffer.deviceAddress + offset;
+            this.size = size;
             return this;
+        }
+
+        void flush() {
+            buffer.flush(offset, size);
         }
     }
 
-    /** Host-visible storage pages owned by one frame-list slot and reused after its graphics token completes. */
+    /** Host-visible storage pages owned by one frames-in-flight slot and reused when that slot retires. */
     private static final class MotionArena {
         private final ArrayList<RtBuffer> pages = new ArrayList<>();
         private final IntArrayList lastUsedCycles = new IntArrayList();
-        private final LongArrayList dirtyEnds = new LongArrayList();
         private final MotionSlice slice = new MotionSlice();
         private int pageIndex;
         private long offset;
@@ -409,14 +411,10 @@ public final class RtEntities {
                 if (cycle - lastUsedCycles.getInt(i) >= MOTION_UNUSED_RETIRE_CYCLES) {
                     pages.remove(i).destroy();
                     lastUsedCycles.removeInt(i);
-                    dirtyEnds.removeLong(i);
                 }
             }
             pageIndex = 0;
             offset = 0L;
-            for (int i = 0; i < dirtyEnds.size(); i++) {
-                dirtyEnds.set(i, 0L);
-            }
         }
 
         MotionSlice allocate(RtContext ctx, long bytes) {
@@ -428,7 +426,6 @@ public final class RtEntities {
                             org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
                             "entity motion arena"));
                     lastUsedCycles.add(cycle);
-                    dirtyEnds.add(0L);
                     RtFrameStats.FRAME.count("vmaBufferCreates", 1);
                     RtFrameStats.FRAME.count("entityVmaBufferCreates", 1);
                 }
@@ -437,23 +434,10 @@ public final class RtEntities {
                 if (size <= page.size - aligned) {
                     lastUsedCycles.set(pageIndex, cycle);
                     offset = Math.addExact(aligned, size);
-                    dirtyEnds.set(pageIndex, Math.max(dirtyEnds.getLong(pageIndex), offset));
-                    return slice.set(page, aligned);
+                    return slice.set(page, aligned, size);
                 }
                 pageIndex++;
                 offset = 0L;
-            }
-        }
-
-        /** Publish all sequential displacement writes with one VMA flush per used page. */
-        void flushWrites() {
-            for (int i = 0; i < dirtyEnds.size(); i++) {
-                long bytes = dirtyEnds.getLong(i);
-                if (bytes == 0L) {
-                    continue;
-                }
-                pages.get(i).flush(0L, bytes);
-                RtFrameStats.FRAME.count("entityMotionFlushes", 1);
             }
         }
 
@@ -463,7 +447,6 @@ public final class RtEntities {
             }
             pages.clear();
             lastUsedCycles.clear();
-            dirtyEnds.clear();
         }
     }
 
@@ -531,9 +514,6 @@ public final class RtEntities {
         final ArrayList<RtBuffer> refitScratch = new ArrayList<>(entityListCapacity());
         final ArrayList<RtBuffer> buffers = new ArrayList<>(TRANSIENT_BUFFER_LIST_CAPACITY);
         final MotionArena motion = new MotionArena();
-        final ArrayList<EntitySlot> usedEntitySlots = new ArrayList<>(entityListCapacity());
-        final ArrayList<BeEntry> usedBlockEntities = new ArrayList<>();
-        final TrackedGraphicsUse graphicsUse = new TrackedGraphicsUse();
 
         void reset() {
             instances.clear();
@@ -541,8 +521,6 @@ public final class RtEntities {
             pooledBlas.clear();
             refitScratch.clear();
             buffers.clear();
-            usedEntitySlots.clear();
-            usedBlockEntities.clear();
             motion.reset();
         }
 
@@ -561,8 +539,6 @@ public final class RtEntities {
             pooledBlas.clear();
             refitScratch.clear();
             buffers.clear();
-            usedEntitySlots.clear();
-            usedBlockEntities.clear();
         }
 
         void destroyPersistent() {
@@ -582,15 +558,11 @@ public final class RtEntities {
         MotionArena motion;                     // suballocated entity/BE/particle displacement uploads
         long tableBase;
         long geomTableAddr;
-        TableSlot table;
         int count;        // geometry-table entries / TLAS instances
         int logicalCount; // ordinary entities + block entities + individual particles
 
-        final GraphicsUseWaiter graphicsUseWaiter;
-
-        FrameBuild(List<RtAccel.Instance> base, RtGpuExecutor gpuExecutor) {
+        FrameBuild(List<RtAccel.Instance> base) {
             this.base = base;
-            this.graphicsUseWaiter = gpuExecutor.graphicsUseWaiter();
         }
 
         boolean full() {
@@ -607,19 +579,25 @@ public final class RtEntities {
      */
     public FrameEntities beginFrame(RtContext ctx, List<RtAccel.Instance> base, int rbx, int rby, int rbz,
                                     double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
-        if (!enabled()) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+        processDeferred();
+        boolean captureEntities=enabled();
+        if (!captureEntities && dev.comfyfluffy.caustica.client.DhLodCapture.sectionCount()==0) {
+            return new FrameEntities(base, List.of(), List.of(), 0L);
         }
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+            return new FrameEntities(base, List.of(), List.of(), 0L);
         }
         float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
         setCamera(camX, camY, camZ, projection, viewRotation);
 
-        FrameBuild build = new FrameBuild(base, ctx.gpuExecutor());
+        FrameBuild build = new FrameBuild(base);
+        if(captureEntities)dev.comfyfluffy.caustica.client.BetterPlayerModelCompat.beginWorldFrame(partial);
+        if(captureEntities)RtEmfReplayScope.suspendLodForCapture();
+        if(captureEntities)captureFirstPerson(ctx,build,mc,rbx,rby,rbz,camX,camY,camZ,projection,viewRotation);
         try {
+            if(captureEntities) {
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.capture")) {
                 captureEntities(ctx, build, mc, level, partial, rbx, rby, rbz);
             }
@@ -628,56 +606,179 @@ public final class RtEntities {
             }
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.particles")) {
                 captureParticles(ctx, build, mc, partial, rbx, rby, rbz, projection, viewRotation);
+                captureModelParticles(ctx,build,mc,partial,rbx,rby,rbz,projection,viewRotation);
             }
-        } catch (RuntimeException | Error t) {
+            }
+        } catch (RuntimeException t) {
             // A partially recorded frame may already have installed unbuilt BLAS into persistent slots.
-            // Quiesce old frames and drop the entity cache before propagating the original failure.
+            // Quiesce old frames and drop the entity cache, then continue with terrain only for this frame.
+            // This used to rethrow: RtComposite latched failed=true on any Throwable, so one item-pickup
+            // particle whose render state threw switched path tracing off for the rest of the session.
+            // Losing one frame of entities is recoverable; losing RT until restart is not.
             ctx.waitIdle();
             shutdown();
-            throw t;
+            CausticaMod.LOGGER.warn("Entity capture failed; continuing with terrain-only path tracing", t);
+            return new FrameEntities(base, List.of(), List.of(), 0L);
+        } catch (Error fatal) {
+            ctx.waitIdle();
+            shutdown();
+            throw fatal;
+        } finally {
+            RtEmfReplayScope.restoreLodAfterCapture();
+            dev.comfyfluffy.caustica.client.BetterPlayerModelCompat.endWorldFrame();
         }
-        evictStaleAccels(ctx);
-        evictStaleBes(ctx);
+        var dhLods=RtDhLods.INSTANCE.prepare(ctx,camX,camZ);
+        RtDhLods.INSTANCE.recordPending(op->{beginBuildIfNeeded(ctx,build);build.blas.add(op);});
+        long dhCoverageAddress=0;
+        if(!dhLods.isEmpty()){
+            beginBuildIfNeeded(ctx,build);var coverage=RtDhLods.INSTANCE.coverage();long offset=(long)tableCapacity*TABLE_ENTRY_BYTES;
+            if(coverage.bytes()<=DH_COVERAGE_BYTES){coverage.write(MemoryUtil.memByteBuffer(build.tableBase+offset,coverage.bytes()),rbx,rby,rbz);tableRing[tableSlot].flush(offset,coverage.bytes());dhCoverageAddress=build.geomTableAddr+offset;}
+        }
+        long dhMaterialAddress=dhLods.isEmpty()?0L:DhLodMaterials.INSTANCE.address(ctx);
+        for(var lod:dhLods) {
+            beginBuildIfNeeded(ctx,build);
+            int n=lod.snapshot.quads().size();long a=lod.geometry.deviceAddress;
+            writeTableEntry(build,a,0,0,RtDhLods.INSTANCE.counterAddress(ctx),0,0,0,new int[]{0,0},MASK_ALL);
+            MemoryUtil.memPutLong(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+32,dhCoverageAddress);
+            MemoryUtil.memPutLong(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+16,dhMaterialAddress); // uvAddr: unused by DH
+            MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+56,dev.comfyfluffy.caustica.client.DhLodTextures.slot());
+            MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry.INSTANCE.requireSnapshot().waterId());
+            build.instances.add(new RtAccel.Instance(translationTransform((float)((double)lod.snapshot.minBlockX()-rbx),lod.snapshot.minY()-rby,(float)((double)lod.snapshot.minBlockZ()-rbz)),lod.build.accel().deviceAddress,ENTITY_BIT|build.count,MASK_ALL,RtAccel.SBT_DH_OFFSET));
+            build.count++;
+        }
+        evictStaleAccels();
+        evictStaleBes();
         RtFrameStats.FRAME.count("entityRetainedGeometryBytes", retainedGeometryBytes);
 
         if (build.instances == null) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+            return new FrameEntities(base, List.of(), List.of(), 0L);
         }
-        try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.uploadFlush")) {
-            build.motion.flushWrites();
-            if (build.count > 0) {
-                build.table.buffer.flush(0L, (long) build.count * TABLE_ENTRY_BYTES);
-                RtFrameStats.FRAME.count("entityTableFlushes", 1);
-            }
-        }
-        return new FrameEntities(base, build.instances, build.blas, build.geomTableAddr,
-                new FrameUse(build.lists, build.table));
-    }
-
-    /** Associate every resource returned for a successfully enqueued frame with its graphics completion. */
-    public void markGraphicsUse(FrameEntities frame, GraphicsUse graphicsUse) {
-        if (frame == null || frame.use == null) {
-            return;
-        }
-        FrameLists lists = frame.use.lists;
-        lists.graphicsUse.mark(graphicsUse);
-        frame.use.table.graphicsUse.mark(graphicsUse);
-        for (EntitySlot slot : lists.usedEntitySlots) {
-            slot.graphicsUse.mark(graphicsUse);
-        }
-        for (BeEntry entry : lists.usedBlockEntities) {
-            entry.graphicsUse.mark(graphicsUse);
-        }
+        // Retire this frame's transient meshes + scratch + pooled-BUILD BLAS once it is no longer in flight
+        // (their build + the trace that reads them must complete first). Refit AS persist in entityAccels.
+        long freeAt = RtComposite.frameCounter() + KEEP_FRAMES;
+        FrameLists listsForFree = build.lists;
+        deferred.add(new Deferred(freeAt, () -> {
+            // The deferred horizon guarantees these are off all queues, so destroying them now is safe.
+            listsForFree.releaseDeferred();
+        }));
+        tableRing[tableSlot].flush(0L, (long) build.count * TABLE_ENTRY_BYTES);
+        return new FrameEntities(base, build.instances, build.blas, build.geomTableAddr);
     }
 
     /** Capture animated entities (mobs, items, falling blocks) with per-object motion-vector displacement. */
+    // One stable positive key reuses the original BLAS ring/refit; reject any real-entity collision.
+    private final net.minecraft.client.renderer.state.level.WeatherRenderState weatherCapture=new net.minecraft.client.renderer.state.level.WeatherRenderState();
+    private static final int HAND_ENTITY_KEY=Integer.MAX_VALUE;
+    // Hand capture -> RT scene pipeline counters (RtFirstPerson.probe() only).
+    public static long probeHandAttempts,probeHandDisabled,probeHandNull,probeHandEmpty,probeHandBuildFull,probeHandKeyCollide,probeHandTris,probeHandReused,probeHandFallback;
+    /** Nanoseconds spent in the hand capture + upload path, and the frames it ran on. */
+    public static long probeHandNanos,probeHandTimedFrames;
+    public static void resetHandProbeCounters(){probeHandAttempts=0;probeHandDisabled=0;probeHandNull=0;probeHandEmpty=0;probeHandBuildFull=0;probeHandKeyCollide=0;probeHandTris=0;probeHandReused=0;probeHandFallback=0;probeHandNanos=0;probeHandTimedFrames=0;}
+    private EntityPrev previousHand;
+    private void captureFirstPerson(RtContext ctx,FrameBuild build,Minecraft mc,int rbx,int rby,int rbz,
+                                    double camX,double camY,double camZ,Matrix4f projection,Matrix4f viewRotation){
+        long handProbeStart=System.nanoTime();
+        if(RtFirstPerson.probe())probeHandAttempts++;
+        if(!RtFirstPerson.enabled()){if(RtFirstPerson.probe())probeHandDisabled++;previousHand=null;return;}
+        RtEntityCapture hand=RtFirstPerson.capture();
+        if(hand==null || hand.isEmpty() || build.full() || mc.level.getEntity(HAND_ENTITY_KEY)!=null){
+            if(RtFirstPerson.probe()){if(hand==null)probeHandNull++;else if(hand.isEmpty())probeHandEmpty++;else if(build.full())probeHandBuildFull++;else probeHandKeyCollide++;}
+            previousHand=null;return;
+        }
+        capture.reset(hand.verts.size()/3);capture.verts.addAll(hand.verts);capture.idx.addAll(hand.idx);
+        capture.uvList.addAll(hand.uvList);capture.prim.addAll(hand.prim);capture.alphaBuckets.addAll(hand.alphaBuckets);
+        float ex=(float)(camX-rbx),ey=(float)(camY-rby),ez=(float)(camZ-rbz);
+        var v=new org.joml.Vector3f();
+        float nearest=Float.POSITIVE_INFINITY;
+        // YSM can animate part of the empty hand behind the eye. A quad straddling w=0 would turn inside
+        // out in the projection remap, so cut the hand at the eye plane first, exactly like raster does.
+        HandProjection.clipNear(capture,viewRotation);
+        if(capture.idx.isEmpty()){previousHand=null;return;}
+        for(int i=0;i<capture.verts.size();i+=3) {
+            v.set(capture.verts.getFloat(i),capture.verts.getFloat(i+1),capture.verts.getFloat(i+2));
+            viewRotation.transformDirection(v);
+            nearest=Math.min(nearest,-v.z);
+        }
+        float nearPush=HandProjection.nearPlanePush(nearest);
+        if(nearPush>0f) {
+            var correction=new org.joml.Vector3f(0f,0f,-nearPush);
+            new Matrix4f(viewRotation).invert().transformDirection(correction);
+            for(int i=0;i<capture.verts.size();i+=3) {
+                capture.verts.set(i,capture.verts.getFloat(i)+correction.x);
+                capture.verts.set(i+1,capture.verts.getFloat(i+1)+correction.y);
+                capture.verts.set(i+2,capture.verts.getFloat(i+2)+correction.z);
+            }
+            nearest+=nearPush;
+        }
+        float depthScale=HandProjection.safeDepthScale(CausticaConfig.Rt.Visuals.HAND_DEPTH.value(),nearest);
+        var handProjection=RtFirstPerson.projection();
+        Matrix4f transform=handProjection!=null
+            ?HandProjection.toWorld(projection,handProjection,viewRotation,ex,ey,ez)
+            :HandProjection.toWorld(projection,viewRotation,mc.gameRenderer.gameRenderState().levelRenderState.cameraRenderState.hudFov,
+                (float)mc.getWindow().getWidth()/mc.getWindow().getHeight(),ex,ey,ez);
+        transform.scale(depthScale);
+        // A general projective map transforms planes, not just normal directions. Use a point on
+        // each original primitive to supply d, then inverse-transpose the complete plane equation.
+        var planeMatrix=new Matrix4f(transform).invert().transpose();
+        var plane=new org.joml.Vector4f();
+        for(int i=0;i<capture.prim.size();i+=12) {
+            int vertex=capture.idx.getInt((i/12)*3)*3;
+            float nx=capture.prim.getFloat(i),ny=capture.prim.getFloat(i+1),nz=capture.prim.getFloat(i+2);
+            plane.set(nx,ny,nz,-(nx*capture.verts.getFloat(vertex)+ny*capture.verts.getFloat(vertex+1)+nz*capture.verts.getFloat(vertex+2)));
+            planeMatrix.transform(plane);
+            v.set(plane.x,plane.y,plane.z);
+            if(v.lengthSquared()>1e-12f) v.normalize();
+            capture.prim.set(i,v.x);capture.prim.set(i+1,v.y);capture.prim.set(i+2,v.z);
+        }
+        for(int i=0;i<capture.verts.size();i+=3) {
+            transform.transformProject(capture.verts.getFloat(i),capture.verts.getFloat(i+1),capture.verts.getFloat(i+2),v);
+            capture.verts.set(i,v.x);capture.verts.set(i+1,v.y);capture.verts.set(i+2,v.z);
+        }
+        // Near-plane protection alone can expand a Punchy pose into a wall. Retract the WHOLE
+        // final animated group against real block collision boxes; never draw it above world depth.
+        double minX=Double.POSITIVE_INFINITY,minY=minX,minZ=minX;
+        double maxX=Double.NEGATIVE_INFINITY,maxY=maxX,maxZ=maxX;
+        for(int i=0;i<capture.verts.size();i+=3) {
+            double x=capture.verts.getFloat(i)-ex,y=capture.verts.getFloat(i+1)-ey,z=capture.verts.getFloat(i+2)-ez;
+            minX=Math.min(minX,x);minY=Math.min(minY,y);minZ=Math.min(minZ,z);
+            maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);maxZ=Math.max(maxZ,z);
+        }
+        var handBounds=new HandCollision.Bounds(minX,minY,minZ,maxX,maxY,maxZ);
+        double retract=handBounds.reachScale(2.0); // bounded query, including extreme near-plane poses
+        if(retract>0) {
+            var query=new net.minecraft.world.phys.AABB(camX+Math.min(0,minX*retract),
+                    camY+Math.min(0,minY*retract),camZ+Math.min(0,minZ*retract),
+                    camX+Math.max(0,maxX*retract),camY+Math.max(0,maxY*retract),camZ+Math.max(0,maxZ*retract)).inflate(.015);
+            for(var shape:mc.level.getBlockCollisions(mc.player,query)) for(var box:shape.toAabbs()) {
+                var expanded=box.inflate(.015);
+                retract=HandCollision.firstContact(handBounds,new HandCollision.Bounds(
+                        expanded.minX-camX,expanded.minY-camY,expanded.minZ-camZ,
+                        expanded.maxX-camX,expanded.maxY-camY,expanded.maxZ-camZ),retract);
+            }
+        }
+        if(retract<=1e-4) {previousHand=null;return;} // camera inside solid: no feasible visible hand space
+        if(retract<1) for(int i=0;i<capture.verts.size();i+=3) {
+            capture.verts.set(i,ex+(float)((capture.verts.getFloat(i)-ex)*retract));
+            capture.verts.set(i+1,ey+(float)((capture.verts.getFloat(i+1)-ey)*retract));
+            capture.verts.set(i+2,ez+(float)((capture.verts.getFloat(i+2)-ez)*retract));
+        }
+        Motion motion=uploadVertexMotion(ctx,build,capture.verts,previousHand,rbx,rby,rbz);
+        previousHand=storeEntityPrev(previousHand,capture.verts,rbx,rby,rbz);
+        if(RtFirstPerson.probe()){probeHandTris+=capture.idx.size()/3;probeHandTimedFrames++;probeHandNanos+=System.nanoTime()-handProbeStart;}
+        boolean handReused=appendRigidReuse(ctx,build,motion,HAND_ENTITY_KEY,MASK_PRIMARY,0f,0f,0f);
+        if(RtFirstPerson.probe()){if(handReused)probeHandReused++;else probeHandFallback++;}
+        if(!handReused)
+            appendCapture(ctx,build,motion,HAND_ENTITY_KEY,ENTITY_BIT,MASK_PRIMARY,translationTransform(0f,0f,0f));
+        build.logicalCount++;
+    }
+
     private void captureEntities(RtContext ctx, FrameBuild build, Minecraft mc, ClientLevel level, float partial, int rbx, int rby, int rbz) {
         EntityRenderDispatcher dispatcher = mc.getEntityRenderDispatcher();
         Entity cameraEntity = mc.getCameraEntity();
         // In first person the camera owner's own body must not block the primary camera ray, but it should
         // still appear in reflections / shadows / GI (so the player sees themselves in water as others would).
         // In F5 third person it renders fully, like any other entity.
-        boolean firstPerson = mc.options.getCameraType().isFirstPerson();
+        boolean firstPerson = dev.comfyfluffy.caustica.client.BetterPlayerModelCompat.realFirstPerson();
         curVerts.clear();
         glowBatches.clear();
         nameTagBatches.clear();
@@ -687,6 +788,7 @@ public final class RtEntities {
         glowCamOffsetY = (float) (cameraState.pos.y - rby);
         glowCamOffsetZ = (float) (cameraState.pos.z - rbz);
         resetPoseStack(entityPoseStack);
+        org.joml.Vector3fc camForward = mc.gameRenderer.mainCamera().forwardVector();
         int capturedThisFrame = 0;
         for (Entity entity : level.entitiesForRendering()) {
             if (build.full() || capturedThisFrame >= maxOrdinaryEntities()) {
@@ -695,15 +797,27 @@ public final class RtEntities {
             if (entity.isInvisible()) {
                 continue;
             }
+            // A spectator camera has no body (vanilla still poses its head); filmed and free-cam shots must not
+            // carry a shadow of the camera itself.
+            if (entity == cameraEntity && entity.isSpectator()) {
+                continue;
+            }
             boolean firstPersonSelf = entity == cameraEntity && firstPerson;
-            int mask = firstPersonSelf ? MASK_SECONDARY : MASK_ALL;
-            float ix;
-            float iy;
-            float iz;
+            int mask = LightOwnerMask.receiver(firstPersonSelf ? MASK_SECONDARY : MASK_ALL, entity == mc.player);
+            double ix;
+            double iy;
+            double iz;
             int id = entity.getId();
             EntityPrev prev = prevVerts.get(id);
+            if (!firstPersonSelf && entity != mc.player && throttledThisFrame(entity, id, partial, camForward)
+                    && reemitLast(ctx, build, entity, id, prev, mask, partial, rbx, rby, rbz)) {
+                build.logicalCount++;
+                RtFrameStats.FRAME.count("entityThrottled", 1);
+                capturedThisFrame++;
+                continue;
+            }
             capture.reset(prev != null ? prev.size / 3 : 0);
-            try {
+            try (var mobRenderScope=RtMobRenderScope.open(entity)) {
                 EntityRenderState state;
                 long extractStart = RtFrameStats.FRAME.startStage();
                 try {
@@ -713,9 +827,9 @@ public final class RtEntities {
                 }
                 // Derive placement from the extracted state so the submitted pose and TLAS anchor use the
                 // same interpolation result.
-                ix = (float) state.x;
-                iy = (float) state.y;
-                iz = (float) state.z;
+                ix = state.x;
+                iy = state.y;
+                iz = state.z;
                 // extractEntity already ran EntityRenderer.extractNameTags (shouldShowName, crosshair-look,
                 // distance cutoff, the attachment point) as a normal part of building the render state — no
                 // need to reimplement any of that here, just read the result. Name tags billboard to face
@@ -728,6 +842,7 @@ public final class RtEntities {
                     captureNameTag(level, state, ix, iy, iz, rbx, rby, rbz);
                 }
                 collector.begin(capture, true);
+                dev.comfyfluffy.caustica.rt.RtHeldLights.beginPlayerCapture(entity == mc.player);
                 resetPoseStack(entityPoseStack);
                 // Capture around the entity anchor. Per-frame placement moves into the TLAS instance,
                 // so ordinary world translation no longer changes the mesh or its float precision.
@@ -744,6 +859,7 @@ public final class RtEntities {
                 throw new RuntimeException("RT entity capture failed", t);
             } finally {
                 collector.begin(null, false);
+                dev.comfyfluffy.caustica.rt.RtHeldLights.beginPlayerCapture(false);
                 resetPoseStack(entityPoseStack);
             }
             if (capture.isEmpty()) {
@@ -757,7 +873,7 @@ public final class RtEntities {
                 int glowColor = collector.outlineColor();
                 if (glowColor != 0) {
                     glowBatches.add(new GlowEntity(copyTranslatedVertices(capture.verts,
-                            ix - rbx, iy - rby, iz - rbz), capture.idx.toIntArray(), glowColor));
+                            (float) (ix - rbx), (float) (iy - rby), (float) (iz - rbz)), capture.idx.toIntArray(), glowColor));
                 }
             }
             // Motion vs last frame's posed mesh. New/topology-changed entities get one frame of camera-only
@@ -769,19 +885,33 @@ public final class RtEntities {
             } finally {
                 RtFrameStats.FRAME.endStage("entity.capture.motion", motionStart);
             }
+            if (TRACE_ENTITY != null && entity.getType().toShortString().equals(TRACE_ENTITY)) traceEntity(entity, prev, ix, iy, iz, partial);
             curVerts.put(id, storeEntityPrev(prev, capture.verts, ix, iy, iz));
             // Rigid reuse first: a pose that is a rigid transform of the entity's last-built mesh
             // re-references that AS through the instance transform — no upload, no refit.
             boolean reused;
             long reuseStart = RtFrameStats.FRAME.startStage();
             try {
-                reused = appendRigidReuse(ctx, build, motion, id, mask, ix - rbx, iy - rby, iz - rbz);
+                reused = appendRigidReuse(ctx, build, motion, id, mask, (float) (ix - rbx), (float) (iy - rby), (float) (iz - rbz));
             } finally {
                 RtFrameStats.FRAME.endStage("entity.capture.rigidReuse", reuseStart);
             }
+            if (TRACE_ENTITY != null && entity.getType().toShortString().equals(TRACE_ENTITY)) {
+                float[] tv = capture.verts.elements(); float maxY = -1e9f;
+                for (int i = 1; i < capture.verts.size(); i += 3) maxY = Math.max(maxY, tv[i]);
+                // Mesh heading: principal axis of the xz footprint (mod 180) vs the interpolated body yaw.
+                double sx = 0, sz = 0, sxx = 0, szz = 0, sxz = 0; int vc = capture.verts.size() / 3;
+                for (int i = 0; i < vc; i++) { double x = tv[i * 3], z = tv[i * 3 + 2]; sx += x; sz += z; }
+                sx /= Math.max(1, vc); sz /= Math.max(1, vc);
+                for (int i = 0; i < vc; i++) { double x = tv[i * 3] - sx, z = tv[i * 3 + 2] - sz; sxx += x * x; szz += z * z; sxz += x * z; }
+                double meshYaw = Math.toDegrees(0.5 * Math.atan2(2 * sxz, sxx - szz));
+                float bodyYaw = entity instanceof net.minecraft.world.entity.LivingEntity le ? net.minecraft.util.Mth.rotLerp(partial, le.yBodyRotO, le.yBodyRot) : entity.getYRot();
+                CausticaMod.LOGGER.info("[ENTITY-REUSE] f={} id={} reused={} rigid={} maxY={} partial={} meshYaw={} bodyYaw={} capturesThisFrame={}", RtComposite.frameCounter(), id, reused, motion.dispAddr == 0L, maxY, partial,
+                        String.format("%.1f", meshYaw), String.format("%.1f", bodyYaw), traceSeen.merge(id * 31L + RtComposite.frameCounter(), 1, Integer::sum));
+            }
             if (!reused) {
                 appendCapture(ctx, build, motion, id, ENTITY_BIT, mask,
-                        translationTransform(ix - rbx, iy - rby, iz - rbz));
+                        translationTransform((float) (ix - rbx), (float) (iy - rby), (float) (iz - rbz)));
             }
             build.logicalCount++;
             RtFrameStats.FRAME.count("entitiesCaptured", 1);
@@ -821,7 +951,7 @@ public final class RtEntities {
      * here just hides occluded tags, a simplification to avoid a second draw/blend mode; revisit if that
      * turns out to look wrong in practice.
      */
-    private void captureNameTag(ClientLevel level, EntityRenderState state, float ix, float iy, float iz,
+    private void captureNameTag(ClientLevel level, EntityRenderState state, double ix, double iy, double iz,
                                  int rbx, int rby, int rbz) {
         Vec3 attach = state.nameTagAttachment;
         if (attach == null) {
@@ -839,25 +969,106 @@ public final class RtEntities {
             return; // a block is between the camera and the tag
         }
         nameTagBatches.add(new NameTagEntity(state.nameTag,
-                (float) wx - rbx, (float) wy - rby, (float) wz - rbz));
+                (float) (wx - rbx), (float) (wy - rby), (float) (wz - rbz)));
+    }
+
+    // Entities far behind the camera only reach the image through GI, shadows and reflections, where a pose
+    // refreshed every other frame is invisible; re-posing them (EMF/Fresh Animations replay) every frame was the
+    // largest CPU cost in villages. Anything that can be on screen, near, outlined or name-tagged is never throttled.
+    private int traceDumps;
+    private final java.util.Map<Long, Integer> traceSeen = new java.util.HashMap<>();
+    /** Test-only: lowest vertex x/z (a foot) as a leg-swing phase probe. */
+    private static final java.util.Map<Integer, Integer> LEG_INDEX = new java.util.HashMap<>();
+    private static String legProbe(int id, float[] v, int n) {
+        Integer best = LEG_INDEX.get(id);
+        if (best == null || best + 2 >= n) {
+            int b = -1; float minY = Float.MAX_VALUE;
+            for (int i = 1; i < n; i += 3) if (v[i] < minY - 1e-4f) { minY = v[i]; b = i - 1; }
+            if (b < 0) return "";
+            LEG_INDEX.put(id, b); best = b;
+        }
+        return String.format("%.4f/%.4f/%.4f", v[best], v[best + 1], v[best + 2]);
+    }
+    private static final String TRACE_ENTITY = System.getProperty("caustica.test.traceEntity");
+    /** Test-only: per-frame pose change of one entity type (local verts vs last frame) to expose half-rate poses. */
+    private void traceEntity(Entity entity, EntityPrev prev, double ix, double iy, double iz, float partial) {
+        float[] v = capture.verts.elements();
+        int n = capture.verts.size();
+        double maxD = -1, cy = 0;
+        for (int i = 1; i < n; i += 3) cy += v[i];
+        cy /= Math.max(1, n / 3);
+        if (prev != null && prev.size == n) {
+            maxD = 0;
+            for (int i = 0; i < n; i++) maxD = Math.max(maxD, Math.abs(v[i] - prev.verts[i]));
+        }
+        if (entity instanceof net.minecraft.world.entity.LivingEntity le) CausticaMod.LOGGER.info("[ENTITY-ROT] f={} id={} partial={} body={}/{} head={}/{} tickCount={} walkPos={} walkSpeed={} legY={}",
+                RtComposite.frameCounter(), entity.getId(), partial, le.yBodyRotO, le.yBodyRot, le.yHeadRotO, le.yHeadRot, entity.tickCount,
+                le.walkAnimation.position(partial), le.walkAnimation.speed(partial), legProbe(entity.getId(), capture.verts.elements(), capture.verts.size()));
+        if (traceDumps < 12 && RtComposite.frameCounter() > 900 && Minecraft.getInstance().player != null && entity.distanceToSqr(Minecraft.getInstance().player) < 36) {
+            traceDumps++;
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < n; i++) sb.append(String.format("%.4f", v[i])).append(i + 1 < n ? "," : "");
+            CausticaMod.LOGGER.info("[ENTITY-DUMP] f={} id={} v={}", RtComposite.frameCounter(), entity.getId(), sb);
+        }
+        CausticaMod.LOGGER.info("[ENTITY-TRACE] f={} id={} anchor={},{},{} centroidY={} poseDelta={} verts={} nanos={}",
+                RtComposite.frameCounter(), entity.getId(), String.format("%.4f", ix), String.format("%.4f", iy),
+                String.format("%.4f", iz), String.format("%.4f", cy), String.format("%.5f", maxD), n / 3, System.nanoTime());
+    }
+
+    private static final double THROTTLE_DISTANCE_SQ = 48.0 * 48.0;
+
+    private boolean throttledThisFrame(Entity entity, int id, float partial, org.joml.Vector3fc forward) {
+        if (((RtComposite.frameCounter() + id) & 1L) == 0L || entity.isCurrentlyGlowing() || entity.shouldShowName()
+                || entity.isVehicle() || entity.isPassenger()) return false;
+        net.minecraft.world.phys.Vec3 eye = Minecraft.getInstance().gameRenderer.mainCamera().position();
+        net.minecraft.world.phys.AABB box = entity.getBoundingBox();
+        double dx = (box.minX + box.maxX) * 0.5 - eye.x, dy = (box.minY + box.maxY) * 0.5 - eye.y, dz = (box.minZ + box.maxZ) * 0.5 - eye.z;
+        double distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq < THROTTLE_DISTANCE_SQ) return false;
+        // Behind the view plane by more than the entity's own radius: never inside any FOV < 180 degrees.
+        double radius = box.getSize() * 0.5 + 1.0;
+        return dx * forward.x() + dy * forward.y() + dz * forward.z() < -radius;
+    }
+
+    /** Re-emit the entity's last built mesh at its current anchor (rigid motion only); false if none exists. */
+    private boolean reemitLast(RtContext ctx, FrameBuild build, Entity entity, int id, EntityPrev prev, int mask,
+                               float partial, int rbx, int rby, int rbz) {
+        EntityAccel ea = entityAccels.get(id);
+        if (ea == null || ea.refAccel == null || ea.lastLocal == null || prev == null || build.full()) return false;
+        double ix = net.minecraft.util.Mth.lerp(partial, entity.xOld, entity.getX());
+        double iy = net.minecraft.util.Mth.lerp(partial, entity.yOld, entity.getY());
+        double iz = net.minecraft.util.Mth.lerp(partial, entity.zOld, entity.getZ());
+        beginBuildIfNeeded(ctx, build);
+        ea.lastSeen = RtComposite.frameCounter();
+        writeTableEntry(build, ea.refPrimAddr, ea.refIndexAddr, ea.refUvAddr, 0L,
+                (float) (ix - prev.anchorX), (float) (iy - prev.anchorY), (float) (iz - prev.anchorZ), ea.refBucketTris, mask);
+        build.instances.add(new RtAccel.Instance(placeTransform(ea.lastLocal, (float) (ix - rbx), (float) (iy - rby), (float) (iz - rbz)),
+                ea.refAccel.deviceAddress, ENTITY_BIT | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
+        build.count++;
+        // Keep the posed vertices; only the anchor advances, so the next real capture diffs pose, not travel.
+        prev.anchorX = ix;
+        prev.anchorY = iy;
+        prev.anchorZ = iz;
+        curVerts.put(id, prev);
+        return true;
     }
 
     /**
      * Upload this entity's world-space motion-vector displacement. Captures are entity-local, so the delta
      * is {@code (anchorCur + vertexCur) - (anchorPrev + vertexPrev)}. If every vertex agrees,
      * store it as a rigid vector in the geometry-table entry; otherwise write a per-vertex {@code vec4}
-     * buffer directly.
+     * buffer directly, avoiding the old intermediate {@code float[]}.
      */
     private Motion uploadVertexMotion(RtContext ctx, FrameBuild build, FloatArrayList cur,
-                                      EntityPrev prev, float anchorX, float anchorY, float anchorZ) {
+                                      EntityPrev prev, double anchorX, double anchorY, double anchorZ) {
         if (prev == null || prev.size != cur.size()) {
             return NO_MOTION;
         }
         float[] curVerts = cur.elements();
         float[] prevVerts = prev.verts;
-        float sx = anchorX - prev.anchorX;
-        float sy = anchorY - prev.anchorY;
-        float sz = anchorZ - prev.anchorZ;
+        float sx = (float) (anchorX - prev.anchorX);
+        float sy = (float) (anchorY - prev.anchorY);
+        float sz = (float) (anchorZ - prev.anchorZ);
         int vc = cur.size() / 3;
         if (vc == 0) {
             return NO_MOTION;
@@ -893,12 +1104,13 @@ public final class RtEntities {
             MemoryUtil.memPutFloat(out + 12, 0f);
             out += 16;
         }
+        disp.flush();
         RtFrameStats.FRAME.count("entityMotionUploadBytes", bytes);
         return new Motion(disp.deviceAddress, 0f, 0f, 0f);
     }
 
     private static EntityPrev storeEntityPrev(EntityPrev prev, FloatArrayList cur,
-                                              float anchorX, float anchorY, float anchorZ) {
+                                              double anchorX, double anchorY, double anchorZ) {
         EntityPrev out = prev != null ? prev : new EntityPrev();
         int size = cur.size();
         if (out.verts.length < size) {
@@ -910,19 +1122,6 @@ public final class RtEntities {
         out.anchorY = anchorY;
         out.anchorZ = anchorZ;
         return out;
-    }
-
-    /** Core per-vertex disp builder: {@code (cur − prev) + rebaseShift}, packed vec4/vertex (w = 0). */
-    private static float[] buildDisp(float[] cur, int curSize, float[] prev, float sx, float sy, float sz) {
-        int vc = curSize / 3;
-        float[] d = new float[vc * 4];
-        for (int i = 0; i < vc; i++) {
-            d[i * 4]     = (cur[i * 3]     - prev[i * 3])     + sx;
-            d[i * 4 + 1] = (cur[i * 3 + 1] - prev[i * 3 + 1]) + sy;
-            d[i * 4 + 2] = (cur[i * 3 + 2] - prev[i * 3 + 2]) + sz;
-            d[i * 4 + 3] = 0f;
-        }
-        return d;
     }
 
     /**
@@ -937,8 +1136,9 @@ public final class RtEntities {
      */
     private void captureParticles(RtContext ctx, FrameBuild build, Minecraft mc, float partial,
                                   int rbx, int rby, int rbz, Matrix4f projection, Matrix4f viewRotation) {
+        billboardParticlesCaptured=0;
         int particleLimit = maxParticles();
-        if (!particlesEnabled() || particleLimit == 0 || build.full()) {
+        if (build.full()) {
             particlePrev.clear();
             particleCur.clear();
             return;
@@ -948,12 +1148,8 @@ public final class RtEntities {
             return;
         }
         Map<ParticleRenderType, ParticleGroup<?>> groups =
-                ((ParticleEngineAccessor) mc.particleEngine).caustica$getParticleGroups();
-        if (groups == null || groups.isEmpty()) {
-            particlePrev.clear();
-            particleCur.clear();
-            return;
-        }
+                particlesEnabled() && particleLimit>0 ? ((ParticleEngineAccessor) mc.particleEngine).caustica$getParticleGroups() : java.util.Map.of();
+        if (groups == null) groups = java.util.Map.of();
         capture.reset();
         capture.currentAlphaBucket = RtAccel.ENTITY_BUCKET_ANY_HIT;
         particleDisp.clear();
@@ -985,6 +1181,7 @@ public final class RtEntities {
                     int vb = capture.verts.size(), ib = capture.idx.size();
                     int ub = capture.uvList.size(), prb = capture.prim.size(), abb = capture.alphaBuckets.size();
                     int vertBefore = vb / 3;
+                    particleCapture.rainStyle(p instanceof net.minecraft.client.particle.WaterDropParticle);
                     particleScratch.clear();
                     sq.extract(particleScratch, cam, partial);
                     for (SingleQuadParticle.Layer layer : particleScratch.layers()) {
@@ -1016,6 +1213,28 @@ public final class RtEntities {
             particleDisp.clear();
             throw new RuntimeException("RT particle capture failed", t); // propagate to composite() (see entity path)
         }
+        // LevelRenderer cancellation also skipped precipitation, which is not a ParticleEngine group.
+        // Reuse vanilla biome/roof/snow selection and animated column UVs in the existing particle mesh.
+        if(mc.level.getRainLevel(partial)>0 && !build.full()) {
+            var renderer=mc.levelRenderer.weatherEffectRenderer();
+            weatherCapture.reset();renderer.extractRenderState(mc.level,partial,camPos,weatherCapture);
+            int start=capture.verts.size()/3;
+            var invoker=(dev.comfyfluffy.caustica.mixin.WeatherEffectRendererInvoker)(Object)renderer;
+            capture.currentAlphaBucket=RtAccel.ENTITY_BUCKET_ANY_HIT;capture.clearUvRemap();capture.currentOrder=0;
+            capture.currentTexSlot=RtEntityTextures.INSTANCE.slotForAtlas(net.minecraft.resources.Identifier.withDefaultNamespace("textures/environment/rain.png"));
+            particleCapture.rainStyle(true);
+            particleCapture.weatherStyle(true,camPos.x,camPos.y,camPos.z,net.minecraft.util.Util.getMillis()/1000.0);
+            invoker.caustica$renderInstances(particleCapture,weatherCapture.rainColumns,camPos,1f,weatherCapture.radius,weatherCapture.intensity);
+            particleCapture.flush();particleCapture.rainStyle(false);
+            particleCapture.weatherStyle(false,0,0,0,0);
+            capture.currentTexSlot=RtEntityTextures.INSTANCE.slotForAtlas(net.minecraft.resources.Identifier.withDefaultNamespace("textures/environment/snow.png"));
+            invoker.caustica$renderInstances(particleCapture,weatherCapture.snowColumns,camPos,.8f,weatherCapture.radius,weatherCapture.intensity);
+            particleCapture.flush();
+            for(int i=start;i<capture.verts.size()/3;i++) {particleDisp.add(0);particleDisp.add(0);particleDisp.add(0);particleDisp.add(0);}
+            RtFrameStats.FRAME.count("weatherColumnsCaptured",weatherCapture.rainColumns.size()+weatherCapture.snowColumns.size());
+        }
+        particleCapture.rainStyle(false);
+        billboardParticlesCaptured=particlesCaptured;
         RtFrameStats.FRAME.count("particlesCaptured", particlesCaptured);
         IdentityHashMap<Particle, ParticlePrev> oldPrev = particlePrev;
         particlePrev = cur;
@@ -1026,6 +1245,83 @@ public final class RtEntities {
         long dispAddr = uploadDisp(ctx, build, particleDisp);
         appendCapture(ctx, build, new Motion(dispAddr, 0f, 0f, 0f),
                 -1, PARTICLE_BIT, PARTICLE_MASK, IDENTITY); // one combined mesh, per-particle MV
+    }
+
+    /** Vanilla has two model-particle groups in addition to billboard quads: pickup and elder guardian.
+     * Reuse their own extracted render states so vanilla interpolation, pose and texture selection survive.
+     * NoRenderParticleGroup is intentionally invisible. Group extraction stays within the particle budget.
+     */
+    private void captureModelParticles(RtContext ctx,FrameBuild build,Minecraft mc,float partial,
+            int rbx,int rby,int rbz,Matrix4f projection,Matrix4f viewRotation) {
+        if(!particlesEnabled() || build.full())return;
+        var cam=mc.gameRenderer.mainCamera();if(cam==null)return;
+        var groups=((ParticleEngineAccessor)mc.particleEngine).caustica$getParticleGroups();
+        if(groups==null)return;
+        Frustum frustum=new Frustum(viewRotation,projection);var cp=cam.position();frustum.prepare(cp.x,cp.y,cp.z);
+        int remaining=maxParticles()-billboardParticlesCaptured;
+        for(var group:groups.values()) {
+            if(!(group instanceof net.minecraft.client.particle.ItemPickupParticleGroup)
+                    && !(group instanceof net.minecraft.client.particle.ElderGuardianParticleGroup))continue;
+            if(group.isEmpty() || group.size()>remaining || build.full())continue;
+            try {
+                var state=group.extractRenderState(frustum,cam,partial);
+                if(state==null)continue;
+                capture.reset();collector.begin(capture,false);
+                try{state.submit(collector,cameraState);}
+                finally{collector.begin(null,false);}
+                if(capture.isEmpty())continue;
+                // A pickup animation can scale a quad to zero or produce a non-finite pose. Such geometry must
+                // never reach a BLAS: a NaN vertex poisons the BVH and every later trace sees garbage.
+                if(!hasFiniteGeometry())continue;
+                var placement=translationTransform((float)(cp.x-rbx),(float)(cp.y-rby),(float)(cp.z-rbz));
+                appendCapture(ctx,build,new Motion(0L,0f,0f,0f),-1,ENTITY_BIT,PARTICLE_MASK,placement);
+                remaining-=group.size();build.logicalCount+=group.size();
+                RtFrameStats.FRAME.count("modelParticlesCaptured",group.size());
+            } catch(RuntimeException t) {
+                // One malformed group must not discard the other groups or the whole entity frame.
+                logModelParticleFailure(t);
+            }
+        }
+    }
+
+    /** Log the first few model-particle failures without flooding: one bad group can repeat every frame. */
+    private void logModelParticleFailure(RuntimeException failure) {
+        if (modelParticleFailures < 3) {
+            CausticaMod.LOGGER.warn("Model particle capture skipped ({} of 3 logged): {}",
+                    modelParticleFailures + 1, failure.toString());
+        } else if (modelParticleFailures == 3) {
+            CausticaMod.LOGGER.warn("Further model particle capture failures suppressed");
+        }
+        modelParticleFailures++;
+    }
+
+    /**
+     * Reject geometry that cannot build a valid acceleration structure: no triangles, or any non-finite
+     * position/UV. Dropping one particle for a frame is invisible; a NaN vertex corrupts the BLAS and the
+     * whole world trace afterwards, which is exactly what a broken pickup animation can produce.
+     */
+    private boolean hasFiniteGeometry() {
+        return finiteGeometry(capture.idx.size(), capture.verts.elements(), capture.verts.size(),
+                capture.uvList.elements(), capture.uvList.size());
+    }
+
+    /** Package-visible so the rejection rule can be tested without a GPU or a live capture. */
+    static boolean finiteGeometry(int indexCount, float[] verts, int vertexFloats,
+            float[] uvs, int uvFloats) {
+        if (indexCount < 3) {
+            return false;
+        }
+        for (int i = 0; i < vertexFloats; i++) {
+            if (!Float.isFinite(verts[i])) {
+                return false;
+            }
+        }
+        for (int i = 0; i < uvFloats; i++) {
+            if (!Float.isFinite(uvs[i])) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Average (rebase-space) position of a captured particle's verts — approximates the particle center. */
@@ -1128,7 +1424,7 @@ public final class RtEntities {
                                    BlockEntity be, float partial, long now, int rbx, int rby, int rbz) {
         capture.reset();
         try {
-            BlockEntityRenderState state = beDispatcher.tryExtractRenderState(be, partial, null, false);
+            BlockEntityRenderState state = RtPortalCapture.extract(beDispatcher, be, partial, cameraState.pos);
             if (state == null) {
                 return; // off-screen-only (beacon/end-gateway), distance-culled, or no renderer
             }
@@ -1151,7 +1447,7 @@ public final class RtEntities {
             entry.lastSeen = now;
         }
         long hash = meshHash();
-        float[] disp = null; // static unless the mesh changed this frame (chest lid / spawner animation)
+        FloatArrayList disp = null; // static unless the mesh changed this frame (chest lid / spawner animation)
         if (entry == null || entry.meshHash != hash) {
             // Geometry changed (or new BE) → rebuild, but only within this frame's budget. Over budget: keep
             // showing the previous geometry; a brand-new BE simply pops in over the next frames.
@@ -1164,12 +1460,12 @@ public final class RtEntities {
             // Per-vertex MV from the previous build's block-local mesh (same vertex count ⇒ pairable).
             // The BE itself doesn't move, so the world displacement is the pure local delta.
             if (entry != null && entry.prevVerts != null && entry.prevVerts.length == capture.verts.size()) {
-                disp = buildDisp(capture.verts.elements(), capture.verts.size(), entry.prevVerts, 0f, 0f, 0f);
+                disp = VertexDisplacements.fill(capture.verts.elements(), capture.verts.size(), entry.prevVerts, beDispScratch);
             }
-            BeEntry rebuilt = buildBe(ctx, build, be, hash);
+            BeEntry rebuilt = buildBe(ctx, build, be, hash, entry == null ? null : entry.prevVerts);
             rebuilt.lastSeen = now;
             if (entry != null) {
-                retireBe(ctx, entry);
+                deferDestroyBe(entry); // retire the superseded geometry off-queue
             }
             beCache.put(key, rebuilt);
             entry = rebuilt;
@@ -1178,7 +1474,7 @@ public final class RtEntities {
     }
 
     /** Upload the already-captured BE mesh to fresh buffers and build its BLAS (block-local). */
-    private BeEntry buildBe(RtContext ctx, FrameBuild build, BlockEntity be, long hash) {
+    private BeEntry buildBe(RtContext ctx, FrameBuild build, BlockEntity be, long hash, float[] previousStorage) {
         beginBuildIfNeeded(ctx, build);
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -1226,7 +1522,10 @@ public final class RtEntities {
         e.bz = p.getZ();
         e.meshHash = hash;
         // Retain this build's block-local verts so the next rebuild can diff against them for the MV.
-        e.prevVerts = java.util.Arrays.copyOf(capture.verts.elements(), capture.verts.size());
+        int vertexFloats = capture.verts.size();
+        e.prevVerts = previousStorage != null && previousStorage.length == vertexFloats
+            ? previousStorage : new float[vertexFloats];
+        System.arraycopy(capture.verts.elements(),0,e.prevVerts,0,vertexFloats);
         return e;
     }
 
@@ -1256,7 +1555,7 @@ public final class RtEntities {
     }
 
     /** Emit a cached block entity into this frame: its geometry-table entry + a TLAS instance (no GPU build). */
-    private void emitBe(RtContext ctx, FrameBuild build, BeEntry e, float[] disp, int rbx, int rby, int rbz) {
+    private void emitBe(RtContext ctx, FrameBuild build, BeEntry e, FloatArrayList disp, int rbx, int rby, int rbz) {
         if (build.full()) {
             return;
         }
@@ -1265,31 +1564,27 @@ public final class RtEntities {
         // passes null ⇒ dispAddr 0 ⇒ no MV. The disp buffer is a per-frame transient, so a BE that stops
         // animating reverts to MV 0 next frame.
         long dispAddr = uploadDisp(ctx, build, disp);
-        writeTableEntry(build, e.primAddr, e.indexAddr, e.uvAddr, dispAddr, 0f, 0f, 0f, e.bucketTris);
+        writeTableEntry(build, e.primAddr, e.indexAddr, e.uvAddr, dispAddr, 0f, 0f, 0f, e.bucketTris, MASK_ALL);
         // Block-local mesh placed by a translate-only instance transform (blockPos − rebase), like terrain.
         float[] xform = {1, 0, 0, e.bx - rbx, 0, 1, 0, e.by - rby, 0, 0, 1, e.bz - rbz};
         build.instances.add(new RtAccel.Instance(xform, e.accel.deviceAddress,
                 ENTITY_BIT | (build.count & 0x7FFFFF), 0xFF, RtAccel.SBT_ENTITY_OFFSET));
         build.count++;
-        build.lists.usedBlockEntities.add(e);
         build.logicalCount++;
         RtFrameStats.FRAME.count("blockEntitiesCaptured", 1);
     }
 
-    /** Retire a cached block entity's persistent AS + mesh buffers once its exact last graphics use completes. */
-    private static void retireBe(RtContext ctx, BeEntry e) {
-        RtAccel accel = e.accel;
-        RtBuffer backing = e.backing;
-        RtBuffer geometry = e.geometry;
-        ctx.gpuExecutor().retireAfterGraphics(e.graphicsUse, () -> {
-            RtAccel.destroyEntityAccel(accel, backing);
-            geometry.destroy();
-        });
-        RtFrameStats.FRAME.count("entityBlockEntityRetirements", 1);
+    /** Retire a cached block entity's persistent AS + mesh buffers once off all in-flight queues. */
+    private void deferDestroyBe(BeEntry e) {
+        long freeAt = RtComposite.frameCounter() + KEEP_FRAMES;
+        deferred.add(new Deferred(freeAt, () -> {
+            RtAccel.destroyEntityAccel(e.accel, e.backing);
+            e.geometry.destroy();
+        }));
     }
 
     /** Drop cached block entities not seen (in window) within the last KEEP_FRAMES frames — unloaded/out of view. */
-    private void evictStaleBes(RtContext ctx) {
+    private void evictStaleBes() {
         if (beCache.isEmpty()) {
             return;
         }
@@ -1300,7 +1595,7 @@ public final class RtEntities {
             if (now - e.lastSeen < KEEP_FRAMES) {
                 continue;
             }
-            retireBe(ctx, e);
+            deferDestroyBe(e);
             it.remove();
         }
     }
@@ -1328,8 +1623,6 @@ public final class RtEntities {
             return;
         }
         FrameLists lists = frameLists[(int) (RtComposite.frameCounter() % frameLists.length)];
-        awaitGraphicsUse(build, lists.graphicsUse, "entityFrameListsWaits");
-        lists.releaseDeferred();
         lists.reset();
         build.lists = lists;
         build.instances = lists.instances;
@@ -1340,19 +1633,8 @@ public final class RtEntities {
         build.motion = lists.motion;
         ensureResources(ctx);
         tableSlot = (tableSlot + 1) % TABLE_RING;
-        build.table = tableRing[tableSlot];
-        awaitGraphicsUse(build, build.table.graphicsUse, "entityTableWaits");
-        build.tableBase = build.table.buffer.mapped;
-        build.geomTableAddr = build.table.buffer.deviceAddress;
-    }
-
-    private static void awaitGraphicsUse(FrameBuild build, TrackedGraphicsUse graphicsUse, String counter) {
-        long started = System.nanoTime();
-        if (!build.graphicsUseWaiter.await(graphicsUse)) {
-            return;
-        }
-        RtFrameStats.FRAME.count(counter, 1);
-        RtFrameStats.FRAME.count("entityGraphicsWaitNanos", System.nanoTime() - started);
+        build.tableBase = tableRing[tableSlot].mapped;
+        build.geomTableAddr = tableRing[tableSlot].deviceAddress;
     }
 
     /**
@@ -1412,12 +1694,10 @@ public final class RtEntities {
         }
         beginBuildIfNeeded(ctx, build);
         ea.lastSeen = RtComposite.frameCounter();
-        if (ea.refSlot == null) {
-            throw new IllegalStateException("Rigid entity reuse lost its owning slot");
-        }
-        build.lists.usedEntitySlots.add(ea.refSlot);
+        ea.lastLocal = localTransform;
         writeTableEntry(build, ea.refPrimAddr, ea.refIndexAddr, ea.refUvAddr,
-                motion.dispAddr, motion.rigidX, motion.rigidY, motion.rigidZ, ea.refBucketTris);
+                motion.dispAddr, motion.rigidX, motion.rigidY, motion.rigidZ, ea.refBucketTris, mask);
+        if(entityId==HAND_ENTITY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
         build.instances.add(new RtAccel.Instance(placeTransform(localTransform, placeX, placeY, placeZ),
                 ea.refAccel.deviceAddress,
                 ENTITY_BIT | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
@@ -1474,12 +1754,9 @@ public final class RtEntities {
     }
 
     private static boolean positionsBitwiseEqual(float[] a, float[] b, int size) {
-        for (int i = 0; i < size; i++) {
-            if (Float.floatToRawIntBits(a[i]) != Float.floatToRawIntBits(b[i])) {
-                return false;
-            }
-        }
-        return true;
+        // Vectorized range compare; it differs from raw-bit equality only for NaN payloads, which never
+        // occur in captured vertex positions (a NaN would already break the BLAS).
+        return java.util.Arrays.equals(a, 0, size, b, 0, size);
     }
 
     private static float[] translationTransform(float x, float y, float z) {
@@ -1502,24 +1779,42 @@ public final class RtEntities {
      * and the hit shader re-rotates the cached ones via the instance transform.
      */
     private long shadeHash() {
-        long h = 1469598103934665603L;
+        // Equality key only (compared with a value produced by this same function). Two floats per 64-bit
+        // step on four independent lanes: the serial FNV chain over every UV/prim float was a per-entity,
+        // per-frame render-thread hotspot.
+        long h0 = 0x9E3779B97F4A7C15L, h1 = 0xC2B2AE3D27D4EB4FL, h2 = 0x165667B19E3779F9L, h3 = 0x27D4EB2F165667C5L;
         float[] uv = capture.uvList.elements();
         int un = capture.uvList.size();
-        for (int i = 0; i < un; i++) {
-            h = (h ^ (Float.floatToRawIntBits(uv[i]) & 0xffffffffL)) * 1099511628211L;
+        int i = 0;
+        for (; i + 8 <= un; i += 8) {
+            h0 = mixLane(h0, pairBits(uv[i], uv[i + 1]));
+            h1 = mixLane(h1, pairBits(uv[i + 2], uv[i + 3]));
+            h2 = mixLane(h2, pairBits(uv[i + 4], uv[i + 5]));
+            h3 = mixLane(h3, pairBits(uv[i + 6], uv[i + 7]));
         }
+        for (; i < un; i++) h0 = mixLane(h0, Float.floatToRawIntBits(uv[i]) & 0xffffffffL);
         float[] pr = capture.prim.elements();
         int pn = capture.prim.size();
         for (int base = 0; base < pn; base += 12) {
-            for (int k = 3; k < 12; k++) { // skip normal.xyz (0..2); keep emission(3), tint(4..7), mat(8..11)
-                h = (h ^ (Float.floatToRawIntBits(pr[base + k]) & 0xffffffffL)) * 1099511628211L;
-            }
+            // skip normal.xyz (0..2); keep emission(3), tint(4..7), mat(8..11)
+            h0 = mixLane(h0, pairBits(pr[base + 3], pr[base + 4]));
+            h1 = mixLane(h1, pairBits(pr[base + 5], pr[base + 6]));
+            h2 = mixLane(h2, pairBits(pr[base + 7], pr[base + 8]));
+            h3 = mixLane(h3, pairBits(pr[base + 9], pr[base + 10]) ^ ((long) Float.floatToRawIntBits(pr[base + 11]) << 17));
         }
         int[] buckets = capture.alphaBuckets.elements();
-        for (int i = 0; i < capture.alphaBuckets.size(); i++) {
-            h = (h ^ (buckets[i] & 0xffffffffL)) * 1099511628211L;
-        }
-        return h;
+        for (int b = 0; b < capture.alphaBuckets.size(); b++) h0 = mixLane(h0, buckets[b] & 0xffffffffL);
+        long h = mixLane(mixLane(mixLane(h0, h1), h2), h3);
+        return mixLane(h, ((long) un << 32) ^ pn);
+    }
+
+    private static long pairBits(float a, float b) {
+        return (Float.floatToRawIntBits(a) & 0xffffffffL) | ((long) Float.floatToRawIntBits(b) << 32);
+    }
+
+    private static long mixLane(long h, long v) {
+        h = (h ^ v) * 0xFF51AFD7ED558CCDL;
+        return h ^ (h >>> 31);
     }
 
     /**
@@ -1571,7 +1866,8 @@ public final class RtEntities {
         build.pooledBlas.add(blas);
 
         writeTableEntry(build, primAddr, indexAddr, uvAddr, motion.dispAddr,
-                motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris());
+                motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris(), mask);
+        if(entityId==HAND_ENTITY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
 
         build.instances.add(new RtAccel.Instance(instanceTransform, blas.accel.deviceAddress,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
@@ -1594,8 +1890,7 @@ public final class RtEntities {
         RtBuffer geometry;
         long allocStart = RtFrameStats.FRAME.startStage();
         try {
-            slot = selectEntityBuildSlot(ctx, build, entityId);
-            build.lists.usedEntitySlots.add(slot);
+            slot = selectEntityBuildSlot(entityId);
             long required = Math.addExact(layout.totalBytes, EntityGeometryLayout.REGION_ALIGNMENT - 1L);
             geometry = slot.geometry;
             if (geometry == null || geometry.size < required) {
@@ -1649,14 +1944,15 @@ public final class RtEntities {
         }
 
         writeTableEntry(build, primAddr, indexAddr, uvAddr, motion.dispAddr,
-                motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris());
+                motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris(), mask);
+        if(entityId==HAND_ENTITY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
         build.instances.add(new RtAccel.Instance(instanceTransform, accel.deviceAddress,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
 
         EntityAccel ea = slot.owner;
         clearRefGeometry(ea);
+        ea.lastLocal = IDENTITY;
         ea.refAccel = accel;
-        ea.refSlot = slot;
         ea.refIndexAddr = indexAddr;
         ea.refUvAddr = uvAddr;
         ea.refPrimAddr = primAddr;
@@ -1675,7 +1971,6 @@ public final class RtEntities {
     /** Clear the latest rigid-reuse view; the backing remains owned by its retired ring slot. */
     private void clearRefGeometry(EntityAccel ea) {
         ea.refAccel = null;
-        ea.refSlot = null;
         ea.refIndexAddr = 0L;
         ea.refUvAddr = 0L;
         ea.refPrimAddr = 0L;
@@ -1695,11 +1990,15 @@ public final class RtEntities {
         beginBuildIfNeeded(ctx, build);
         MotionSlice slice = build.motion.allocate(ctx, (long) disp.length * Float.BYTES);
         MemoryUtil.memFloatBuffer(slice.mapped, disp.length).put(disp, 0, disp.length);
+        slice.flush();
         return slice.deviceAddress;
     }
 
     /** Upload a reusable primitive list without first copying its backing into a right-sized array. */
     private long uploadDisp(RtContext ctx, FrameBuild build, FloatArrayList disp) {
+        // Static and build-budget-reused block entities deliberately have no displacement buffer.
+        // Address zero means camera-only motion, not a failed entity frame.
+        if (disp == null) return 0L;
         int size = disp.size();
         if (size == 0) {
             return 0L;
@@ -1707,12 +2006,13 @@ public final class RtEntities {
         beginBuildIfNeeded(ctx, build);
         MotionSlice slice = build.motion.allocate(ctx, (long) size * Float.BYTES);
         MemoryUtil.memFloatBuffer(slice.mapped, size).put(disp.elements(), 0, size);
+        slice.flush();
         return slice.deviceAddress;
     }
 
     /** Write one std430 EntityGeom entry, including bases for the two packed BLAS geometries. */
     private void writeTableEntry(FrameBuild build, long primAddr, long idxAddr, long uvAddr, long dispAddr,
-                                 float rigidX, float rigidY, float rigidZ, int[] bucketTris) {
+                                 float rigidX, float rigidY, float rigidZ, int[] bucketTris, int mask) {
         if (bucketTris == null || bucketTris.length != RtAccel.ENTITY_BUCKETS) {
             throw new IllegalArgumentException("Missing entity BLAS bucket counts");
         }
@@ -1727,12 +2027,15 @@ public final class RtEntities {
         MemoryUtil.memPutFloat(entry + 44, 0f);
         MemoryUtil.memPutInt(entry + 48, 0);
         MemoryUtil.memPutInt(entry + 52, bucketTris[RtAccel.ENTITY_BUCKET_OPAQUE]);
-        MemoryUtil.memPutInt(entry + 56, 0);
+        MemoryUtil.memPutInt(entry + 56, (mask & LightOwnerMask.HELD_SHADOW) == 0 ? 1 : 0);
         MemoryUtil.memPutInt(entry + 60, 0);
     }
 
-    /** Select the next per-entity slot, waiting on its exact last graphics use before mutable reuse. */
-    private EntitySlot selectEntityBuildSlot(RtContext ctx, FrameBuild build, int entityId) {
+    /**
+     * Select the next per-entity slot. One entity contributes at most one changed capture per frame, so a
+     * wrapped slot is at least {@link #REFIT_RING} frames old and off all queues.
+     */
+    private EntitySlot selectEntityBuildSlot(int entityId) {
         EntityAccel ea = entityAccels.get(entityId);
         if (ea == null) {
             ea = new EntityAccel();
@@ -1746,8 +2049,6 @@ public final class RtEntities {
             slot = new EntitySlot();
             slot.owner = ea;
             ea.ring[s] = slot;
-        } else {
-            awaitGraphicsUse(build, slot.graphicsUse, "entitySlotWaits");
         }
         return slot;
     }
@@ -1792,7 +2093,7 @@ public final class RtEntities {
             slot.updatesSinceBuild++;
             return slot.accel;
         }
-        // (Re)build: the selected ring slot's exact prior graphics use has completed, so replace its old AS.
+        // (Re)build: the selected ring slot is already past the in-flight horizon, so replace its old AS.
         if (slot.accel != null) {
             RtAccel.destroyEntityAccel(slot.accel, slot.backing);
             slot.accel = null;
@@ -1852,8 +2153,8 @@ public final class RtEntities {
         slot.indexCount = count;
     }
 
-    /** Retire persistent AS for entities not captured within the last KEEP_FRAMES frames. */
-    private void evictStaleAccels(RtContext ctx) {
+    /** Drop persistent AS for entities not captured within the last KEEP_FRAMES frames (off all queues). */
+    private void evictStaleAccels() {
         if (entityAccels.isEmpty()) {
             return;
         }
@@ -1866,7 +2167,7 @@ public final class RtEntities {
             }
             for (EntitySlot slot : ea.ring) {
                 if (slot != null) {
-                    retireEntitySlot(ctx, slot);
+                    destroyEntitySlot(slot);
                 }
             }
             clearRefGeometry(ea);
@@ -1893,28 +2194,6 @@ public final class RtEntities {
         slot.indexCount = 0;
     }
 
-    /** Detach a stale slot immediately and destroy its GPU owners after their exact last use completes. */
-    private void retireEntitySlot(RtContext ctx, EntitySlot slot) {
-        RtAccel accel = slot.accel;
-        RtBuffer backing = slot.backing;
-        RtBuffer geometry = slot.geometry;
-        RtBuffer scratch = slot.refitScratch;
-        long geometryBytes = geometry == null ? 0L : geometry.size;
-        retainedGeometryBytes = Math.subtractExact(retainedGeometryBytes, geometryBytes);
-        slot.accel = null;
-        slot.backing = null;
-        slot.geometry = null;
-        slot.refitScratch = null;
-        slot.indices = null;
-        slot.indexCount = 0;
-        ctx.gpuExecutor().retireAfterGraphics(slot.graphicsUse, () -> {
-            if (accel != null) RtAccel.destroyEntityAccel(accel, backing);
-            if (geometry != null) geometry.destroy();
-            if (scratch != null) scratch.destroy();
-        });
-        RtFrameStats.FRAME.count("entitySlotRetirements", 1);
-    }
-
     private void setCamera(double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
         if (cameraState == null) {
             cameraState = new CameraRenderState();
@@ -1933,34 +2212,59 @@ public final class RtEntities {
     }
 
     private void ensureResources(RtContext ctx) {
-        int requiredCapacity = maxEntities();
+        int requiredCapacity = maxEntities()+RtDhLods.MAX_SECTIONS;
         if (tableRing != null && tableCapacity >= requiredCapacity) {
             return;
         }
         if (tableRing != null) {
-            for (TableSlot old : tableRing) {
-                ctx.gpuExecutor().retireAfterGraphics(old.graphicsUse, old.buffer::destroy);
-                RtFrameStats.FRAME.count("entityTableRetirements", 1);
-            }
+            RtBuffer[] oldRing = tableRing;
+            deferred.add(new Deferred(RtComposite.frameCounter() + KEEP_FRAMES, () -> {
+                for (RtBuffer b : oldRing) {
+                    b.destroy();
+                }
+            }));
             tableRing = null;
             tableCapacity = 0;
         }
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-        tableRing = new TableSlot[TABLE_RING];
+        tableRing = new RtBuffer[TABLE_RING];
         for (int i = 0; i < TABLE_RING; i++) {
-            tableRing[i] = new TableSlot(ctx.createBuffer((long) requiredCapacity * TABLE_ENTRY_BYTES,
-                    storage, true, "entity geometry table ring " + i));
+            tableRing[i] = ctx.createBuffer((long) requiredCapacity * TABLE_ENTRY_BYTES+DH_COVERAGE_BYTES, storage, true,
+                    "entity geometry table ring " + i);
         }
         tableCapacity = requiredCapacity;
     }
 
     /** Drop CPU templates that retain resource-pack-owned model trees. */
     public void onResourceReload() {
+        previousHand=null;RtFirstPerson.onReload();
         collector.clearCaches();
     }
 
-    /** Free the geometry-table ring and entity resources (teardown; caller has idled the device). */
+    private void processDeferred() {
+        if (deferred.isEmpty()) {
+            return;
+        }
+        long now = RtComposite.frameCounter();
+        Iterator<Deferred> it = deferred.iterator();
+        while (it.hasNext()) {
+            Deferred d = it.next();
+            if (d.freeFrame() <= now) {
+                d.free().run();
+                it.remove();
+            }
+        }
+    }
+
+    /** Free the geometry-table ring + any outstanding per-frame entity resources (teardown; GPU idle). */
     public void shutdown() {
+        RtDhLods.INSTANCE.shutdown();
+        // Drain outstanding deferred releases first (they destroy buffers/AS), then destroy the persistent
+        // per-entity AS. Runs after waitIdle, so immediate destruction is safe.
+        for (Deferred d : deferred) {
+            d.free().run();
+        }
+        deferred.clear();
         for (FrameLists lists : frameLists) {
             lists.releaseDeferred();
             lists.destroyPersistent();
@@ -1980,8 +2284,8 @@ public final class RtEntities {
         }
         beCache.clear();
         if (tableRing != null) {
-            for (TableSlot slot : tableRing) {
-                slot.buffer.destroy();
+            for (RtBuffer b : tableRing) {
+                b.destroy();
             }
             tableRing = null;
             tableCapacity = 0;

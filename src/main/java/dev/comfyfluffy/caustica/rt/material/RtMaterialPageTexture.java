@@ -26,19 +26,27 @@ final class RtMaterialPageTexture {
     private final long image;
     private final long allocation;
     private final long view;
+    private final long allocatedBytes;
     private boolean destroyed;
+    final int width, height, mipCount;
 
     RtMaterialPageTexture(RtContext ctx, int width, int height, List<byte[]> levels, String label) {
+        this(ctx, width, height, levels, label, VK10.VK_FORMAT_R8G8B8A8_UNORM);
+    }
+
+    RtMaterialPageTexture(RtContext ctx, int width, int height, List<byte[]> levels, String label, int format) {
         if (levels.isEmpty()) throw new IllegalArgumentException("Material page has no mip levels");
+        this.width = width; this.height = height; this.mipCount = levels.size();
         this.vma = ctx.vma();
         this.vk = ctx.vk();
         long createdImage = 0L;
         long createdAllocation = 0L;
         long createdView = 0L;
+        long bytes = 0L;
         RtBuffer staging = null;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkImageCreateInfo imageInfo = VkImageCreateInfo.calloc(stack).sType$Default()
-                    .imageType(VK10.VK_IMAGE_TYPE_2D).format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+                    .imageType(VK10.VK_IMAGE_TYPE_2D).format(format)
                     .mipLevels(levels.size()).arrayLayers(1).samples(VK10.VK_SAMPLE_COUNT_1_BIT)
                     .tiling(VK10.VK_IMAGE_TILING_OPTIMAL)
                     .usage(VK10.VK_IMAGE_USAGE_SAMPLED_BIT | VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT)
@@ -53,11 +61,15 @@ final class RtMaterialPageTexture {
                     "vmaCreateImage(material page)");
             createdImage = imageOut.get(0);
             createdAllocation = allocationOut.get(0);
+            dev.comfyfluffy.caustica.rt.VramInventory.name(vma, createdAllocation, label);
+            var allocationDetails=org.lwjgl.util.vma.VmaAllocationInfo.calloc(stack);
+            Vma.vmaGetAllocationInfo(vma,createdAllocation,allocationDetails);
+            bytes=allocationDetails.size();
             RtDebugLabels.nameImage(ctx, createdImage, label);
 
             VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack).sType$Default()
                     .image(createdImage).viewType(VK10.VK_IMAGE_VIEW_TYPE_2D)
-                    .format(VK10.VK_FORMAT_R8G8B8A8_UNORM);
+                    .format(format);
             viewInfo.subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
                     .baseMipLevel(0).levelCount(levels.size()).baseArrayLayer(0).layerCount(1);
             LongBuffer viewOut = stack.mallocLong(1);
@@ -131,10 +143,15 @@ final class RtMaterialPageTexture {
         } finally {
             if (staging != null) staging.destroy();
         }
+        this.allocatedBytes=bytes;
         this.image = createdImage;
         this.allocation = createdAllocation;
         this.view = createdView;
     }
+
+    long allocatedBytes() { return allocatedBytes; }
+
+    long image() { return image; }
 
     long view() {
         return view;

@@ -68,7 +68,7 @@ public abstract class VideoSettingsScreenMixin {
             return;
         }
         list.addHeader(CAUSTICA$RT_HEADER);
-        list.addSmall(RtVideoOptions.runtimeOptions());
+        list.addBig(net.minecraft.client.gui.components.Button.builder(Component.translatable("caustica.enhanced.entry"), b -> net.minecraft.client.Minecraft.getInstance().gui.setScreen(new dev.comfyfluffy.caustica.client.EnhancedOptionsScreen((net.minecraft.client.gui.screens.Screen)(Object)this))).width(310).build());
     }
 
     @Inject(method = "removed", at = @At("TAIL"))

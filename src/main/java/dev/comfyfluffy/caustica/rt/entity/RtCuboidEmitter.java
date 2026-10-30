@@ -114,7 +114,7 @@ final class RtCuboidEmitter {
         }
     }
 
-    /** Direct-polygon path for nonstandard but valid cube topology. */
+    /** A2's verified direct-polygon path retained for nonstandard but valid cube topology. */
     private void emitGenericCube(ModelPart.Cube cube, PoseStack.Pose pose,
                                  RtEntityCapture capture, int color) {
         Matrix4f matrix = pose.pose();
@@ -177,6 +177,12 @@ final class RtCuboidEmitter {
         }
 
         static PartTemplate create(ModelPart part) {
+            // EMF/Fresh Animations swap in ModelPart subclasses whose render() applies the animated pose
+            // and texture variants. Reading their cubes directly re-posed them with vanilla setupAnim
+            // instead, so the mob flipped between two poses (RT-only twitching). Those take the replay path.
+            if (part.getClass() != ModelPart.class && !Boolean.getBoolean("caustica.test.emfTemplate")) {
+                return null;
+            }
             ModelPartAccessor access = (ModelPartAccessor) (Object) part;
             List<ModelPart.Cube> sourceCubes = access.caustica$cubes();
             CubeTemplate[] cubes = new CubeTemplate[sourceCubes.size()];

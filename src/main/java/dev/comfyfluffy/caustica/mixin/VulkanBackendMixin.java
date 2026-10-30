@@ -1,5 +1,13 @@
 package dev.comfyfluffy.caustica.mixin;
 
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.mojang.blaze3d.systems.BackendCreationException;
+import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
+import org.lwjgl.PointerBuffer;
+import org.lwjgl.vulkan.VkInstance;
+import org.lwjgl.vulkan.VkPhysicalDevice;
+import org.lwjgl.vulkan.VkAllocationCallbacks;
+import java.nio.IntBuffer;
 import com.llamalad7.mixinextras.sugar.Local;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
@@ -11,7 +19,6 @@ import com.mojang.blaze3d.vulkan.VulkanPhysicalDevice;
 import com.mojang.blaze3d.vulkan.init.VulkanFeature;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
-import dev.comfyfluffy.caustica.rt.RtHdr;
 import dev.comfyfluffy.caustica.rt.VulkanDiagnostics;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK12;
@@ -47,6 +54,67 @@ import java.util.Set;
  */
 @Mixin(VulkanBackend.class)
 public abstract class VulkanBackendMixin {
+	/** Initialize Streamline before the first Vulkan call, while keeping the throwaway probe instance native. */
+	@WrapMethod(method = "checkBackendAvailable")
+	private static BackendCreationException caustica$checkBackendAvailableWithoutStreamline(
+			Operation<BackendCreationException> original) {
+		// Minecraft's availability check creates a throwaway instance before the real VulkanInstance
+		// constructor. Streamline must already be initialized when that first Vulkan API is invoked.
+		boolean streamlineReady = StreamlineRuntime.initializeForVulkan();
+		StreamlineRuntime.beginVulkanAvailabilityProbe();
+		BackendCreationException failure;
+		try {
+			failure = original.call();
+		} finally {
+			StreamlineRuntime.endVulkanAvailabilityProbe();
+		}
+		if (failure != null && streamlineReady) {
+			StreamlineRuntime.shutdown();
+		}
+		return failure;
+	}
+
+	/** If Vulkan creation fails and Minecraft falls back to OpenGL, release the partially initialized runtime. */
+	@WrapMethod(method = "createDevice(JLcom/mojang/blaze3d/shaders/ShaderSource;Lcom/mojang/blaze3d/shaders/GpuDebugOptions;Ljava/lang/Runnable;)Lcom/mojang/blaze3d/systems/GpuDevice;")
+	private GpuDevice caustica$createDeviceWithStreamlineCleanup(long window, ShaderSource defaultShaderSource,
+			GpuDebugOptions debugOptions, Runnable criticalShaderLoader, Operation<GpuDevice> original)
+			throws BackendCreationException {
+		try {
+			return original.call(window, defaultShaderSource, debugOptions, criticalShaderLoader);
+		} catch (Throwable throwable) {
+			StreamlineRuntime.shutdown();
+			if (throwable instanceof BackendCreationException backendCreationException) {
+				throw backendCreationException;
+			}
+			if (throwable instanceof RuntimeException runtimeException) {
+				throw runtimeException;
+			}
+			if (throwable instanceof Error error) {
+				throw error;
+			}
+			throw new IllegalStateException("Unexpected checked failure during Vulkan backend creation", throwable);
+		}
+	}
+
+	@org.spongepowered.asm.mixin.injection.Redirect(
+			method = "findPhysicalDevice",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/VK12;vkEnumeratePhysicalDevices(Lorg/lwjgl/vulkan/VkInstance;Ljava/nio/IntBuffer;Lorg/lwjgl/PointerBuffer;)I"))
+	private static int caustica$enumeratePhysicalDevicesThroughStreamline(VkInstance instance, IntBuffer count,
+			PointerBuffer physicalDevices) {
+		return StreamlineRuntime.vkEnumeratePhysicalDevices(instance, count, physicalDevices);
+	}
+
+	@org.spongepowered.asm.mixin.injection.Redirect(
+			method = "createDevice(Ljava/util/Collection;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;Ljava/util/Set;)Lorg/lwjgl/vulkan/VkDevice;",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/VK12;vkCreateDevice(Lorg/lwjgl/vulkan/VkPhysicalDevice;Lorg/lwjgl/vulkan/VkDeviceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"))
+	private static int caustica$createDeviceThroughStreamline(VkPhysicalDevice physicalDevice,
+			VkDeviceCreateInfo createInfo, VkAllocationCallbacks allocator, PointerBuffer deviceOut) {
+		return StreamlineRuntime.vkCreateDevice(physicalDevice, createInfo, allocator, deviceOut);
+	}
+
+
 	private static final VulkanFeature STORAGE_IMAGE_WRITE_WITHOUT_FORMAT =
 			new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT, "shaderStorageImageWriteWithoutFormat",
 					VkPhysicalDeviceFeatures.SHADERSTORAGEIMAGEWRITEWITHOUTFORMAT);
@@ -55,7 +123,7 @@ public abstract class VulkanBackendMixin {
 			new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT, "shaderInt16", VkPhysicalDeviceFeatures.SHADERINT16),
 			new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "shaderFloat16", VkPhysicalDeviceVulkan12Features.SHADERFLOAT16));
 
-	private static final List<String> CAUSTICA_WANTED_EXTENSIONS = List.of(
+	private static final List<String> CAUSTICA_WANTED_EXTENSIONS = List.of("VK_KHR_swapchain_mutable_format", "VK_KHR_image_format_list",
 			// FFX (FSR)
 			"VK_KHR_get_memory_requirements2",
 			"VK_KHR_dedicated_allocation",
@@ -91,6 +159,7 @@ public abstract class VulkanBackendMixin {
 		Collection<String> requested = args.get(0);
 		var augmented = new ArrayList<>(requested);
 		for (String extension : CAUSTICA_WANTED_EXTENSIONS) {
+            if(!StreamlineRuntime.initialized() && (extension.equals("VK_KHR_swapchain_mutable_format") || extension.equals("VK_KHR_image_format_list")))continue;
 			if (augmented.contains(extension)) {
 				continue;
 			}
@@ -103,8 +172,8 @@ public abstract class VulkanBackendMixin {
 			}
 		}
 		VulkanDiagnostics.addDeviceFaultExtension(augmented, physicalDevice);
-		RtHdr.addDeviceExtension(augmented, physicalDevice);
 		RtDeviceBringup.addExtensions(augmented, physicalDevice);
+		dev.comfyfluffy.caustica.rt.RtMemoryResidency.addExtensions(augmented, physicalDevice);
 		args.set(0, augmented);
 
 		caustica$addCoreDeviceFeatures(args, physicalDevice);
@@ -146,7 +215,7 @@ public abstract class VulkanBackendMixin {
 	}
 
 	/**
-	 * Once the RT-augmented device is created, confirm the RT entry
+	 * P0 verification — once the RT-augmented device is created, confirm the RT entry
 	 * points loaded and log the RT/AS limits. {@code device} is the local assigned just
 	 * before {@code createVma} runs.
 	 */
@@ -167,5 +236,6 @@ public abstract class VulkanBackendMixin {
 			CallbackInfoReturnable<VkDevice> cir, @Local VkDeviceCreateInfo deviceCreateInfo) {
 		RtDeviceBringup.reserveComputeQueue(deviceCreateInfo, physicalDevice, MemoryStack.stackGet());
 		VulkanDiagnostics.attachNvDiagnosticsConfig(deviceCreateInfo, MemoryStack.stackGet());
+		dev.comfyfluffy.caustica.rt.RtMemoryResidency.attachFeatures(deviceCreateInfo, MemoryStack.stackGet());
 	}
 }

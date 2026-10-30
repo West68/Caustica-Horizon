@@ -27,13 +27,15 @@ public final class RtDlssFg {
     public static final RtDlssFg INSTANCE = new RtDlssFg();
 
     public static boolean enabled() {
-        return CausticaConfig.Rt.Fg.ENABLED.value();
+        return CausticaConfig.Rt.Fg.ENABLED.value() && dev.comfyfluffy.caustica.rt.RtComposite.enabled();
     }
 
     private NgxLibrary lib;
     private MemorySegment feature = MemorySegment.NULL;
     private boolean initialized;
     private boolean failed;
+    private String failureReason = "";
+    private long successfulEvaluations;
     private boolean probed;
     private boolean available;
     private int multiFrameCountMax;
@@ -47,22 +49,31 @@ public final class RtDlssFg {
     private RtDlssFg() {
     }
 
+    public boolean capabilitiesProbed() { return dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()?RtStreamlineFg.INSTANCE.capabilityStateValid():probed; }
+    public boolean hasFailed() { return dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()?RtStreamlineFg.INSTANCE.hasFailed():failed; }
+    public String failureReason() { return dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()?RtStreamlineFg.INSTANCE.unavailableReason():failureReason; }
+    public long successfulEvaluations() { return successfulEvaluations; }
+
     public boolean isAvailable() {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())return RtStreamlineFg.INSTANCE.isSupported();
         return available;
     }
 
     /** Driver-reported maximum multi-frame-generation count (1 = 2x only); 0 until probed. */
     public int multiFrameCountMax() {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())return RtStreamlineFg.INSTANCE.multiFrameCountMax();
         return multiFrameCountMax;
     }
 
     /** Requested generated-frame count clamped to the driver maximum (>=1 once available). */
     public int effectiveMultiFrameCount() {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())return RtStreamlineFg.INSTANCE.isActive()?Math.max(1,RtStreamlineFg.INSTANCE.framesActuallyPresented()-1):RtStreamlineFg.INSTANCE.effectiveMultiFrameCount();
         int requested = CausticaConfig.Rt.Fg.MULTI_FRAME_COUNT.value();
         return multiFrameCountMax > 0 ? Math.clamp(requested, 1, multiFrameCountMax) : requested;
     }
 
     public boolean isReady() {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())return RtStreamlineFg.INSTANCE.isActive();
         return initialized && !failed && !isNull(feature);
     }
 
@@ -78,6 +89,7 @@ public final class RtDlssFg {
      * when FG is enabled; no-op after the first successful probe. Needs no command buffer (capability query).
      */
     public void probeAvailabilityOnce() {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()){RtStreamlineFg.INSTANCE.probeAvailabilityOnce();return;}
         if (probed || failed) {
             return;
         }
@@ -145,6 +157,7 @@ public final class RtDlssFg {
             return true;
         } catch (Throwable t) {
             failed = true;
+            failureReason = t.toString();
             CausticaMod.LOGGER.error("DLSS-FG setup failed; frame generation disabled", t);
             return false;
         }
@@ -192,9 +205,11 @@ public final class RtDlssFg {
                 throw new IllegalStateException("ngxshim_evaluate_dlssg failed: 0x" + Integer.toHexString(rc)
                         + " last=0x" + Integer.toHexString(lib.lastResult()));
             }
+            successfulEvaluations++;
             return true;
         } catch (Throwable t) {
             failed = true;
+            failureReason = t.toString();
             CausticaMod.LOGGER.error("DLSS-FG evaluate failed; frame generation disabled", t);
             return false;
         }
@@ -227,6 +242,7 @@ public final class RtDlssFg {
 
     /** Release the FG feature. NGX itself is shut down by {@link NgxRuntime} at device teardown. */
     public void destroy() {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()){RtStreamlineFg.INSTANCE.beforeInputResourcesDestroyed();return;}
         if (((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
             releaseFeature(device);
         }

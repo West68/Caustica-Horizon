@@ -38,12 +38,8 @@ import java.nio.LongBuffer;
 
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
-import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 
 import static dev.comfyfluffy.caustica.rt.RtContext.check;
-import static dev.comfyfluffy.caustica.rt.pipeline.RtBindings.OVERLAY_IMAGE;
-import static dev.comfyfluffy.caustica.rt.pipeline.RtBindings.OVERLAY_SAMPLER;
-import static dev.comfyfluffy.caustica.rt.pipeline.RtBindings.OVERLAY_TLAS;
 
 /**
  * Shared creation-time boilerplate for the world-overlay raster passes ({@link RtWorldOverlay}). Overlay
@@ -56,7 +52,7 @@ import static dev.comfyfluffy.caustica.rt.pipeline.RtBindings.OVERLAY_TLAS;
  * Blaze3D device bring-up) with one colour attachment, no depth, dynamic viewport/scissor.
  */
 public final class RtOverlayPipelines {
-    private static final String SHADER_DIR = "/caustica/shaders/pipelines/";
+    private static final String SHADER_DIR = "/caustica/rt/";
 
     private RtOverlayPipelines() {
     }
@@ -94,7 +90,7 @@ public final class RtOverlayPipelines {
          * recipe, so the shared buffer ends up PREMULTIPLIED (`rgb = trueColour * accumulatedAlpha`) after
          * more than one layer, even though every individual draw's OWN fragment output was straight. Anyone
          * reading the shared buffer back as a SOURCE (not drawing straight colour onto it) must treat it as
-         * premultiplied — see {@link #PREMULTIPLIED_ALPHA} and {@code hdr_composite/main.comp.slang}'s
+         * premultiplied — see {@link #PREMULTIPLIED_ALPHA} and {@code hdr_ui_composite.comp}'s
          * un-premultiply step on the final combined UI image.
          */
         ALPHA,
@@ -327,36 +323,38 @@ public final class RtOverlayPipelines {
     }
 
     /**
-     * A single read-only image descriptor set for overlay composite passes. The source images are
-     * mod-owned render targets created with sampled-image usage; integer {@code Texture2D.Load} access
-     * keeps this descriptor sampler-free.
+     * A single descriptor set of {@code count} storage images (bindings 0..count-1), with its layout and
+     * pool — enough for overlay composite passes that read a mod-owned mask/scratch image. (Vanilla-owned
+     * textures can never be bound here: Blaze3D never sets VK_IMAGE_USAGE_STORAGE_BIT — they are reachable
+     * only as colour attachments.)
      */
-    public static final class ReadOnlyImageSet {
+    public static final class StorageImageSet {
         public final long layout;
         private final long pool;
         public final long set;
-        private long boundView;
+        private final long[] boundViews;
 
-        private ReadOnlyImageSet(long layout, long pool, long set) {
+        private StorageImageSet(long layout, long pool, long set, int count) {
             this.layout = layout;
             this.pool = pool;
             this.set = set;
+            this.boundViews = new long[count];
         }
 
-        /** Point the overlay image binding at {@code view} (GENERAL layout); no-op when already bound. */
-        public void bind(RtContext ctx, long view) {
-            if (boundView == view) {
+        /** Point binding {@code binding} at {@code view} (GENERAL layout); no-op when already bound. */
+        public void bind(RtContext ctx, int binding, long view) {
+            if (boundViews[binding] == view) {
                 return;
             }
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
                 info.get(0).imageView(view).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
                 VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(1, stack);
-                writes.get(0).sType$Default().dstSet(set).dstBinding(OVERLAY_IMAGE)
-                        .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo(info);
+                writes.get(0).sType$Default().dstSet(set).dstBinding(binding)
+                        .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(info);
                 VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
             }
-            boundView = view;
+            boundViews[binding] = view;
         }
 
         public void destroy(VkDevice vk) {
@@ -365,20 +363,22 @@ public final class RtOverlayPipelines {
         }
     }
 
-    public static ReadOnlyImageSet readOnlyImageSet(RtContext ctx, int stageFlags, String label) {
+    public static StorageImageSet storageImageSet(RtContext ctx, int count, int stageFlags, String label) {
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
-            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
-            binds.get(0).binding(OVERLAY_IMAGE).descriptorType(VK10.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
-                    .descriptorCount(1).stageFlags(stageFlags);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(count, stack);
+            for (int i = 0; i < count; i++) {
+                binds.get(i).binding(i).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                        .descriptorCount(1).stageFlags(stageFlags);
+            }
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
             long dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
-            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).descriptorCount(1);
+            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(count);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(" + label + ")");
             long pool = p.get(0);
@@ -390,7 +390,7 @@ public final class RtOverlayPipelines {
             check(VK10.vkAllocateDescriptorSets(vk, dsai, pSet), "vkAllocateDescriptorSets(" + label + ")");
             long set = pSet.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, set, label + " descriptor set");
-            return new ReadOnlyImageSet(dsl, pool, set);
+            return new StorageImageSet(dsl, pool, set, count);
         }
     }
 
@@ -422,7 +422,7 @@ public final class RtOverlayPipelines {
                 VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
                 info.get(0).sampler(sampler).imageView(view).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
                 VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(1, stack);
-                writes.get(0).sType$Default().dstSet(set).dstBinding(OVERLAY_SAMPLER)
+                writes.get(0).sType$Default().dstSet(set).dstBinding(0)
                         .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(info);
                 VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
             }
@@ -440,7 +440,7 @@ public final class RtOverlayPipelines {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
-            binds.get(0).binding(OVERLAY_SAMPLER).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+            binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                     .descriptorCount(1).stageFlags(stageFlags);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
@@ -500,7 +500,7 @@ public final class RtOverlayPipelines {
                 VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
                 info.get(0).sampler(sampler).imageView(view).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
                 VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(1, stack);
-                writes.get(0).sType$Default().dstSet(set).dstBinding(OVERLAY_SAMPLER)
+                writes.get(0).sType$Default().dstSet(set).dstBinding(0)
                         .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(info);
                 VK10.vkUpdateDescriptorSets(vk, writes, null);
                 return set;
@@ -519,7 +519,7 @@ public final class RtOverlayPipelines {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
-            binds.get(0).binding(OVERLAY_SAMPLER).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+            binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                     .descriptorCount(1).stageFlags(stageFlags);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
@@ -540,47 +540,39 @@ public final class RtOverlayPipelines {
     /**
      * A ring of descriptor sets each holding one {@code VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR}
      * binding — for overlay passes that issue an inline {@code rayQueryEXT} occlusion test against the
-     * world TLAS (e.g. block outline). A ring (not a single set, unlike {@link ReadOnlyImageSet}/
+     * world TLAS (e.g. block outline). A ring (not a single set, unlike {@link StorageImageSet}/
      * {@link SampledImageSet}) is required because the TLAS handle changes most frames ({@code RtAccel
      * .TlasRing} cycles it every frame even when it doesn't grow) — rewriting a single set's binding while
      * an earlier frame's command buffer referencing that same set may still be executing on the GPU is the
-     * same "descriptor set update while in use" hazard {@code RtPipeline.setTlas} guards against. Exact
-     * graphics completion protects both rings; their depths only avoid routine host waits.
+     * same "descriptor set update while in use" hazard {@code RtPipeline.setTlas} already guards against
+     * with its own 4-slot ring.
      */
     public static final class AccelStructureSet {
         private static final int RING = 4;
         public final long layout;
         private final long pool;
         private final long[] sets;
-        private final RtGpuExecutor.TrackedGraphicsUse[] uses;
         private int current = -1;
 
         private AccelStructureSet(long layout, long pool, long[] sets) {
             this.layout = layout;
             this.pool = pool;
             this.sets = sets;
-            this.uses = new RtGpuExecutor.TrackedGraphicsUse[sets.length];
-            for (int i = 0; i < uses.length; i++) {
-                uses[i] = new RtGpuExecutor.TrackedGraphicsUse();
-            }
         }
 
-        /** Wait for the next ring slot's prior use, write {@code tlas}, and return the set for this frame. */
-        public long bind(RtContext ctx, long tlas, RtGpuExecutor.GraphicsUse graphicsUse) {
+        /** Advance to the next ring slot, write {@code tlas} into it, and return the set to bind this frame. */
+        public long bind(RtContext ctx, long tlas) {
             current = (current + 1) % RING;
-            RtGpuExecutor.TrackedGraphicsUse slotUse = uses[current];
-            ctx.gpuExecutor().graphicsUseWaiter().await(slotUse);
             long set = sets[current];
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 VkWriteDescriptorSetAccelerationStructureKHR asWrite = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)
                         .sType(KHRAccelerationStructure.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR)
                         .pAccelerationStructures(stack.longs(tlas));
                 VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(1, stack);
-                write.get(0).sType$Default().pNext(asWrite.address()).dstSet(set).dstBinding(OVERLAY_TLAS)
+                write.get(0).sType$Default().pNext(asWrite.address()).dstSet(set).dstBinding(0)
                         .descriptorCount(1).descriptorType(KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
                 VK10.vkUpdateDescriptorSets(ctx.vk(), write, null);
             }
-            slotUse.mark(graphicsUse);
             return set;
         }
 
@@ -595,7 +587,7 @@ public final class RtOverlayPipelines {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
-            binds.get(0).binding(OVERLAY_TLAS).descriptorType(KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
+            binds.get(0).binding(0).descriptorType(KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
                     .descriptorCount(1).stageFlags(stageFlags);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");

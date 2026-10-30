@@ -19,7 +19,7 @@ import java.util.Map;
 
 /** Optional resource-pack material properties compiled ahead of LabPBR and engine heuristics. */
 public final class RtMaterialOverrides {
-    public static final int FORMAT = 2;
+    public static final int FORMAT = 1;
     public static final RtMaterialOverrides EMPTY = new RtMaterialOverrides(List.of());
 
     private final List<Rule> rules;
@@ -30,7 +30,7 @@ public final class RtMaterialOverrides {
 
     public static RtMaterialOverrides load() {
         Map<Identifier, Resource> resources = Minecraft.getInstance().getResourceManager().listResources(
-                "materials", id -> id.getPath().endsWith(".json"));
+                "caustica/materials", id -> id.getPath().endsWith(".json"));
         List<Map.Entry<Identifier, Resource>> ordered = new ArrayList<>(resources.entrySet());
         ordered.sort(Map.Entry.comparingByKey(Comparator.comparing(Identifier::toString)));
         List<Rule> rules = new ArrayList<>();
@@ -58,12 +58,10 @@ public final class RtMaterialOverrides {
 
         Integer model = null;
         if (root.has("model")) {
-            // "water" is the animated fluid surface (waves, caustics, biome-tint absorption); "dielectric" is
-            // every other transparent material.
             model = switch (root.get("model").getAsString()) {
                 case "opaque" -> RtMaterialRegistry.MODEL_OPAQUE;
-                case "water" -> RtMaterialRegistry.MODEL_WATER;
-                case "dielectric" -> RtMaterialRegistry.MODEL_DIELECTRIC;
+                case "volume_dielectric" -> RtMaterialRegistry.MODEL_WATER;
+                case "thin_dielectric" -> RtMaterialRegistry.MODEL_GLASS;
                 default -> throw new IllegalArgumentException("Unknown material model");
             };
         }
@@ -71,21 +69,15 @@ public final class RtMaterialOverrides {
         Float metalness = null;
         if (root.has("base")) {
             JsonObject base = root.getAsJsonObject("base");
-            // "roughness" is LINEAR roughness (GGX alpha), the same units LabPBR stores and
-            // RtMaterials.Profile carries — NOT perceptual roughness. alpha = (1 - smoothness)^2.
             roughness = optionalFloat(base, "roughness");
             metalness = optionalFloat(base, "metalness");
         }
-        Float emissionStrengthCdM2 = null;
+        Float emissionStrength = null;
         if (root.has("emission")) {
             JsonObject emission = root.getAsJsonObject("emission");
-            if (emission.has("strength")) {
-                throw new IllegalArgumentException(
-                        "emission.strength was removed; use absolute emission.strength_cd_m2");
-            }
-            emissionStrengthCdM2 = optionalFloat(emission, "strength_cd_m2");
+            emissionStrength = optionalFloat(emission, "strength");
             if (emission.has("color_source") && !"albedo".equals(emission.get("color_source").getAsString())) {
-                throw new IllegalArgumentException("format 2 only supports emission color_source=albedo");
+                throw new IllegalArgumentException("format 1 only supports emission color_source=albedo");
             }
         }
         Float transmission = null;
@@ -101,33 +93,30 @@ public final class RtMaterialOverrides {
         if (ior != null && (!Float.isFinite(ior) || ior <= 0.0f)) {
             throw new IllegalArgumentException("transmission.ior must be positive");
         }
-        if (emissionStrengthCdM2 != null && !Float.isFinite(emissionStrengthCdM2)) {
-            throw new IllegalArgumentException("emission.strength_cd_m2 must be finite");
-        }
-        if (emissionStrengthCdM2 != null
-                && (emissionStrengthCdM2 < 0.0f || emissionStrengthCdM2 > 65504.0f)) {
-            float clamped = Math.max(0.0f, Math.min(65504.0f, emissionStrengthCdM2));
-            CausticaMod.LOGGER.warn("RT material override {}: emission.strength_cd_m2 {} out of range "
-                            + "[0,65504], clamping to {}",
-                    source, emissionStrengthCdM2, clamped);
-            emissionStrengthCdM2 = clamped;
+        if (emissionStrength != null && (!Float.isFinite(emissionStrength)
+                || emissionStrength < 0.0f || emissionStrength > 4.0f)) {
+            throw new IllegalArgumentException("emission.strength must be in [0,4]");
         }
         return new Rule(source, sprite, block, model, roughness, metalness, ior, transmission,
-                emissionStrengthCdM2);
+                emissionStrength);
     }
 
     public List<Rule> rules() {
         return rules;
     }
 
+    public boolean requestsEmissionMask(TextureAtlasSprite sprite) {
+        for (Rule rule : rules) {
+            if (rule.matchesSprite(sprite) && rule.emissionStrength != null && rule.emissionStrength > 0.0f) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public record Rule(Identifier source, Identifier sprite, Identifier block, Integer model,
                        Float roughness, Float metalness, Float ior, Float transmission,
-                       /**
-                        * Absolute emitting-surface luminance in cd/m² for whatever emission mask the
-                        * material naturally resolves to (LabPBR {@code _s}, heuristic mask, or
-                        * state-uniform block light). A material with no natural emission stays unlit.
-                        */
-                       Float emissionStrengthCdM2) {
+                       Float emissionStrength) {
         boolean matchesSprite(TextureAtlasSprite value) {
             return value != null && sprite.equals(value.contents().name());
         }
@@ -141,7 +130,7 @@ public final class RtMaterialOverrides {
             return block == null || state != null && block.equals(BuiltInRegistries.BLOCK.getKey(state.getBlock()));
         }
 
-        RtMaterialDesc apply(RtMaterialDesc base) {
+        RtMaterialDesc apply(RtMaterialDesc base, RtMaterialDesc.EmissionSummary availableSummary) {
             int nextModel = model != null ? model : base.model();
             float nextRoughness = roughness != null ? roughness : base.roughness();
             float nextMetalness = metalness != null ? metalness : base.metalness();
@@ -149,23 +138,29 @@ public final class RtMaterialOverrides {
                     : (model != null ? defaultIor(nextModel) : base.ior());
             float nextTransmission = transmission != null ? transmission
                     : (model != null ? defaultTransmission(nextModel) : base.transmission());
-            // An absolute emitting-surface luminance. It can replace the level of an existing
-            // LabPBR/heuristic/state emitter but does not create an emission mask where none exists.
-            float nextEmissionStrength = emissionStrengthCdM2 != null
-                    && base.emissionSource() != RtMaterialDesc.EmissionSource.NONE
-                    ? emissionStrengthCdM2 : base.emissionStrength();
-            return new RtMaterialDesc(nextModel, RtMaterialDesc.Source.OVERRIDE, base.features(),
+            int features = base.features();
+            RtMaterialDesc.EmissionSource nextEmissionSource = base.emissionSource();
+            float nextEmissionStrength = base.emissionStrength();
+            RtMaterialDesc.EmissionSummary summary = base.emissionSummary();
+            if (emissionStrength != null) {
+                features |= RtMaterialRegistry.FEATURE_OVERRIDE_EMISSION;
+                nextEmissionStrength = emissionStrength;
+                nextEmissionSource = emissionStrength > 0.0f
+                        ? RtMaterialDesc.EmissionSource.OVERRIDE : RtMaterialDesc.EmissionSource.NONE;
+                summary = emissionStrength > 0.0f ? availableSummary : RtMaterialDesc.EmissionSummary.NONE;
+            }
+            return new RtMaterialDesc(nextModel, RtMaterialDesc.Source.OVERRIDE, features,
                     nextRoughness, nextMetalness, nextIor, nextTransmission,
-                    base.emissionSource(), nextEmissionStrength, base.emissionSummary());
+                    nextEmissionSource, nextEmissionStrength, summary);
         }
 
         private static float defaultIor(int model) {
-            return model == RtMaterialRegistry.MODEL_WATER ? RtDielectrics.WATER_IOR
-                    : model == RtMaterialRegistry.MODEL_DIELECTRIC ? RtDielectrics.GLASS_IOR : 1.0f;
+            return model == RtMaterialRegistry.MODEL_WATER ? 1.333f
+                    : model == RtMaterialRegistry.MODEL_GLASS ? 1.52f : 1.0f;
         }
 
         private static float defaultTransmission(int model) {
-            return model == RtMaterialRegistry.MODEL_WATER || model == RtMaterialRegistry.MODEL_DIELECTRIC
+            return model == RtMaterialRegistry.MODEL_WATER || model == RtMaterialRegistry.MODEL_GLASS
                     ? 1.0f : 0.0f;
         }
     }

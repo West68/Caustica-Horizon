@@ -1,357 +1,141 @@
 package dev.comfyfluffy.caustica.rt.pipeline;
 
-import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
-import dev.comfyfluffy.caustica.rt.gen.BloomPushData;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
-import org.lwjgl.vulkan.VK10;
-import org.lwjgl.vulkan.VkCommandBuffer;
-import org.lwjgl.vulkan.VkComputePipelineCreateInfo;
-import org.lwjgl.vulkan.VkDescriptorImageInfo;
-import org.lwjgl.vulkan.VkDescriptorPoolCreateInfo;
-import org.lwjgl.vulkan.VkDescriptorPoolSize;
-import org.lwjgl.vulkan.VkDescriptorSetAllocateInfo;
-import org.lwjgl.vulkan.VkDescriptorSetLayoutBinding;
-import org.lwjgl.vulkan.VkDescriptorSetLayoutCreateInfo;
-import org.lwjgl.vulkan.VkDevice;
-import org.lwjgl.vulkan.VkPipelineLayoutCreateInfo;
-import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo;
-import org.lwjgl.vulkan.VkPushConstantRange;
-import org.lwjgl.vulkan.VkSamplerCreateInfo;
-import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
-import org.lwjgl.vulkan.VkWriteDescriptorSet;
-
+import org.lwjgl.vulkan.*;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
-import java.nio.LongBuffer;
-
 import static dev.comfyfluffy.caustica.rt.RtContext.check;
-import static dev.comfyfluffy.caustica.rt.pipeline.RtBindings.*;
+import static org.lwjgl.vulkan.VK10.*;
 
-/**
- * Scene-referred bloom as a downsample/upsample mip pyramid (Jimenez, SIGGRAPH 2014). The pyramid
- * provides broad support without comb-spaced taps or a fixed-width highlight slab.
- *
- * <p>Each pyramid step is its own dispatch with its own descriptor set holding that step's destination
- * storage image and source sampled image. Binding the pair per step, rather than indexing a descriptor
- * array from a push constant, keeps the shader free of dynamic storage-image indexing — which would
- * require {@code shaderStorageImageArrayDynamicIndexing}, a feature this device bring-up does not ask
- * for.
- *
- * <p>Bloom stays outside the temporal reconstruction and the exposure histogram; only the display mapper
- * consumes the finished pyramid, whose level 0 accumulates every band.
- */
+/** Post-RR, pre-display scene-linear bloom; immutable per-pass sets, no per-frame allocation/update. */
 public final class RtBloomPipeline {
-    private static final String SHADER = "/caustica/shaders/pipelines/bloom/main.comp.spv";
-    /** Pyramid depth ceiling. Level 7 of a 4K pyramid is already 15x8 texels — nothing wider is useful. */
-    public static final int MAX_LEVELS = 8;
-    private static final int MODE_PREFILTER = 0;
-    private static final int MODE_DOWNSAMPLE = 1;
-    private static final int MODE_UPSAMPLE = 2;
-    // One set per possible step: [0] prefilter into level 0, [i] downsample into level i (i >= 1),
-    // [MAX_LEVELS + i] upsample level i+1 onto level i.
-    private static final int SET_COUNT = MAX_LEVELS * 2;
-
+    private static final int MAX_PASSES=ItrpBloomPlan.MAX_LEVELS*2-1;
     private final RtContext ctx;
-    private final long descriptorSetLayout;
-    private final long descriptorPool;
-    private final long[] descriptorSets;
-    private final long pipelineLayout;
-    private final long pipeline;
-    private final long sampler;
-    private long boundSourceView;
-    private long boundExposureView;
-    private long[] boundLevelViews = new long[0];
-    private boolean destroyed;
-
-    private RtBloomPipeline(RtContext ctx, long descriptorSetLayout, long descriptorPool,
-                            long[] descriptorSets, long pipelineLayout, long pipeline, long sampler) {
-        this.ctx = ctx;
-        this.descriptorSetLayout = descriptorSetLayout;
-        this.descriptorPool = descriptorPool;
-        this.descriptorSets = descriptorSets;
-        this.pipelineLayout = pipelineLayout;
-        this.pipeline = pipeline;
-        this.sampler = sampler;
-    }
-
+    private long dsl,pool,layout,pipeline,sampler;
+    private final long[] sets=new long[MAX_PASSES];
+    private RtImage[] down=new RtImage[0],up=new RtImage[0];
+    private RtImage input,exposure;
+    private record Pass(int set,RtImage target,int mode,float lowMix) {}
+    private Pass[] passes=new Pass[0];
+    private RtBloomPipeline(RtContext ctx){this.ctx=ctx;}
     public static RtBloomPipeline create(RtContext ctx) {
-        VkDevice vk = ctx.vk();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer bindings =
-                    VkDescriptorSetLayoutBinding.calloc(BLOOM_BINDING_COUNT, stack);
-            bindings.get(BLOOM_OUTPUT).binding(BLOOM_OUTPUT)
-                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                    .descriptorCount(1)
-                    .stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
-            bindings.get(BLOOM_SOURCE).binding(BLOOM_SOURCE)
-                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                    .descriptorCount(1)
-                    .stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
-            bindings.get(BLOOM_EXPOSURE).binding(BLOOM_EXPOSURE)
-                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                    .descriptorCount(1)
-                    .stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
-
-            LongBuffer handle = stack.mallocLong(1);
-            VkDescriptorSetLayoutCreateInfo layoutInfo =
-                    VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(bindings);
-            check(VK10.vkCreateDescriptorSetLayout(vk, layoutInfo, null, handle),
-                    "vkCreateDescriptorSetLayout(rt bloom)");
-            long descriptorSetLayout = handle.get(0);
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
-                    descriptorSetLayout, "bloom descriptor set layout");
-
-            VkDescriptorPoolSize.Buffer poolSize = VkDescriptorPoolSize.calloc(2, stack);
-            poolSize.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(SET_COUNT * 2);
-            poolSize.get(1).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(SET_COUNT);
-            VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
-                    .sType$Default().maxSets(SET_COUNT).pPoolSizes(poolSize);
-            check(VK10.vkCreateDescriptorPool(vk, poolInfo, null, handle),
-                    "vkCreateDescriptorPool(rt bloom)");
-            long descriptorPool = handle.get(0);
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL,
-                    descriptorPool, "bloom descriptor pool");
-
-            LongBuffer setLayouts = stack.mallocLong(SET_COUNT);
-            for (int i = 0; i < SET_COUNT; i++) {
-                setLayouts.put(i, descriptorSetLayout);
-            }
-            VkDescriptorSetAllocateInfo allocateInfo = VkDescriptorSetAllocateInfo.calloc(stack)
-                    .sType$Default().descriptorPool(descriptorPool).pSetLayouts(setLayouts);
-            LongBuffer setHandles = stack.mallocLong(SET_COUNT);
-            check(VK10.vkAllocateDescriptorSets(vk, allocateInfo, setHandles),
-                    "vkAllocateDescriptorSets(rt bloom)");
-            long[] descriptorSets = new long[SET_COUNT];
-            for (int i = 0; i < SET_COUNT; i++) {
-                descriptorSets[i] = setHandles.get(i);
-                RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET,
-                        descriptorSets[i], "bloom descriptor set " + i);
-            }
-
-            VkPushConstantRange.Buffer pushRange = VkPushConstantRange.calloc(1, stack);
-            pushRange.get(0).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT)
-                    .offset(0).size(BloomPushData.BYTE_SIZE);
-            VkPipelineLayoutCreateInfo pipelineLayoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
-                    .sType$Default().pSetLayouts(stack.longs(descriptorSetLayout))
-                    .pPushConstantRanges(pushRange);
-            check(VK10.vkCreatePipelineLayout(vk, pipelineLayoutInfo, null, handle),
-                    "vkCreatePipelineLayout(rt bloom)");
-            long pipelineLayout = handle.get(0);
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT,
-                    pipelineLayout, "bloom pipeline layout");
-
-            long module = loadModule(vk, stack);
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, module, "bloom shader module");
-            VkPipelineShaderStageCreateInfo stage = VkPipelineShaderStageCreateInfo.calloc(stack)
-                    .sType$Default().stage(VK10.VK_SHADER_STAGE_COMPUTE_BIT)
-                    .module(module).pName(stack.UTF8("main"));
-            VkComputePipelineCreateInfo.Buffer pipelineInfo =
-                    VkComputePipelineCreateInfo.calloc(1, stack);
-            pipelineInfo.get(0).sType$Default().stage(stage).layout(pipelineLayout);
-            LongBuffer pipelineHandle = stack.mallocLong(1);
-            check(VK10.vkCreateComputePipelines(vk, VK10.VK_NULL_HANDLE,
-                    pipelineInfo, null, pipelineHandle), "vkCreateComputePipelines(rt bloom)");
-            VK10.vkDestroyShaderModule(vk, module, null);
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE,
-                    pipelineHandle.get(0), "bloom compute pipeline");
-
-            // CLAMP_TO_EDGE, not border: a highlight touching the frame edge should bleed along the edge
-            // like a real lens, not fade into a black border that reads as a dark seam.
-            VkSamplerCreateInfo samplerInfo = VkSamplerCreateInfo.calloc(stack).sType$Default()
-                    .magFilter(VK10.VK_FILTER_LINEAR)
-                    .minFilter(VK10.VK_FILTER_LINEAR)
-                    .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
-                    .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                    .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                    .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                    .minLod(0.0f)
-                    .maxLod(0.0f);
-            check(VK10.vkCreateSampler(vk, samplerInfo, null, handle),
-                    "vkCreateSampler(rt bloom)");
-            long sampler = handle.get(0);
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, sampler, "bloom linear sampler");
-
-            return new RtBloomPipeline(ctx, descriptorSetLayout, descriptorPool, descriptorSets,
-                    pipelineLayout, pipelineHandle.get(0), sampler);
+        var result=new RtBloomPipeline(ctx);
+        try {result.initialize();return result;}
+        catch(Throwable failure){result.destroy();throw failure;}
+    }
+    private void initialize() {
+        try(var stack=MemoryStack.stackPush()) {
+            var out=stack.mallocLong(1);
+            var binds=VkDescriptorSetLayoutBinding.calloc(4,stack);
+            for(int i=0;i<4;i++)binds.get(i).binding(i).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT)
+                .descriptorType(i>=2?VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            check(vkCreateDescriptorSetLayout(ctx.vk(),VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds),null,out),"bloom descriptor layout");dsl=out.get(0);
+            var sizes=VkDescriptorPoolSize.calloc(2,stack);
+            sizes.get(0).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(MAX_PASSES*2);
+            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(MAX_PASSES*2);
+            check(vkCreateDescriptorPool(ctx.vk(),VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(MAX_PASSES).pPoolSizes(sizes),null,out),"bloom descriptor pool");pool=out.get(0);
+            var layouts=stack.mallocLong(MAX_PASSES);for(int i=0;i<MAX_PASSES;i++)layouts.put(i,dsl);
+            var allocated=stack.mallocLong(MAX_PASSES);
+            check(vkAllocateDescriptorSets(ctx.vk(),VkDescriptorSetAllocateInfo.calloc(stack).sType$Default().descriptorPool(pool).pSetLayouts(layouts),allocated),"bloom descriptor sets");
+            for(int i=0;i<MAX_PASSES;i++)sets[i]=allocated.get(i);
+            var range=VkPushConstantRange.calloc(1,stack);range.get(0).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).offset(0).size(12);
+            check(vkCreatePipelineLayout(ctx.vk(),VkPipelineLayoutCreateInfo.calloc(stack).sType$Default().pSetLayouts(stack.longs(dsl)).pPushConstantRanges(range),null,out),"bloom pipeline layout");layout=out.get(0);
+            var sci=VkSamplerCreateInfo.calloc(stack).sType$Default().magFilter(VK_FILTER_LINEAR).minFilter(VK_FILTER_LINEAR)
+                .mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST).addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                .addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).maxLod(0);
+            check(vkCreateSampler(ctx.vk(),sci,null,out),"bloom sampler");sampler=out.get(0);
+            byte[] bytes;
+            try(var in=RtBloomPipeline.class.getResourceAsStream("/caustica/rt/itrp_bloom.comp.spv")) {
+                if(in==null)throw new IllegalStateException("Missing bloom shader");bytes=in.readAllBytes();
+            }catch(IOException e){throw new IllegalStateException(e);}
+            ByteBuffer code=MemoryUtil.memAlloc(bytes.length).put(bytes);code.flip();long module;
+            try {check(vkCreateShaderModule(ctx.vk(),VkShaderModuleCreateInfo.calloc(stack).sType$Default().pCode(code),null,out),"bloom shader");module=out.get(0);}
+            finally {MemoryUtil.memFree(code);}
+            try {
+                var stage=VkPipelineShaderStageCreateInfo.calloc(stack).sType$Default().stage(VK_SHADER_STAGE_COMPUTE_BIT).module(module).pName(stack.UTF8("main"));
+                var info=VkComputePipelineCreateInfo.calloc(1,stack);info.get(0).sType$Default().stage(stage).layout(layout);
+                check(vkCreateComputePipelines(ctx.vk(),VK_NULL_HANDLE,info,null,out),"bloom pipeline");pipeline=out.get(0);
+            } finally {vkDestroyShaderModule(ctx.vk(),module,null);}
+            RtDebugLabels.name(ctx,VK_OBJECT_TYPE_PIPELINE,pipeline,"ITRP scene-linear bloom");
         }
     }
-
-    public long sampler() {
-        return sampler;
-    }
-
-    /**
-     * Deepest pyramid the given level-0 size supports: halving stops before a level would lose an axis.
-     * A level of 8 texels is already a whole-screen blur, so this rarely binds before {@link #MAX_LEVELS}.
-     */
-    public static int levelsFor(int level0Width, int level0Height, int requested) {
-        int levels = 1;
-        int w = level0Width;
-        int h = level0Height;
-        while (levels < Math.min(requested, MAX_LEVELS) && w > 8 && h > 8) {
-            w = Math.max(1, w / 2);
-            h = Math.max(1, h / 2);
-            levels++;
-        }
-        return levels;
-    }
-
-    /**
-     * Point every step's descriptor set at this frame's images. {@code levels[0]} is the half-resolution
-     * prefiltered level the display mapper reads; the rest are the pyramid.
-     */
-    public void setImages(long sourceView, long exposureView, RtImage[] levels) {
-        if (boundSourceView == sourceView && boundExposureView == exposureView
-                && sameViews(levels)) {
-            return;
-        }
-        int levelCount = levels.length;
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            int stepCount = 1 + (levelCount - 1) * 2; // prefilter + downsamples + upsamples
-            VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(stepCount * 3, stack);
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(stepCount * 3, stack);
-            int index = 0;
-            for (int step = 0; step < stepCount; step++) {
-                long dstView;
-                long srcView;
-                int set;
-                if (step == 0) {
-                    set = 0;
-                    dstView = levels[0].view;
-                    srcView = sourceView;
-                } else if (step < levelCount) {
-                    set = step;
-                    dstView = levels[step].view;
-                    srcView = levels[step - 1].view;
-                } else {
-                    // Upsample steps run coarse-to-fine; the set index only has to be unique per step.
-                    int dst = levelCount - 1 - (step - levelCount) - 1;
-                    set = MAX_LEVELS + dst;
-                    dstView = levels[dst].view;
-                    srcView = levels[dst + 1].view;
-                }
-                index = writeSet(stack, images, writes, index, descriptorSets[set],
-                        dstView, srcView, exposureView);
-            }
-            VkWriteDescriptorSet.Buffer used = VkWriteDescriptorSet.create(writes.address(), index);
-            VK10.vkUpdateDescriptorSets(ctx.vk(), used, null);
-        }
-        boundSourceView = sourceView;
-        boundExposureView = exposureView;
-        boundLevelViews = new long[levelCount];
-        for (int i = 0; i < levelCount; i++) {
-            boundLevelViews[i] = levels[i].view;
-        }
-    }
-
-    private boolean sameViews(RtImage[] levels) {
-        if (boundLevelViews.length != levels.length) {
-            return false;
-        }
-        for (int i = 0; i < levels.length; i++) {
-            if (boundLevelViews[i] != levels[i].view) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private int writeSet(MemoryStack stack, VkDescriptorImageInfo.Buffer images,
-                         VkWriteDescriptorSet.Buffer writes, int index, long set,
-                         long dstView, long srcView, long exposureView) {
-        images.get(index).imageView(dstView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
-        writes.get(index).sType$Default().dstSet(set).dstBinding(BLOOM_OUTPUT)
-                .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                .pImageInfo(VkDescriptorImageInfo.create(images.address(index), 1));
-        index++;
-        images.get(index).imageView(srcView).sampler(sampler)
-                .imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
-        writes.get(index).sType$Default().dstSet(set).dstBinding(BLOOM_SOURCE)
-                .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                .pImageInfo(VkDescriptorImageInfo.create(images.address(index), 1));
-        index++;
-        images.get(index).imageView(exposureView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
-        writes.get(index).sType$Default().dstSet(set).dstBinding(BLOOM_EXPOSURE)
-                .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                .pImageInfo(VkDescriptorImageInfo.create(images.address(index), 1));
-        return index + 1;
-    }
-
-    /**
-     * Record the whole pyramid: prefilter into level 0, downsample to the top, then tent back down
-     * accumulating each band. A memory barrier separates every step — each one reads exactly what the
-     * previous wrote.
-     */
-    public void dispatch(VkCommandBuffer cmd, RtImage[] levels,
-                         float threshold, float softKneeFraction, float radius) {
-        float softKnee = threshold * softKneeFraction;
-        int levelCount = levels.length;
-        try (MemoryStack stack = MemoryStack.stackPush();
-             RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "scene bloom")) {
-            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-            recordStep(cmd, stack, descriptorSets[0], levels[0], MODE_PREFILTER,
-                    threshold, softKnee, radius);
-            for (int level = 1; level < levelCount; level++) {
-                recordStep(cmd, stack, descriptorSets[level], levels[level], MODE_DOWNSAMPLE,
-                        threshold, softKnee, radius);
-            }
-            for (int level = levelCount - 2; level >= 0; level--) {
-                recordStep(cmd, stack, descriptorSets[MAX_LEVELS + level], levels[level], MODE_UPSAMPLE,
-                        threshold, softKnee, radius);
-            }
-        }
-    }
-
-    private void recordStep(VkCommandBuffer cmd, MemoryStack stack, long set, RtImage dst, int mode,
-                            float threshold, float softKnee, float radius) {
-        VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE,
-                pipelineLayout, 0, stack.longs(set), null);
-        ByteBuffer push = stack.malloc(BloomPushData.BYTE_SIZE);
-        new BloomPushData(mode, threshold, softKnee, radius).write(push);
-        VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
-        VK10.vkCmdDispatch(cmd, (dst.width + 7) / 8, (dst.height + 7) / 8, 1);
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-    }
-
-    public void destroy() {
-        if (destroyed) {
-            return;
-        }
-        VkDevice vk = ctx.vk();
-        VK10.vkDestroyPipeline(vk, pipeline, null);
-        VK10.vkDestroySampler(vk, sampler, null);
-        VK10.vkDestroyPipelineLayout(vk, pipelineLayout, null);
-        VK10.vkDestroyDescriptorPool(vk, descriptorPool, null);
-        VK10.vkDestroyDescriptorSetLayout(vk, descriptorSetLayout, null);
-        destroyed = true;
-    }
-
-    private static long loadModule(VkDevice vk, MemoryStack stack) {
-        byte[] bytes;
-        try (InputStream input = RtBloomPipeline.class.getResourceAsStream(SHADER)) {
-            if (input == null) {
-                throw new IllegalStateException("missing SPIR-V resource: " + SHADER);
-            }
-            bytes = input.readAllBytes();
-        } catch (IOException e) {
-            throw new IllegalStateException("failed to read SPIR-V resource: " + SHADER, e);
-        }
-        ByteBuffer code = MemoryUtil.memAlloc(bytes.length).put(bytes);
-        code.flip();
+    /** Caller has already quiesced the existing render targets for this resize/mode transition. */
+    public void setInput(RtImage source,boolean enabled) {setInput(source,null,enabled);}
+    /** {@code exposure}: the compositor's 1x1 R32F exposure image, read by the first level's highlight clamp. */
+    public void setInput(RtImage source,RtImage exposure,boolean enabled) {
+        releaseImages();
+        if(!enabled)return;
+        if(exposure==null)throw new IllegalArgumentException("bloom needs the exposure image");
+        this.exposure=exposure;
+        var sizes=ItrpBloomPlan.levels(source.width,source.height);
+        down=new RtImage[sizes.size()];up=new RtImage[sizes.size()-1];
+        var scheduled=new java.util.ArrayList<Pass>();
         try {
-            VkShaderModuleCreateInfo moduleInfo = VkShaderModuleCreateInfo.calloc(stack)
-                    .sType$Default().pCode(code);
-            LongBuffer module = stack.mallocLong(1);
-            check(VK10.vkCreateShaderModule(vk, moduleInfo, null, module),
-                    "vkCreateShaderModule(bloom)");
-            return module.get(0);
-        } finally {
-            MemoryUtil.memFree(code);
+            for(int i=0;i<down.length;i++) {
+                var s=sizes.get(i);
+                down[i]=ctx.createStorageImage(s.width(),s.height(),VK_FORMAT_R16G16B16A16_SFLOAT,"ITRP bloom down "+i);
+                if(i<up.length)up[i]=ctx.createStorageImage(s.width(),s.height(),VK_FORMAT_R16G16B16A16_SFLOAT,"ITRP bloom up "+i);
+            }
+            int set=0;
+            for(int i=0;i<down.length;i++) {
+                var high=i==0?source:down[i-1];bind(set,high,high,down[i]);
+                scheduled.add(new Pass(set++,down[i],0,0));
+            }
+            for(int i=up.length-1;i>=0;i--) {
+                var low=i==up.length-1?down[i+1]:up[i+1];bind(set,down[i],low,up[i]);
+                scheduled.add(new Pass(set++,up[i],1,ItrpBloomPlan.lowMix(i,down.length)));
+            }
+            input=source;passes=scheduled.toArray(Pass[]::new);
+        } catch(Throwable failure){releaseImages();throw failure;}
+    }
+    private void bind(int index,RtImage high,RtImage low,RtImage target) {
+        try(var stack=MemoryStack.stackPush()) {
+            var writes=VkWriteDescriptorSet.calloc(4,stack);var images=new RtImage[]{high,low,target,exposure};
+            for(int i=0;i<4;i++) {
+                var image=VkDescriptorImageInfo.calloc(1,stack);
+                image.get(0).imageView(images[i].view).imageLayout(VK_IMAGE_LAYOUT_GENERAL).sampler(i>=2?VK_NULL_HANDLE:sampler);
+                writes.get(i).sType$Default().dstSet(sets[index]).dstBinding(i).descriptorCount(1)
+                    .descriptorType(i>=2?VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(image);
+            }
+            vkUpdateDescriptorSets(ctx.vk(),writes,null);
         }
+    }
+    public boolean ready(){return input!=null && passes.length>0;}
+    public long outputView(){if(!ready())throw new IllegalStateException("Bloom not initialized");return up.length>0?up[0].view:down[0].view;}
+    /** {@code clampHighlights}: the reference bloom clamp (SDR output outside the End). */
+    public void record(VkCommandBuffer cmd,boolean clampHighlights) {
+        if(!ready())return;
+        try(var stack=MemoryStack.stackPush();var ignored=RtDebugLabels.scope(ctx,cmd,"ITRP bloom")) {
+            vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);
+            var push=stack.malloc(12);
+            for(var pass:passes) {
+                vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,layout,0,stack.longs(sets[pass.set]),null);
+                push.putFloat(0,pass.lowMix).putInt(4,pass.mode).putInt(8,clampHighlights && pass==passes[0]?1:0);
+                vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_COMPUTE_BIT,0,push);
+                vkCmdDispatch(cmd,(pass.target.width+7)/8,(pass.target.height+7)/8,1);
+                // Includes RAW between levels, WAR before next-frame reuse and display sampling.
+                var barrier=VkMemoryBarrier.calloc(1,stack);barrier.get(0).sType$Default()
+                    .srcAccessMask(VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT)
+                    .dstAccessMask(VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
+                vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,barrier,null,null);
+            }
+        }
+    }
+    private void releaseImages() {
+        for(var image:down)if(image!=null)image.destroy();for(var image:up)if(image!=null)image.destroy();
+        down=new RtImage[0];up=new RtImage[0];passes=new Pass[0];input=null;exposure=null;
+    }
+    /** Same device-idle boundary as display/guide destruction; never unload live descriptors. */
+    public void destroy() {
+        releaseImages();
+        if(pipeline!=0)vkDestroyPipeline(ctx.vk(),pipeline,null);pipeline=0;
+        if(layout!=0)vkDestroyPipelineLayout(ctx.vk(),layout,null);layout=0;
+        if(pool!=0)vkDestroyDescriptorPool(ctx.vk(),pool,null);pool=0;
+        if(dsl!=0)vkDestroyDescriptorSetLayout(ctx.vk(),dsl,null);dsl=0;
+        if(sampler!=0)vkDestroySampler(ctx.vk(),sampler,null);sampler=0;
     }
 }

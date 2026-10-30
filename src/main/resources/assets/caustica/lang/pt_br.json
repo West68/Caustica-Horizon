@@ -15,6 +15,9 @@
 	"caustica.options.rt.maxBounces": "Rebatimentos de caminho",
 	"caustica.options.rt.maxBounces.tooltip": "Número máximo de rebatimentos secundários de path tracing após o primeiro acerto. Valores maiores capturam mais luz indireta, mas custam mais.",
 
+	"caustica.options.rt.sunSize": "Tamanho do sol",
+	"caustica.options.rt.sunSize.tooltip": "Raio angular do disco do sol e da lua. Discos maiores projetam penumbras mais suaves.",
+
 	"caustica.options.rt.entities": "Entidades com traçado de raios",
 	"caustica.options.rt.entities.tooltip": "Inclui entidades e entidades de bloco na cena com traçado de raios.",
 
@@ -53,5 +56,7 @@
 	"caustica.options.rt.debugView.4": "Rugosidade",
 	"caustica.options.rt.debugView.5": "Movimento",
 	"caustica.options.rt.debugView.6": "Especular",
-	"caustica.options.rt.debugView.7": "Movimento especular"
+	"caustica.options.rt.debugView.7": "Movimento especular",
+	"caustica.options.rt.debugView.8": "Máscara de emissão",
+	"caustica.options.rt.debugView.9": "Fonte de emissão"
 }

@@ -58,8 +58,8 @@ public final class CausticaConfig {
         Object[] touch = {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
-            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.Tonemap.GAMMA, Rt.FrameStats.ENABLED,
-            Rt.Screenshots.EXR_ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
+            Rt.Hdr.ENABLED, Assets.ITRP_PACK, Rt.Look.ITRP, Rt.Clouds.MODE, Rt.Material.PARALLAX, Rt.Visuals.HELD_LIGHTS, Rt.Fg.MULTI_FRAME_COUNT, Ngx.PATH,
         };
     }
 
@@ -82,30 +82,25 @@ public final class CausticaConfig {
     }
 
     private static void writeComments() {
+        FILE.setComment("visuals", " Held-light, wetness and bounded single-scattering controls. New values do not replace saved RT/DLSS choices.");
         FILE.setComment("enabled",
-                " Caustica ray-tracing settings. A matching -Dcaustica.* system property overrides a value here.");
+                " Caustica RT renderer configuration.\n"
+                        + " A matching -Dcaustica.* system property overrides the value below.");
         FILE.setComment("terrain",
-                " Controls terrain loading. Higher limits can load terrain faster but use more CPU and GPU time.");
+                " Render-thread terrain work is bounded by dispatch/result counts per streaming pass.\n"
+                        + " Buffer fill and BLAS/OMM preparation run on workers. max-inflight-sections bounds\n"
+                        + " the complete snapshot -> worker -> GPU build -> publication lifecycle.");
         FILE.setComment("frame-generation",
-                " DLSS Frame Generation. Requires supported NVIDIA hardware and drivers.\n"
-                        + " multi-frame-count sets generated frames per rendered frame (1 = 2x, 2 = 3x, ...).");
+                " DLSS Frame Generation. Default off; gated additionally by hardware/driver availability.\n"
+                        + " multi-frame-count: frames generated per rendered frame (1 = 2x, 2 = 3x, ...), clamped\n"
+                        + " at runtime to the driver's reported DLSSG.MultiFrameCountMax.");
         FILE.setComment("reflex",
-                " NVIDIA Reflex. Requires supported NVIDIA hardware and drivers.\n"
-                        + " minimum-interval-us controls frame limiting; 0 disables the limit.");
-        FILE.setComment("lights",
-                " Controls direct lighting from glowing blocks such as torches, glowstone, and lava.\n"
-                        + " Set ris-candidates to 0 to disable it. stats, dump, and dump-radius are debugging options.");
-        FILE.setComment("tonemap",
-                " Controls the final image. gamma: 1 is neutral; lower values brighten midtones.");
-        FILE.setComment("exposure",
-                " Controls automatic exposure. manual-ev sets exposure in manual mode and adjusts it in auto mode.\n"
-                        + " adapt-darken and adapt-brighten control adjustment speed in seconds.\n"
-                        + " sky-weight-cap and emissive-weight-cap limit how much bright areas affect exposure.");
+                " NVIDIA Reflex (VK_NV_low_latency2). Default off; gated additionally by device support.\n"
+                        + " minimum-interval-us: 0 = no framerate cap (Reflex just paces submission).");
         FILE.setComment("hdr",
-                " HDR display output. Requires operating system and display support.\n"
-                        + " ui-nits controls UI brightness; peak-nits must be 500, 1000, 2000, or 4000.");
-        FILE.setComment("screenshots",
-                " exr-enabled saves an ACEScg EXR beside the normal F2 PNG while ray tracing is active.");
+                " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
+                        + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
+                        + " drive the scene-HDR -> display mapping.");
     }
 
     private static Path resolveConfigPath() {
@@ -127,10 +122,34 @@ public final class CausticaConfig {
         } catch (Exception e) {
             LOGGER.warn("Failed to read Caustica config {}: {}", path, e.toString());
         }
+        migrateLegacyFrameGenerationBackend(config);
         return config;
     }
 
-    private static Boolean fileBoolean(String tomlPath) {
+    /**
+   * Older builds defaulted to the legacy NGX frame generator. Measured on this project's own hardware
+   * (RTX 4060 Laptop, 1080p, 4 bounces, same scene): FG off 72.2 fps, NGX 2x 49.3 fps - it cost real
+   * frame rate and could not expose multi-frame generation, while the packaged Streamline 2.14.16
+   * backend can. A config that still holds the old default is upgraded once; the marker makes the
+   * choice permanent so a user who later selects NGX keeps it.
+   */
+  private static void migrateLegacyFrameGenerationBackend(CommentedFileConfig config) {
+  final String marker="frame-generation.backend-version";
+  if (config.contains(marker)) return;
+  try {
+  Object current=config.contains("frame-generation.streamline")?config.get("frame-generation.streamline"):null;
+  if (current instanceof Boolean enabled && !enabled) {
+  config.set("frame-generation.streamline",true);
+  config.save();
+  LOGGER.info("Caustica config migrated to the Streamline frame-generation backend (was legacy NGX)");
+  }
+  } catch (Exception e) {
+  LOGGER.warn("Could not migrate frame-generation backend: {}",e.toString());
+  }
+  config.set(marker,2);
+  }
+
+  private static Boolean fileBoolean(String tomlPath) {
         return FILE.contains(tomlPath) ? FILE.<Boolean>get(tomlPath) : null;
     }
 
@@ -535,10 +554,22 @@ public final class CausticaConfig {
                     clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 4, 2, 8);
             public static final BooleanSetting WATER_WAVES =
                     bool("caustica.rt.waterWaves", "composite.water-waves", true);
-            // Sun/moon angular radii and the noon south tilt moved into the versioned look package
-            // (look.json "sky"): they shape the sky alongside the exposure curve, the LMT and the
-            // photometric anchors that were already authored there, and splitting them across two
-            // sources meant a package could not fully describe its own look.
+            /** World radiance cache (SHaRC-style) terminating eligible indirect paths with cached radiance. */
+            public static final BooleanSetting RADIANCE_CACHE =
+                    bool("caustica.rt.radianceCache", "composite.radiance-cache", true);
+            /** Primary surface replacement for smooth metal mirrors: DLSS-RR sees the reflected scene as primary. */
+            public static final BooleanSetting MIRROR_PSR =
+                    bool("caustica.rt.mirrorPsr", "composite.mirror-psr", true);
+            /** Per-frame sky radiance LUT for diffuse continuation sky misses. Off: no measurable gain in the
+             *  2026-10-24 same-session A/B (PT 12.1/10.4 off vs 11.7/10.6 ms on). */
+            public static final BooleanSetting SKY_LUT =
+                    bool("caustica.rt.skyLut", "composite.sky-lut", false);
+            public static final FloatSetting SUN_ANGULAR_RADIUS =
+                    radians("caustica.rt.sunAngularRadius", "composite.sun-angular-radius-deg", 0.6f);
+            public static final FloatSetting MOON_ANGULAR_RADIUS =
+                    radians("caustica.rt.moonAngularRadius", "composite.moon-angular-radius-deg", 1.5f);
+            public static final FloatSetting SUN_NOON_SOUTH_TILT =
+                    radians("caustica.rt.sunNoonSouthDeg", "composite.sun-noon-south-tilt-deg", 30.0f);
             public static final FloatSetting JITTER_SIGN_X =
                     finiteFloat("caustica.rt.jitterSignX", "composite.jitter-sign-x", 1.0f);
             public static final FloatSetting JITTER_SIGN_Y =
@@ -568,18 +599,53 @@ public final class CausticaConfig {
             }
         }
 
-        /** RIS block-emitter lights. {@code ris-candidates = 0} disables everything. */
-        public static final class Lights {
-            public static final IntSetting RIS_CANDIDATES =
-                    intAtLeast("caustica.rt.risCandidates", "lights.ris-candidates", 8, 0);
-            public static final FloatSetting MIN_FILL_RATIO =
-                    finiteFloat("caustica.rt.lightMinFillRatio", "lights.min-fill-ratio", 0.25f);
-            public static final BooleanSetting STATS = bool("caustica.rt.lightStats", "lights.stats", false);
-            public static final BooleanSetting DUMP = bool("caustica.rt.lightDump", "lights.dump", false);
-            public static final IntSetting DUMP_RADIUS =
-                    intAtLeast("caustica.rt.lightDumpRadius", "lights.dump-radius", 12, 1);
+        public static final class Visuals {
+            public static final BooleanSetting VANILLA_ENTITY_EMISSION=bool("caustica.rt.entityEmission","visuals.entity-emission",true);
+            public static final FloatSetting HELD_SOFTNESS=clampedFloat("caustica.rt.heldSoftness","visuals.held-softness",.12f,0f,.5f);
+            public static final FloatSetting HELD_SHADOW_FLOOR=clampedFloat("caustica.rt.heldShadowFloor","visuals.held-shadow-floor",.15f,0f,1f);
+            public static final BooleanSetting ITRP_LIGHT_COLORS=bool("caustica.rt.itrpLightColors","visuals.itrp-light-colors",true);
+            public static final FloatSetting HAND_DEPTH=clampedFloat("caustica.rt.handDepth","visuals.hand-depth",.5f,.2f,1f);
+            public static final FloatSetting ZERO_F0_FALLBACK=clampedFloat("caustica.rt.zeroF0Fallback","visuals.zero-f0-fallback",.02f,0f,.08f);
+            public static final FloatSetting END_HALO=clampedFloat("caustica.rt.endHalo","visuals.end-halo",1f,0f,4f);
+            public static final BooleanSetting DH_SECONDARY=bool("caustica.compat.dhSecondary","compat.dh-secondary-depth",true);
+            public static final BooleanSetting DH_LODS=bool("caustica.compat.dh","compat.distant-horizons",true);
+            public static final FloatSetting TORCH_BRIGHTNESS=clampedFloat("caustica.rt.torchBrightness","visuals.torch-brightness",2f,0f,8f);
+            public static final FloatSetting EMISSION=clampedFloat("caustica.rt.emissionBrightness","visuals.emission",4f,0f,16f);
+            public static final FloatSetting END_LIGHT=clampedFloat("caustica.rt.endLight","visuals.end-light",1.5f,0f,8f);
+            public static final FloatSetting END_STARS=clampedFloat("caustica.rt.endStars","visuals.end-stars",3f,0f,10f);
+            public static final FloatSetting END_SKY=clampedFloat("caustica.rt.endSky","visuals.end-sky",1f,0f,4f);
+            public static final FloatSetting SPECULAR=clampedFloat("caustica.rt.specular","visuals.specular",1f,0f,1f);
+            public static final FloatSetting NORMAL=clampedFloat("caustica.rt.normalStrength","visuals.normal-strength",1f,0f,2f);
+            public static final FloatSetting PORTAL=clampedFloat("caustica.rt.portalBrightness","visuals.portal",1f,0f,4f);
+            public static final FloatSetting RELIEF_SHADOW=clampedFloat("caustica.rt.reliefShadow","visuals.relief-shadow",1f,0f,1f);
+            public static final FloatSetting END_CYCLE=clampedFloat("caustica.rt.endCycle","visuals.end-cycle",15f,1f,60f);
+            public static final FloatSetting NETHER_BRIGHTNESS=clampedFloat("caustica.rt.netherBrightness","visuals.nether-brightness",1f,0f,8f);
+            public static final FloatSetting PUDDLE=clampedFloat("caustica.rt.puddle","visuals.puddle",1f,0f,1f);
+            public static final FloatSetting RIPPLES=clampedFloat("caustica.rt.ripples","visuals.ripples",1f,0f,2f);
+            public static final BooleanSetting HELD_LIGHTS=bool("caustica.rt.heldLights","visuals.held-lights",true);
+            public static final FloatSetting HELD_RADIUS=clampedFloat("caustica.rt.heldRadius","visuals.held-radius",15f,1f,32f);
+            public static final FloatSetting HELD_BRIGHTNESS=clampedFloat("caustica.rt.heldBrightness","visuals.held-brightness",1f,0f,8f);
+            public static final FloatSetting WETNESS=clampedFloat("caustica.rt.wetness","visuals.wetness",1f,0f,1f);
+            public static final FloatSetting FOG=clampedFloat("caustica.rt.fogDensity","visuals.fog-density",1f,0f,4f);
+            public static final FloatSetting WATER_SCATTER=clampedFloat("caustica.rt.waterScatter","visuals.water-scatter",1f,0f,4f);
+        }
 
-            private Lights() {
+        public static final class Material {
+            /**
+             * Parallax depth: 0 = OFF (official Caustica behaviour, no height sampling and no UV offset),
+             * 1 = Parallax (one height lookup and a single local-UV offset), 2 = Smooth Parallax (a few
+             * adaptive steps with one refinement). Only materials whose _n alpha actually carries a height
+             * map take part, so a height-less pack renders exactly as it does with parallax off.
+             */
+            public static final IntSetting PARALLAX =
+                    clampedInt("caustica.rt.parallax", "material.parallax", 0, 0, 2);
+
+            public static final FloatSetting PARALLAX_STRENGTH = clampedFloat("caustica.rt.parallaxStrength", "material.parallax-strength", 1f, 0f, 2f);
+            public static final IntSetting SMOOTH_STEPS = clampedInt("caustica.rt.smoothSteps", "material.smooth-steps", 3, 2, 8);
+            public static final BooleanSetting SMOOTH_HEIGHT_NORMAL = bool("caustica.rt.smoothHeightNormal", "material.smooth-height-normal", true);
+            public static final BooleanSetting SMOOTH_SHADOW = bool("caustica.rt.smoothShadow", "material.smooth-shadow", true);
+
+            private Material() {
             }
         }
 
@@ -655,14 +721,9 @@ public final class CausticaConfig {
         public static final class DlssRr {
             public static final BooleanSetting ENABLED = bool("caustica.rt.dlssRr", "dlss-rr.enabled", true);
             public static final IntSetting PRESET = intValue("caustica.rt.dlssRr.preset", "dlss-rr.preset", 0);
-
-            // NVSDK_NGX_PerfQuality_Value. Per NVIDIA's DLSS-RR programming guide, Ray Reconstruction only
-            // supports Performance(0), Balanced(1), Quality(2), Ultra-Performance(3), and DLAA(5) —
-            // Ultra Quality(4) is not a valid PerfQualityValue for RR (its optimal-settings query returns a
-            // zeroed render size for it) and is deliberately excluded here.
-            public static final List<Integer> QUALITY_STEPS = List.of(3, 0, 1, 2, 5);
-            public static final IntSetting QUALITY =
-                    intChoice("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0, QUALITY_STEPS);
+            public static final BooleanSetting SR_ONLY = bool("caustica.rt.dlssSr", "dlss-sr.enabled", false);
+            public static final IntSetting SR_PRESET = intValue("caustica.rt.dlssSr.preset", "dlss-sr.preset", 0);
+            public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
 
             private DlssRr() {
             }
@@ -670,6 +731,14 @@ public final class CausticaConfig {
 
         /** DLSS Frame Generation. Default off; gated additionally by hardware/driver availability. */
         public static final class Fg {
+            public static final BooleanSetting STREAMLINE=bool("caustica.rt.fg.streamline","frame-generation.streamline",true);
+            public static final FloatSetting DYNAMIC_TARGET_FPS=clampedFloat("caustica.rt.fg.dynamicTargetFps","frame-generation.dynamic-target-fps",0f,0f,1000f);
+            public static final BooleanSetting UI_RECOMPOSITION=bool("caustica.rt.fg.uiRecomposition","frame-generation.ui-recomposition",true);
+            public static final BooleanSetting FULLSCREEN_MENU_DETECTION=bool("caustica.rt.fg.fullscreenMenuDetection","frame-generation.fullscreen-menu-detection",true);
+            public static final BooleanSetting SHOW_ONLY_INTERPOLATED=bool("caustica.rt.fg.showOnlyInterpolated","frame-generation.show-only-interpolated",false);
+            public static boolean requested(){return ENABLED.value();}
+            public static String mode(){return ENABLED.value()?"fixed":"off";}
+
             public static final BooleanSetting ENABLED = bool("caustica.rt.fg", "frame-generation.enabled", false);
             public static final IntSetting MULTI_FRAME_COUNT =
                     intAtLeast("caustica.rt.fg.multiFrameCount", "frame-generation.multi-frame-count", 1, 1);
@@ -680,8 +749,9 @@ public final class CausticaConfig {
 
         /**
          * NVIDIA Reflex ({@code VK_NV_low_latency2}). Default off; gated additionally by device support.
-         * The renderer configures the swapchain latency mode, paces frames with {@code vkLatencySleepNV},
-         * and emits simulation, render-submit, and present latency markers.
+         * Phase 0 (extension + capability probe only, see {@code RtDeviceBringup}/{@code RtReflex}) — the
+         * per-frame sleep call + latency markers + the swapchain {@code VkSwapchainLatencyCreateInfoNV} the
+         * spec requires for {@code vkSetLatencySleepModeNV} to take effect land in a later phase.
          */
         public static final class Reflex {
             public static final BooleanSetting ENABLED = bool("caustica.rt.reflex", "reflex.enabled", false);
@@ -694,107 +764,89 @@ public final class CausticaConfig {
             }
         }
 
+        /** ITRP-PTGI style blocky cloud deck drawn into the sky miss path. OFF costs nothing. */
+        public static final class Clouds {
+            /** No cloud work at all; the sky is bit-identical to the official one. */
+            public static final int OFF = 0;
+            /** ITRP shape and colours with the cheap step counts. */
+            public static final int ITRP_PERFORMANCE = 1;
+            /** Same shape and colours, denser light marches for softer interiors and edges. */
+            public static final int ITRP_FIDELITY = 2;
+
+            public static final IntSetting MODE =
+                    intValue("caustica.rt.clouds", "clouds.mode", ITRP_FIDELITY);
+
+            public static final FloatSetting COVERAGE = clampedFloat("caustica.rt.clouds.coverage", "clouds.coverage", 0f, -0.3f, 0.3f);
+            public static final FloatSetting DENSITY = clampedFloat("caustica.rt.clouds.density", "clouds.density", 1f, 0.25f, 2f);
+            public static final FloatSetting SIZE = clampedFloat("caustica.rt.clouds.size", "clouds.size", 1f, 0.5f, 2f);
+            public static final FloatSetting HEIGHT = clampedFloat("caustica.rt.clouds.height", "clouds.height", 940f, 500f, 1500f);
+            public static final FloatSetting BRIGHTNESS = clampedFloat("caustica.rt.clouds.brightness", "clouds.brightness", 1f, 0.25f, 2f);
+            public static final FloatSetting BOTTOM = clampedFloat("caustica.rt.clouds.bottom", "clouds.bottom", 1f, 0.25f, 2f);
+            public static final FloatSetting SUNLIGHT = clampedFloat("caustica.rt.clouds.sunlight", "clouds.sunlight", 1f, 0f, 2f);
+            public static final FloatSetting SPEED = clampedFloat("caustica.rt.clouds.speed", "clouds.speed", 1f, 0f, 3f);
+            public static final FloatSetting EDGE = clampedFloat("caustica.rt.clouds.edge", "clouds.edge", 1f, 0f, 2f);
+            public static final FloatSetting CIRRUS = clampedFloat("caustica.rt.clouds.cirrus", "clouds.cirrus", 1f, 0f, 2f);
+            public static final FloatSetting RAIN = clampedFloat("caustica.rt.clouds.rain", "clouds.rain", 1f, 0f, 1f);
+
+            private Clouds() {
+            }
+        }
+
+        public static final class Look {
+            public static final FloatSetting BLOOM=clampedFloat("caustica.rt.look.bloom","look.bloom",1f,0f,3f);
+            public static final BooleanSetting STARS=bool("caustica.rt.look.stars","look.stars",false);
+            /** ITRP DETAIL_SHARPEN_AMOUNT: post-tonemap micro-contrast on the overworld ITRP look; 0 disables. */
+            public static final FloatSetting DETAIL_SHARPEN=clampedFloat("caustica.rt.look.detailSharpen","look.detail-sharpen",1f,0f,3f);
+            /** ITRP SUNLIGHT_RIMS strength: sun rim light on silhouettes facing away from the sun; 0 disables. */
+            public static final FloatSetting SUN_RIMS=clampedFloat("caustica.rt.look.sunRims","look.sun-rims",1f,0f,3f);
+            public static final FloatSetting TORCH_KELVIN=clampedFloat("caustica.rt.look.torchKelvin","look.torch-kelvin",3000f,1000f,12000f);
+            /**
+             * View transform: false keeps the official AgX display mapping, true switches the display pass to
+             * the ITRP-PTGI 0.8.31 default curve (SEUSTonemap: Lottes cone-overlap, TONE_CURVE_POWER 2.5,
+             * GAMMA 2.2). Exposure is applied before either curve, exactly as before.
+             */
+            public static final BooleanSetting ITRP =
+                    bool("caustica.rt.itrpLook", "look.itrp", true);
+
+            public static final FloatSetting BRIGHTNESS=clampedFloat("caustica.rt.look.brightness","look.brightness",1f,0.25f,2f);
+            public static final FloatSetting CONTRAST=clampedFloat("caustica.rt.look.contrast","look.contrast",1f,0.5f,1.5f);
+            public static final FloatSetting SATURATION=clampedFloat("caustica.rt.look.saturation","look.saturation",1f,0f,2f);
+            public static final FloatSetting TEMPERATURE=clampedFloat("caustica.rt.look.temperature","look.temperature",0f,-1f,1f);
+            public static final FloatSetting GAMMA=clampedFloat("caustica.rt.look.gamma","look.gamma",1f,0.5f,2f);
+            public static final FloatSetting SHADOW_LIFT=clampedFloat("caustica.rt.look.shadowLift","look.shadowLift",0f,0f,0.25f);
+            public static final FloatSetting HIGHLIGHT_SOFTNESS=clampedFloat("caustica.rt.look.highlightSoftness","look.highlightSoftness",0f,0f,2f);
+            private Look() {
+            }
+        }
+
         public static final class Exposure {
-            // Control points are measured-EV100 : compensation-EV.
-            // Rendered median (log) = log2(key) + comp(evScene), so comp IS the rendered offset in EV
-            // from the noon reference.
-            //
-            // Fitted to measured in-game EV100 and the current emissive baseline:
-            //   noon sand       +17.45 -> -0.01   renders at key, the reference
-            //   noon blue sky   +16.50 -> -0.17
-            //   daylight shade   +7.00 -> -1.82
-            //   lit night room   +7.00 -> -1.82   (same measured luminance as daylight shade)
-            //   night street     +1.50 -> -3.01
-            //   starlit sky      -8.00 -> -5.00   (floor)
-            // Effective slope is 0.79 / 0.78 / 0.83 across the three segments, compressing 25 EV of
-            // scene range to 5.0 EV of rendered difference.
-            //
-            // Daylight shade and a lit interior at night measure the SAME (~EV 7), so no luminance-only
-            // curve can separate them -- what does is the asymmetric temporal adaptation above, which
-            // holds a low exposure when you step from noon sun into shade. That is a real limit of this
-            // controller, not a tuning miss.
             public static final StringSetting MODE =
                     string("caustica.rt.exposure.mode", "exposure.mode", "auto", Exposure::sanitizeMode);
             public static final FloatSetting MANUAL_EV =
-                    clampedFloat("caustica.rt.exposure.manualEv", "exposure.manual-ev",
-                            0.0f, -15.0f, 15.0f);
+                    finiteFloat("caustica.rt.exposure.manualEv", "exposure.manual-ev", 0.0f);
             public static final FloatSetting KEY = exposureScale("caustica.rt.exposure.key", "exposure.key", 0.18f);
-            // Bounds on the ABSOLUTE exposure multiplier. Sized from what the curve above actually asks
-            // for at the measured scene extremes: -16.9 EV at noon sand, +3.5 EV at the starlit-sky
-            // floor. A clamp should be a guard rail, not the controller, so these sit just outside that.
-            //
-            // max-ev was +10 and blew out the frame: with 13 EV of headroom above what the curve wants,
-            // exposure ran away whenever the camera held something very dark, and anything bright
-            // entering the frame then arrived pre-blown. +5 keeps 1.5 EV over the curve's own demand.
-            //
-            // min-ev deliberately does NOT cover a zoomed-in sun (which asks for about -20.8): letting
-            // the whole frame go black because the sun is in shot is worse than clamping it. The sky
-            // metering cap already bounds the sun's share, so in practice this only engages on a
-            // near-full-screen sun.
-            /**
-             * Adaptation time constants in seconds, applied in EV space by the resolve. Named for what
-             * the SCENE did: walking into a dark cave is "darken" (exposure has to rise), stepping back
-             * out is "brighten".
-             *
-             * <p>Asymmetric on purpose, and in the direction human vision actually works — light
-             * adaptation takes seconds, dark adaptation takes minutes. Every shipping game compresses
-             * that, but keeping the sign right is what makes a sunrise read as a sunrise instead of as a
-             * lens. The names describe the scene change, not the inverse movement of the exposure multiplier.
-             */
-            public static final FloatSetting ADAPT_DARKEN =
-                    exposureScale("caustica.rt.exposure.adaptDarken", "exposure.adapt-darken", 2.0f);
-            public static final FloatSetting ADAPT_BRIGHTEN =
-                    exposureScale("caustica.rt.exposure.adaptBrighten", "exposure.adapt-brighten", 0.4f);
-            public static final FloatSetting LOW_PERCENTILE =
-                    clampedFloat("caustica.rt.exposure.lowPercentile", "exposure.low-percentile", 0.50f, 0.0f, 1.0f);
-            public static final FloatSetting HIGH_PERCENTILE =
-                    clampedFloat("caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.95f, 0.0f, 1.0f);
-            public static final IntSetting STRIDE =
-                    clampedInt("caustica.rt.exposure.stride", "exposure.stride", 2, 1, 8);
-            public static final FloatSetting CENTER_WEIGHT_SIGMA =
-                    clampedFloat("caustica.rt.exposure.centerWeightSigma",
-                            "exposure.center-weight-sigma", 0.35f, 0.01f, 2.0f);
-            public static final FloatSetting CENTER_WEIGHT_FLOOR =
-                    clampedFloat("caustica.rt.exposure.centerWeightFloor",
-                            "exposure.center-weight-floor", 0.15f, 0.0f, 1.0f);
-            public static final FloatSetting SKY_WEIGHT_CAP =
-                    clampedFloat("caustica.rt.exposure.skyWeightCap",
-                            "exposure.sky-weight-cap", 0.25f, 0.0f, 1.0f);
-            public static final FloatSetting EMISSIVE_WEIGHT_CAP =
-                    clampedFloat("caustica.rt.exposure.emissiveWeightCap",
-                            "exposure.emissive-weight-cap", 0.10f, 0.0f, 1.0f);
-            /**
-             * Pre-exposure: raygen multiplies scene radiance by the previous frame's exposure before
-             * the fp16 write, and the display pass divides it back out, so stored values sit near
-             * {@code key} instead of spanning the ~26 EV physical photometric units require. The two
-             * cancel algebraically, so <b>toggling this must not change the
-             * image</b>; it exists as an A/B switch for exactly that check, and as an escape hatch
-             * if DLSS-RR ever proves sensitive to its history being at the previous frame's scale.
-             */
-            public static final BooleanSetting PRE_EXPOSURE =
-                    bool("caustica.rt.exposure.preExposure", "exposure.pre-exposure", true);
+            public static final FloatSetting MIN_EV =
+                    finiteFloat("caustica.rt.exposure.minEv", "exposure.min-ev", -1.5f);
+            public static final FloatSetting MAX_EV =
+                    finiteFloat("caustica.rt.exposure.maxEv", "exposure.max-ev", 3.0f);
+            public static final FloatSetting ADAPT_UP =
+                    exposureScale("caustica.rt.exposure.adaptUp", "exposure.adapt-up", 0.12f);
+            public static final FloatSetting ADAPT_DOWN =
+                    exposureScale("caustica.rt.exposure.adaptDown", "exposure.adapt-down", 0.35f);
 
             private Exposure() {
             }
 
             public static float minEv() {
-                return dev.comfyfluffy.caustica.rt.RtLookPackage.current().exposure().minEv();
+                return Math.min(MIN_EV.value(), MAX_EV.value());
             }
 
             public static float maxEv() {
-                return dev.comfyfluffy.caustica.rt.RtLookPackage.current().exposure().maxEv();
+                return Math.max(MIN_EV.value(), MAX_EV.value());
             }
 
-            public static String curve() {
-                return dev.comfyfluffy.caustica.rt.RtLookPackage.current().exposure().curve();
-            }
-
-            /**
-             * Sanity bound on an exposure multiplier, not an artistic one. It must remain below the
-             * 3.8e-6 multiplier requested by {@code -18 EV}; min-ev/max-ev provides the artistic bound.
-             */
             public static float clampScale(float value) {
-                return Math.clamp(value, 1.0e-8f, 1.0e8f);
+                return Math.clamp(value, 1.0e-4f, 1.0e4f);
             }
 
             private static String sanitizeMode(String value) {
@@ -806,16 +858,6 @@ public final class CausticaConfig {
                 }
                 return "auto";
             }
-
-        }
-
-        /** Scene-referred look transform and baked SDR/HDR ACES display transforms. */
-        public static final class Tonemap {
-            public static final FloatSetting GAMMA =
-                    clampedFloat("caustica.rt.tonemap.gamma", "tonemap.gamma", 1.0f, 0.1f, 5.0f);
-
-            private Tonemap() {
-            }
         }
 
         /** Render-frame timing + hitch logging. See {@code RtFrameStats}. */
@@ -823,15 +865,6 @@ public final class CausticaConfig {
             public static final BooleanSetting ENABLED = bool("caustica.rt.frameStats", "frame-stats.enabled", false);
 
             private FrameStats() {
-            }
-        }
-
-        /** Optional high-dynamic-range screenshot output paired with vanilla's F2 PNG. */
-        public static final class Screenshots {
-            public static final BooleanSetting EXR_ENABLED =
-                    bool("caustica.rt.screenshots.exr", "screenshots.exr-enabled", false);
-
-            private Screenshots() {
             }
         }
 
@@ -846,6 +879,12 @@ public final class CausticaConfig {
             public static final BooleanSetting HEAVY_CRASH_DIAGNOSTICS =
                     bool("caustica.rt.heavyCrashDiagnostics", "diagnostics.heavy-crash-diagnostics", false);
 
+            /** Per-frame GPU timestamps and CPU phase timings for the composite and present paths.
+             * See {@code EnhancedGpuTimings}. Off by default: each timestamp is a queue-level
+             * serialisation point, so the cost is small but not zero. Enable while measuring. */
+            public static final BooleanSetting GPU_TIMINGS =
+                    bool("caustica.rt.gpuTimings", "diagnostics.gpu-timings", false);
+
             private Diagnostics() {
             }
         }
@@ -854,62 +893,45 @@ public final class CausticaConfig {
          * HDR display output. When enabled the swapchain is created in PQ (ST.2084/HDR10 — the display-ready
          * encoding both HDR10 swapchains and DLSS Frame Generation require; whatever pixel format the surface
          * pairs with that color space, commonly a 10-bit UNORM), falling back to SDR if the surface doesn't
-         * advertise it. The ACES LUT owns scene-to-display mapping; {@code uiNits} places SDR-authored UI
-         * in that PQ output, while {@code peakNits} selects the LUT's mastering target.
+         * advertise it. The nit values drive the scene-HDR → display mapping: SDR paper white maps to
+         * {@code paperWhiteNits}, and highlights roll off toward {@code peakNits}.
          */
         public static final class Hdr {
             public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false);
-            public static final FloatSetting UI_NITS =
-                    clampedFloat("caustica.rt.hdr.uiNits", "hdr.ui-nits", 200.0f, 80.0f, 500.0f);
+            public static final FloatSetting PAPER_WHITE_NITS =
+                    clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 500.0f);
+            public static final FloatSetting PEAK_NITS =
+                    clampedFloat("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 5000.0f);
 
-            // ACES HDR LUTs are available only for these mastering targets.
-            public static final List<Integer> PEAK_NITS_STEPS = List.of(500, 1000, 2000, 4000);
-            public static final IntSetting PEAK_NITS =
-                    intChoice("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000, PEAK_NITS_STEPS);
-
-            // Surface capability and current swapchain state are separate: HDR controls remain available
-            // while the swapchain is native SDR, so enabling HDR can recreate it in PQ.
-            private static volatile boolean SWAPCHAIN_PQ_AVAILABLE = false;
-            private static volatile boolean SWAPCHAIN_PQ_ACTIVE = false;
+            // Snapshot of ENABLED as resolved at startup (system property / config file), before any
+            // in-session edit from the options screen. The swapchain's pixel format (PQ vs SDR) is fixed
+            // at surface-creation time, so flipping ENABLED later cannot change what's actually presented
+            // until a restart — every runtime/rendering check reads this frozen value via enabled(),
+            // never ENABLED directly, so the live toggle is a no-op for the current session.
+            private static final boolean ENABLED_AT_STARTUP = ENABLED.value();
 
             private Hdr() {
             }
 
-            public static void setSwapchainPqAvailable(boolean available) {
-                SWAPCHAIN_PQ_AVAILABLE = available;
-            }
-
-            public static void setSwapchainPqActive(boolean active) {
-                SWAPCHAIN_PQ_ACTIVE = active;
-            }
-
-            /**
-             * Whether this session's surface can create a PQ swapchain, independent of which format the
-             * current swapchain uses.
-             */
-            public static boolean swapchainPqAvailable() {
-                return SWAPCHAIN_PQ_AVAILABLE;
-            }
-
-            /** Whether the currently configured swapchain is HDR10/PQ rather than native SDR. */
-            public static boolean swapchainPqActive() {
-                return SWAPCHAIN_PQ_ACTIVE;
-            }
-
-            /**
-             * Whether the HDR display path (world HDR + PQ swapchain + UI overlay) should be active this
-             * frame. The option invalidates the surface configuration after changing {@link #ENABLED};
-             * the ordinary resize/configure path recreates the swapchain in SDR or PQ.
-             */
+            /** Whether the HDR display path (world HDR + PQ swapchain + UI overlay) is active this session. */
             public static boolean enabled() {
-                return SWAPCHAIN_PQ_ACTIVE && ENABLED.value();
+                return ENABLED_AT_STARTUP;
             }
 
-            /** Absolute brightness assigned to SDR-authored UI in the PQ output. */
-            public static float uiNits() {
-                return UI_NITS.value();
+            /** Whether {@link #ENABLED} has been changed since startup and needs a restart to take effect. */
+            public static boolean pendingRestart() {
+                return ENABLED.value() != ENABLED_AT_STARTUP;
             }
 
+            /** Absolute nits SDR paper white maps to in the PQ encode (ST.2084 is referenced to 10000 nits). */
+            public static float paperWhiteNits() {
+                return PAPER_WHITE_NITS.value();
+            }
+
+            /** Highlight headroom above paper white, in paper-white-referred units ({@code >= 1}). */
+            public static float headroom() {
+                return Math.max(1.0f, PEAK_NITS.value() / Math.max(1.0f, PAPER_WHITE_NITS.value()));
+            }
         }
     }
 
@@ -918,6 +940,12 @@ public final class CausticaConfig {
 
         private Ngx() {
         }
+    }
+
+    public static final class Assets {
+        /** User-owned pack, read externally. No ITRP texture is included in this JAR. Restart after changing. */
+        public static final StringSetting ITRP_PACK = string("caustica.assets.itrpPack", "assets.itrp-pack", "", String::trim);
+        private Assets() {}
     }
 
     private static BooleanSetting bool(String key, String tomlPath, boolean fallback) {
@@ -938,10 +966,6 @@ public final class CausticaConfig {
 
     private static IntSetting intAtLeast(String key, String tomlPath, int fallback, int min) {
         return new IntSetting(key, tomlPath, fallback, v -> Math.max(min, v));
-    }
-
-    private static IntSetting intChoice(String key, String tomlPath, int fallback, List<Integer> choices) {
-        return new IntSetting(key, tomlPath, fallback, v -> choices.contains(v) ? v : fallback);
     }
 
     private static IntSetting clampedInt(String key, String tomlPath, int fallback, int min, int max) {

@@ -1,0 +1,365 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, rgba8) uniform writeonly image2D outputImage; // LDR world target image
+layout(binding = 1, set = 0, rgba16f) uniform readonly image2D rtImage; // HDR RT radiance
+layout(binding = 2, set = 0, r32f) uniform readonly image2D exposureImage; // 1x1 linear exposure scale
+layout(binding = 3, set = 0, rgba16f) uniform writeonly image2D hdrImage; // PQ-encoded ([0,1], ST.2084) HDR display
+
+layout(binding = 4, set = 0) uniform sampler2D bloomImage;
+
+// HDR display parameters. hdrEnabled gates the parallel PQ write; the SDR AgX path always runs because
+// vanilla main-target presentation still consumes LDR.
+layout(push_constant) uniform Push {
+    int hdrEnabled;        // 0 = SDR only, 1 = also write the PQ HDR image
+    float paperWhiteNits;  // absolute nits SDR paper white maps to
+    float headroom;        // highlight headroom above paper white (peakNits / paperWhiteNits, >= 1)
+    int itrpLook;          // 0 = official AgX mapping, 1 = ITRP-PTGI 0.8.31 curve
+    vec4 grade0; // brightness, linear contrast, saturation, temperature
+    vec4 grade1; // display gamma, shadow lift, highlight softness, ITRP scene-linear bloom mix
+    float detailSharpen; // ITRP DETAIL_SHARPEN_AMOUNT (0 = off; overworld ITRP look only)
+    mat4 invViewProj;    // jitter-free camera-relative inverse view-projection (same as world.rgen)
+    vec4 skyAxis;        // xyz celestial rotation axis, w rotation angle (the star field's wheel)
+    vec4 night;          // x night strength (0 = off), y time (s), z rain, w Milky Way texture ready
+} pc;
+
+// Night sky at full output resolution. The RT guide's alpha marks a camera ray that reached the sky
+// with -(cloud transmittance); the Milky Way texture and the point stars are drawn only there.
+layout(binding = 5, set = 0, rgba16f) uniform readonly image2D guideImage; // render-res albedo guide
+layout(binding = 6) uniform sampler2D milkyWay;                            // NightSkyTexture, equirect
+const float MILKY_WAY_PEAK = 3.0;
+
+float skyCoverage(ivec2 pix, ivec2 size) {
+    ivec2 gs = imageSize(guideImage);
+    vec2 gp = (vec2(pix) + 0.5) / vec2(size) * vec2(gs) - 0.5;
+    ivec2 g0 = ivec2(floor(gp));
+    vec2 f = gp - vec2(g0);
+    float sum = 0.0;
+    for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) {
+        float a = imageLoad(guideImage, clamp(g0 + ivec2(i, j), ivec2(0), gs - 1)).a;
+        float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+        sum += w * max(-a, 0.0);   // geometry (a >= 0) contributes nothing: soft, correct silhouettes
+    }
+    return sum;
+}
+
+vec3 viewDir(vec2 uv) {
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec4 n = pc.invViewProj * vec4(ndc, 1.0, 1.0);
+    vec4 f = pc.invViewProj * vec4(ndc, 0.0, 1.0);
+    return normalize(f.xyz / f.w - n.xyz / n.w);
+}
+
+vec3 rotateSky(vec3 v) { // inverse of the star wheel, as world.rmiss stars()
+    vec3 k = normalize(pc.skyAxis.xyz);
+    float c = cos(-pc.skyAxis.w), s = sin(-pc.skyAxis.w);
+    return v * c + cross(k, v) * s + k * dot(k, v) * (1.0 - c);
+}
+
+float nightHash(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+
+vec3 blackbody(float t) { // compact fit, 3000..12000 K, normalised to unit max
+    t /= 100.0;
+    float r = t <= 66.0 ? 1.0 : clamp(1.29293618 * pow(t - 60.0, -0.1332047592), 0.0, 1.0);
+    float g = t <= 66.0 ? clamp(0.39008158 * log(t) - 0.63184144, 0.0, 1.0) : clamp(1.12989086 * pow(t - 60.0, -0.0755148492), 0.0, 1.0);
+    float b = t >= 66.0 ? 1.0 : (t <= 19.0 ? 0.0 : clamp(0.54320679 * log(t - 10.0) - 1.19625409, 0.0, 1.0));
+    return vec3(r, g, b);
+}
+
+// Crisp point stars: cube-face cells, power-law brightness, colour temperature, denser in the band,
+// a gaussian sized to the output pixel so stars stay round and stable at any resolution.
+vec3 pointStars(vec3 s, float pixelAngle, float band, float time, float elevation) {
+    vec3 a = abs(s); vec2 uv; float face;
+    if (a.x >= a.y && a.x >= a.z) { uv = s.yz / a.x; face = s.x > 0.0 ? 0.0 : 1.0; }
+    else if (a.y >= a.z)          { uv = s.xz / a.y; face = s.y > 0.0 ? 2.0 : 3.0; }
+    else                          { uv = s.xy / a.z; face = s.z > 0.0 ? 4.0 : 5.0; }
+    const float CELLS = 220.0;
+    vec2 g = uv * CELLS;
+    vec3 total = vec3(0.0);
+    vec2 base = floor(g - 0.5);
+    for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) {
+        vec3 id = vec3(base + vec2(i, j), face);
+        float pick = nightHash(id);
+        float density = 0.08 + 0.25 * band;
+        if (pick > density) continue;
+        vec2 centre = id.xy + 0.15 + 0.7 * vec2(nightHash(id + 11.0), nightHash(id + 23.0));
+        float d = length(g - centre) / CELLS * 2.0;             // ~ angular distance (radians)
+        float sigma = max(pixelAngle * 0.65, 1.2e-4);
+        float mag = nightHash(id + 37.0);
+        float lum = 0.05 + 2.6 * pow(mag, 7.0);                 // a few bright stars among many faint ones
+        // Scintillation: every star twinkles, more strongly through the thicker air near the horizon.
+        float twinkle = 1.0 + (0.35 + 0.45 * (1.0 - smoothstep(0.05, 0.4, elevation)))
+                * sin(time * (2.0 + 5.0 * nightHash(id + 3.0)) + pick * 50.0);
+        vec3 tint = blackbody(mix(3500.0, 12000.0, pow(nightHash(id + 5.0), 0.7)));
+        float s2 = 2.0 * sigma * sigma;
+        // Bright stars get a soft glow around the point so they read at a glance.
+        total += tint * lum * twinkle * (exp(-d * d / s2) + 0.06 * smoothstep(0.8, 2.0, lum) * exp(-d * d / (s2 * 16.0)));
+    }
+    return total;
+}
+
+// Meteors in the world frame: two independent streams, each with a chance of one streak per 3-second
+// slot, crossing 10-20 degrees with a cooling tail, drawn as a line one output pixel wide.
+vec3 meteors(vec3 d, float time, float pixelAngle) {
+    vec3 total = vec3(0.0);
+    for (int k = 0; k < 2; k++) {
+        float slot = floor(time / 3.0 + 0.5 * float(k));
+        float seed = slot + 97.0 * float(k);
+        if (nightHash(vec3(seed, 1.7, 9.2)) > 0.55) continue;
+        float dur = 0.6 + 0.6 * nightHash(vec3(seed, 5.5, 2.1));
+        float age = time - (slot - 0.5 * float(k)) * 3.0 - 2.0 * nightHash(vec3(seed, 4.1, 2.3));
+        if (age < 0.0 || age > dur) continue;
+        float az = nightHash(vec3(seed, 7.7, 1.1)) * 6.2831853, el = 0.35 + 0.8 * nightHash(vec3(seed, 2.2, 8.8));
+        vec3 start = vec3(cos(az) * cos(el), sin(el), sin(az) * cos(el));
+        vec3 side = normalize(cross(start, vec3(0.0, 1.0, 0.0)));
+        vec3 travel = normalize(mix(side * (nightHash(vec3(seed, 6.6, 6.6)) > 0.5 ? 1.0 : -1.0), vec3(0.0, -1.0, 0.0), 0.4));
+        float len = 0.18 + 0.17 * nightHash(vec3(seed, 9.1, 3.7));
+        vec3 head = normalize(start + travel * (len * age / dur));
+        vec3 rel = d - head;
+        float along = dot(rel, -travel);                     // > 0 behind the head
+        if (along < -0.01 || along > 0.12) continue;
+        vec3 perp = rel + travel * along;
+        float across = length(perp);
+        float w = max(pixelAngle * 0.7, 2.5e-4);
+        float tail = exp(-max(along, 0.0) * 30.0) * exp(-across * across / (2.0 * w * w));
+        float headGlow = exp(-dot(rel, rel) / (2.0 * w * w * 6.0));
+        float life = smoothstep(0.0, 0.1, age) * smoothstep(dur, dur * 0.6, age);
+        vec3 hue = mix(vec3(0.75, 1.0, 0.85), vec3(1.0, 0.85, 0.6), nightHash(vec3(seed, 3.3, 3.3)));
+        vec3 tailCol = mix(hue, vec3(1.0, 0.55, 0.3), clamp(along * 12.0, 0.0, 1.0));
+        total += (tailCol * tail + vec3(1.0) * headGlow * 1.5) * life;
+    }
+    return total;
+}
+
+vec3 nightSky(ivec2 pix, ivec2 size, float cover) {
+    if (pc.night.x <= 0.0 || cover <= 0.0) return vec3(0.0);
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    vec3 d = viewDir(uv);
+    if (d.y <= 0.0) return vec3(0.0);
+    float pixelAngle = length(viewDir(uv + vec2(1.0, 0.0) / vec2(size)) - d);
+    vec3 s = rotateSky(d);
+    // Thin atmosphere near the horizon, rain hiding the sky.
+    float atmosphere = smoothstep(0.0, 0.18, d.y) * exp(-0.06 / max(d.y, 0.03));
+    float clear = cover * (1.0 - clamp(pc.night.z, 0.0, 1.0)) * atmosphere;
+    vec3 galaxy = vec3(0.0);
+    float band = 0.0;
+    if (pc.night.w > 0.0) {
+        float u = atan(s.z, s.x) / 6.2831853 + 0.5, v = acos(clamp(s.y, -1.0, 1.0)) / 3.1415927;
+        float lod = log2(max(pixelAngle * 4096.0 / 6.2831853, 1.0));
+        vec3 t = textureLod(milkyWay, vec2(u, v * (2.0 / 3.0)), lod).rgb; // top 2/3: Milky Way, below: moon map
+        galaxy = pow(t, vec3(2.2)) * MILKY_WAY_PEAK;
+        band = clamp(dot(galaxy, vec3(0.3)) * 2.0, 0.0, 1.0);
+    }
+    vec3 stars = pointStars(s, pixelAngle, band, pc.night.y, d.y);
+    return (galaxy * 0.10 + stars * 0.13 + meteors(d, pc.night.y, pixelAngle) * 0.5) * pc.night.x * clear;
+}
+
+
+// Tonemap seam: map HDR RT radiance to displayable LDR before copying back to the main target.
+// The path tracer emits true HDR radiance, so exposure is applied from the compositor-owned 1x1 image
+// before the AgX view transform. DLSS-RR still consumes HDR pre-tonemap.
+
+const mat3 AGX_INSET = mat3(
+    0.842479062253094, 0.042328242261012, 0.042375654905705,
+    0.078433599999999, 0.878468636469772, 0.078433600000000,
+    0.079223745147764, 0.079166127460543, 0.879142973793104
+);
+
+const mat3 AGX_OUTSET = mat3(
+    1.196879005120170, -0.052896851757456, -0.052971635514443,
+    -0.098020881140137, 1.151903129904170, -0.098043450117124,
+    -0.099029744079720, -0.098961176844843, 1.151073672641160
+);
+
+const float AGX_MIN_EV = -12.47393;
+const float AGX_MAX_EV = 4.026069;
+
+vec3 agxDefaultContrast(vec3 x) {
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
+    return 15.5 * x4 * x2
+        - 40.14 * x4 * x
+        + 31.96 * x4
+        - 6.868 * x2 * x
+        + 0.4298 * x2
+        + 0.1191 * x
+        - 0.00232;
+}
+
+vec3 applyLook(vec3 color) {
+    const float contrast = 1.04;   // try 1.15, 1.25, 1.4
+    const float saturation = 1.05; // try 1.05-1.15 if AgX feels grey
+
+    color = clamp((color - 0.5) * contrast + 0.5, 0.0, 1.0);
+
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luma), color, saturation);
+
+    return color;
+}
+
+vec3 agx(vec3 color) {
+    color = AGX_INSET * max(color, vec3(0.0));
+    color = clamp(log2(max(color, vec3(1.0e-10))), AGX_MIN_EV, AGX_MAX_EV);
+    color = (color - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+    color = agxDefaultContrast(color);
+    // color = applyLook(color);
+    color = AGX_OUTSET * color;
+    return clamp(color, 0.0, 1.0);
+}
+
+// ITRP-PTGI 0.8.31 default view transform, reimplemented from the curve shape and the pack's own default
+// constants rather than copied from its GLSL: SEUSTonemap is a Lottes cone-overlap curve with
+// TONE_CURVE_POWER 2.5 (doubled to 5.0 inside), GAMMA 2.2, cone overlaps RG 0.02 / RB 0.002 / GB 0.008 and
+// neutral output gains. The pack leaves HIGHLIGHT_MAXBRIGHT at 0.0, so its soft-knee block never runs and
+// is omitted here. Input is scene-linear radiance times exposure; the final 1/GAMMA step means this curve
+// already emits display-encoded values, so nothing may gamma-encode them again.
+const float ITRP_TONE_POW = 5.0;   // TONE_CURVE_POWER * 2.0
+const float ITRP_GAMMA = 2.2;
+const float ITRP_RG = 0.02;
+const float ITRP_RB = 0.002;
+const float ITRP_GB = 0.008;
+
+vec3 itrpTonemap(vec3 color) {
+    const mat3 coneFwd = mat3(
+        1.0,     ITRP_RG, ITRP_RB,
+        ITRP_RG, 1.0,     ITRP_GB,
+        ITRP_RB, ITRP_RG, 1.0);
+    const mat3 coneInv = mat3(
+        1.0 + ITRP_RG + ITRP_RB, -ITRP_RG,                -ITRP_RB,
+        -ITRP_RG,                1.0 + ITRP_RG + ITRP_GB, -ITRP_GB,
+        -ITRP_RB,                -ITRP_RG,                1.0 + ITRP_RB + ITRP_RG);
+
+    color = coneFwd * max(color, vec3(0.0));
+    // Algebraically identical shoulder, bounded before exponentiation to prevent inf/inf fireflies.
+    vec3 low = pow(min(color, vec3(1.0)), vec3(ITRP_TONE_POW));
+    vec3 high = pow(1.0 / max(color, vec3(1.0)), vec3(ITRP_TONE_POW));
+    color = mix(low / (1.0 + low), 1.0 / (1.0 + high), greaterThan(color, vec3(1.0)));
+    color = pow(color, vec3(1.0 / (ITRP_GAMMA * ITRP_TONE_POW)));
+    color = coneInv * color;
+    return clamp(color, 0.0, 1.0);
+}
+
+float itrpVignette(vec2 uv) { return 1.0 - length(uv - vec2(0.5)) / 1.5142; }
+
+bool hasDisplayGrade() {
+    return any(notEqual(pc.grade0,vec4(1.0,1.0,1.0,0.0))) || any(notEqual(pc.grade1.xy,vec2(1.0,0.0)));
+}
+vec3 gradeLinearDisplay(vec3 c) {
+    c=max(c*pc.grade0.x,vec3(0.0));
+    c=max((c-0.18)*pc.grade0.y+0.18,vec3(0.0));
+    float luminance=dot(c,vec3(0.2126,0.7152,0.0722));
+    c=mix(vec3(luminance),c,pc.grade0.z);
+    vec3 tint=exp(vec3(0.1,0.0,-0.1)*pc.grade0.w);
+    c*=tint/dot(tint,vec3(0.2126,0.7152,0.0722));
+    c+=pc.grade1.y*(1.0-smoothstep(0.0,0.25,luminance));
+    return pow(max(c,vec3(0.0)),vec3(1.0/max(pc.grade1.x,0.01)));
+}
+vec3 tonemap(vec3 hdr,float exposure,vec2 uv) {
+    vec3 exposed=max(hdr*exposure,vec3(0.0));
+    if(pc.grade1.z>0.0) {
+        vec3 excess=max(exposed-1.0,vec3(0.0));
+        exposed=min(exposed,vec3(1.0))+excess/(1.0+excess*pc.grade1.z);
+    }
+    vec3 encoded=pc.itrpLook!=0?itrpTonemap(exposed*(1.26*itrpVignette(uv))):agx(exposed);
+    if(!hasDisplayGrade()) return encoded; // neutral controls preserve the calibrated baseline exactly
+    return pow(clamp(gradeLinearDisplay(pow(max(encoded,vec3(0.0)),vec3(2.2))),0.0,1.0),vec3(1.0/2.2));
+}
+
+const float PQ_M1 = 0.1593017578125;
+const float PQ_M2 = 78.84375;
+const float PQ_C1 = 0.8359375;
+const float PQ_C2 = 18.8515625;
+const float PQ_C3 = 18.6875;
+
+float pqEncode(float nits) {
+    float y = pow(max(nits, 0.0) / 10000.0, PQ_M1);
+    return pow((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y), PQ_M2);
+}
+
+// VK_COLOR_SPACE_HDR10_ST2084_EXT mandates BT.2020 primaries as its container gamut (not just the ST.2084
+// transfer function) — but every color we compute (textures, tonemap) is authored/blended in BT.709/sRGB
+// primaries. Feeding BT.709 numbers straight into a BT.2020-tagged buffer makes the display read them as
+// (more saturated) BT.2020 coordinates, oversaturating everything. This matrix converts linear-light
+// BT.709 -> BT.2020 right before the PQ encode, which is the container's actual gamut. (ITU-R BT.2087.)
+const mat3 BT709_TO_BT2020 = mat3(
+    0.6274039, 0.0690973, 0.0163916,
+    0.3292830, 0.9195406, 0.0880132,
+    0.0433131, 0.0113612, 0.8955953
+);
+
+// HDR display mapping: map exposed scene-linear radiance to absolute nits, then PQ-encode (ST.2084) for
+// direct presentation to a PQ/HDR10 swapchain. SDR-range values (<= 1.0 after exposure) stay identity so
+// paper white lands exactly at paperWhiteNits. Highlights above 1.0 roll off smoothly and asymptote to
+// `headroom`, i.e. the brightest pixels approach peakNits. No SDR clamp here — that is the point.
+vec3 tonemapHdr(vec3 hdr, float exposure, vec2 uv) {
+    if (pc.itrpLook != 0) {
+        // ITRP's reference curve produces gamma-2.2 SDR. Decode it once before the linear BT.2020/PQ leg.
+        vec3 linear709 = pow(tonemap(hdr, exposure, uv), vec3(ITRP_GAMMA));
+        vec3 nits = (BT709_TO_BT2020 * linear709) * pc.paperWhiteNits;
+        return vec3(pqEncode(nits.r), pqEncode(nits.g), pqEncode(nits.b));
+    }
+    vec3 c = max(hdr * exposure, vec3(0.0));
+    if(pc.grade1.z>0.0) {
+        vec3 excess=max(c-1.0,vec3(0.0));
+        c=min(c,vec3(1.0))+excess/(1.0+excess*pc.grade1.z);
+    }
+    vec3 lo = min(c, vec3(1.0));
+    vec3 hi = max(c - vec3(1.0), vec3(0.0));
+    float k = max(pc.headroom - 1.0, 0.0);
+    vec3 rolled = (k > 0.0) ? (k * hi) / (k + hi) : vec3(0.0); // -> k as hi -> inf
+    vec3 paperReferred = lo + rolled;                          // 1.0 == paper white, max -> headroom
+    if(hasDisplayGrade()) paperReferred=gradeLinearDisplay(paperReferred);
+    vec3 nits709 = paperReferred * pc.paperWhiteNits;
+    vec3 nits2020 = BT709_TO_BT2020 * nits709;
+    return vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outputImage);
+    if (pix.x >= size.x || pix.y >= size.y) {
+        return;
+    }
+
+    vec4 rt = imageLoad(rtImage, pix);
+    float exposure = max(imageLoad(exposureImage, ivec2(0)).r, 0.0);
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    // Dark-sky site: at night the directly visible sky glow is dimmed so the Milky Way and stars stand
+    // out. Sky pixels only and only the faint glow (the moon and moonlit clouds keep their brightness);
+    // terrain and its lighting are untouched, so night-time visibility stays the same.
+    vec3 hdr=rt.rgb;
+    if (pc.night.x > 0.0) {
+        float cover = skyCoverage(pix, size);
+        if (cover > 0.0) {
+            float glow = dot(rt.rgb, vec3(0.2126, 0.7152, 0.0722)) * exposure;
+            float darken = 0.72 * pc.night.x * cover * (1.0 - smoothstep(0.25, 0.9, glow));
+            hdr = rt.rgb * (1.0 - darken) + nightSky(pix, size, cover);
+        }
+    }
+    if(pc.itrpLook!=0 && pc.grade1.w>0.0)
+        hdr=mix(hdr,textureLod(bloomImage,uv,0.0).rgb,clamp(pc.grade1.w,0.0,1.0));
+    vec3 ldr = tonemap(hdr, exposure, uv);
+    if (pc.detailSharpen > 0.0) {
+        // ITRP/PTGI detail sharpen in display space: compare against the 3x3 tent of the neighbours (edges
+        // 1/6, corners 1/12), clamp the difference to +-0.003 and apply it along the colour direction scaled
+        // by sqrt(luminance), so flat areas and the sky stay untouched and only fine texture gains contrast.
+        vec3 around = vec3(0.0);
+        for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+            if (x == 0 && y == 0) continue;
+            float w = (x == 0 || y == 0) ? (1.0 / 6.0) : (1.0 / 12.0);
+            around += imageLoad(rtImage, clamp(pix + ivec2(x, y), ivec2(0), size - 1)).rgb * w;
+        }
+        vec3 aroundLdr = tonemap(around, exposure, uv);
+        // Bloom is low frequency: compare the un-bloomed centre so the glow itself is not 'sharpened'.
+        float delta = clamp(dot(tonemap(rt.rgb, exposure, uv) - aroundLdr, vec3(1.0 / 3.0)), -0.003, 0.003);
+        float luma = dot(ldr, vec3(0.2126, 0.7152, 0.0722));
+        ldr = clamp(ldr + delta * 6.3 * pc.detailSharpen * sqrt(max(luma, 0.0)) * normalize(ldr + 1e-8), 0.0, 1.0);
+    }
+    imageStore(outputImage, pix, vec4(ldr, 1.0));
+
+    if (pc.hdrEnabled != 0) {
+        imageStore(hdrImage, pix, vec4(tonemapHdr(hdr, exposure, uv), 1.0));
+    }
+}

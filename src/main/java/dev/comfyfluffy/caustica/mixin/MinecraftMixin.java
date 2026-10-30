@@ -14,7 +14,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * The Reflex per-frame sleep call must run at the very start of the frame, before input
+ * Reflex Phase 1b: the per-frame sleep call must run at the very start of the frame, before input
  * sampling/simulation. {@link Minecraft#runTick} is Minecraft's per-loop-iteration entry point (called once
  * per {@code while (running)} iteration in {@link Minecraft#run()}, right after
  * {@code RenderSystem.pollEvents()}), so its HEAD is the earliest hookable point in this codebase for that
@@ -35,6 +35,8 @@ public abstract class MinecraftMixin {
 
 	@Inject(method = "runTick", at = @At("HEAD"))
 	private void caustica$reflexSleepAndSimStart(boolean advanceGameTime, CallbackInfo ci) {
+        dev.comfyfluffy.caustica.rt.CausticaLoopProbe.tickBegin();
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()) {dev.comfyfluffy.caustica.rt.pipeline.RtStreamlineFg.INSTANCE.beginSimulationFrame();return;}
 		VulkanDevice device = caustica$reflexDevice();
 		long swapchain = RtReflex.INSTANCE.appliedSwapchain();
 		if (device == null || swapchain == 0L) {
@@ -45,9 +47,25 @@ public abstract class MinecraftMixin {
 				RtReflex.INSTANCE.currentSimFrameId());
 	}
 
+    @Inject(method = "runTick", at = @At("RETURN"))
+    private void caustica$benchmarkTickEnd(boolean advanceGameTime, CallbackInfo ci) {
+        dev.comfyfluffy.caustica.rt.CausticaLoopProbe.tickEnd();
+    }
+
+    @Inject(method = "renderFrame", at = @At("HEAD"))
+    private void caustica$benchmarkRenderBegin(boolean doTick, CallbackInfo ci) {
+        dev.comfyfluffy.caustica.rt.CausticaLoopProbe.renderBegin();
+    }
+
+    @Inject(method = "renderFrame", at = @At("RETURN"))
+    private void caustica$benchmarkRenderEnd(boolean doTick, CallbackInfo ci) {
+        dev.comfyfluffy.caustica.rt.CausticaLoopProbe.renderEnd();
+    }
+
 	@Inject(method = "runTick",
 			at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Minecraft;renderFrame(Z)V"))
 	private void caustica$reflexSimEnd(boolean advanceGameTime, CallbackInfo ci) {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()) {dev.comfyfluffy.caustica.rt.pipeline.RtStreamlineFg.INSTANCE.marker(1);return;}
 		VulkanDevice device = caustica$reflexDevice();
 		long swapchain = RtReflex.INSTANCE.appliedSwapchain();
 		if (device == null || swapchain == 0L) {

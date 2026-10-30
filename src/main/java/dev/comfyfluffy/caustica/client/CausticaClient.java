@@ -18,36 +18,56 @@ import net.fabricmc.fabric.api.client.rendering.v1.InvalidateRenderStateCallback
 
 public final class CausticaClient implements ClientModInitializer {
 	private static boolean rtInitDone = false;
+	private static boolean runtimeWasRequested = true;
 
 	@Override
 	public void onInitializeClient() {
+		BetterPlayerModelCompat.init();
+		// Developer tools (performance survey, probes, showcase filming) are not shipped in a release jar.
+		boolean devTools = !dev.comfyfluffy.caustica.CausticaBuild.RELEASE;
+		if (devTools) PerfSweep.init();
+		if (dev.comfyfluffy.caustica.CausticaBuild.RELEASE) {
+			// Release: developer diagnostics stay off even if an older config switched them on.
+			dev.comfyfluffy.caustica.CausticaConfig.Rt.Composite.DEBUG_VIEW.set(0);
+			dev.comfyfluffy.caustica.CausticaConfig.Rt.FrameStats.ENABLED.set(false);
+			dev.comfyfluffy.caustica.CausticaConfig.Rt.Diagnostics.GPU_TIMINGS.set(false);
+		}
+		YsmModelMemory.init();
 		CausticaMod.LOGGER.info("Caustica client initialized");
-
-		// Class-init runs DebugScreenEntries.register(...) via its ID field; touching the class here
-		// makes the entry discoverable in F3's entry list. Off by default -- the player opts in the
-		// same way as any other optional vanilla entry (e.g. GPU utilization).
-		@SuppressWarnings("unused")
-		Object registerExposureDebugEntry = RtExposureDebugEntry.ID;
 
 		// The GpuDevice exists well before the first tick, so a one-shot at tick start
 		// runs on the render thread with the device idle between frames.
 		ClientTickEvents.START_CLIENT_TICK.register(client -> {
+			// Opt-in only (-Dcaustica.enhanced.punchyScenario=true); returns immediately otherwise.
+			if (devTools) PunchyScenario.tick(client);
+			// Opt-in only (-Dcaustica.enhanced.continuityScenario=true).
+			if (devTools) ContinuityScenario.tick(client);
 			if (!VanillaRenderController.rtRuntimeWorkRequested()) {
+				runtimeWasRequested = false;
 				if (rtInitDone) {
 					shutdownRt();
 				}
 				return;
 			}
 
+			boolean restarting = !runtimeWasRequested;
+			if (restarting) {
+				runtimeWasRequested = true;
+				VanillaRenderController.INSTANCE.resetRuntimeState();
+				RtComposite.INSTANCE.resetFailureLatch();
+			}
 			// Bring up the RT device/context once; terrain residency + the composite follow below.
 			if (!rtInitDone && RtDeviceBringup.rtRequested()) {
 				RtContext ctx = RtContext.get();
 				if (ctx != null) {
 					rtInitDone = true;
+					if (restarting && dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()) {
+						dev.comfyfluffy.caustica.streamline.StreamlineSwapchainCoordinator.INSTANCE.requestReconfigure();
+					}
 				}
 			}
 
-			// Once RT is up, keep section residency synced to vanilla's loaded chunks around
+			// P2: once RT is up, keep section residency synced to vanilla's loaded chunks around
 			// the player — builds newly-in-range sections, frees out-of-range ones, per tick.
 			if (rtInitDone) {
 				RtContext ctx = RtContext.currentOrNull();
@@ -58,6 +78,7 @@ public final class CausticaClient implements ClientModInitializer {
 					// until we're in a world with the block atlas loaded, or once already created.
 					RtComposite.INSTANCE.ensureResourcesReady(ctx);
 					RtTerrain.update(ctx);
+                    dev.comfyfluffy.caustica.rt.entity.RtDhLods.INSTANCE.releaseIfWorldClosed(ctx);
 					// Log DLSS-FG availability once when frame generation is enabled (capability query only;
 					// the present-loop integration that consumes it is built separately).
 					if (dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.enabled()) {
@@ -73,7 +94,7 @@ public final class CausticaClient implements ClientModInitializer {
 		// world-unique). Resource reloads do NOT fire this; that path is handled separately.
 		InvalidateRenderStateCallback.EVENT.register(() -> {
 			RtTerrain.requestFullClear();
-			RtComposite.INSTANCE.resetExposureHistory();
+			VanillaRenderController.INSTANCE.resetRuntimeState();
 			RtComposite.INSTANCE.resetFailureLatch(); // F3+A doubles as manual RT recovery after a latched failure
 		});
 
@@ -84,18 +105,23 @@ public final class CausticaClient implements ClientModInitializer {
 
 	private static void shutdownRt() {
 		WorldRenderScaler.INSTANCE.destroy();
-		RtUiOverlay.destroy(); // GUI redirect is not gated by rtInitDone; always release its TextureTarget
 		if (!rtInitDone) {
+			RtUiOverlay.destroy(); // No RT references exist on this path.
 			RtWorkerPool.INSTANCE.shutdown();
 			return;
 		}
 
 		RtContext ctx = RtContext.currentOrNull();
 		if (ctx != null) {
+			// Device idle cannot complete command buffers that the Minecraft encoder has not submitted.
+			// Flush them before destroying referenced pipelines/images; otherwise their state becomes INVALID.
+			com.mojang.blaze3d.systems.RenderSystem.getDevice().createCommandEncoder().submit();
 			// Let the terrain epoch cancel queued work and release every active-task token before
 			// shutdownNow(): discarded worker Runnables cannot deliver their terminal callbacks.
 			RtTerrain.shutdown(ctx);
 		}
+		// Terrain shutdown drains async work and waits for every device queue before FG/UI resources die.
+		RtUiOverlay.destroy();
 		RtWorkerPool.INSTANCE.shutdown();
 		if (ctx != null) {
 			RtEntities.INSTANCE.shutdown();

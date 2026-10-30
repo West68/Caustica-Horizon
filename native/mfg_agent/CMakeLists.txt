@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+project(caustica_mfg_agent LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+add_library(caustica_mfg_agent SHARED mfg_agent.cpp)
+target_include_directories(caustica_mfg_agent PRIVATE "${JDK_HOME}/include" "${JDK_HOME}/include/win32")

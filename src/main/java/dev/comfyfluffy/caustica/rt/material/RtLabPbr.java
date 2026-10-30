@@ -1,45 +1,19 @@
 package dev.comfyfluffy.caustica.rt.material;
 
 /**
- * CPU reference decoder for the LabPBR 1.3 specular texture. Runtime shading currently performs the
- * same decode in {@code world.rchit.slang}; keeping the source-format rules here gives the material
- * compiler and its tests one deterministic implementation to use when LabPBR is canonicalized before
- * upload.
+ * Canonical decoder for LabPBR 1.3. roughness() is PERCEPTUAL roughness (1-red),
+ * because the native GGX/VNDF path squares it to alpha. The standard's (1-red)^2
+ * is linear GGX alpha and must not be squared a second time on upload.
  */
 public final class RtLabPbr {
     private RtLabPbr() {
     }
 
-    private static final float[][] METAL_N = {
-            {2.9114f, 2.9497f, 2.5845f},
-            {0.18299f, 0.42108f, 1.3734f},
-            {1.3456f, 0.96521f, 0.61722f},
-            {3.1071f, 3.1812f, 2.3230f},
-            {0.27105f, 0.67693f, 1.3164f},
-            {1.9100f, 1.8300f, 1.4400f},
-            {2.3757f, 2.0847f, 1.8453f},
-            {0.15943f, 0.14512f, 0.13547f}
-    };
-    private static final float[][] METAL_K = {
-            {3.0893f, 2.9318f, 2.7670f},
-            {3.4242f, 2.3459f, 1.7704f},
-            {7.4746f, 6.3995f, 5.3031f},
-            {3.3314f, 3.3291f, 3.1350f},
-            {3.6092f, 2.6248f, 2.2921f},
-            {3.5100f, 3.4000f, 3.1800f},
-            {4.2655f, 3.7153f, 3.1365f},
-            {3.9291f, 3.1900f, 2.3808f}
-    };
-
     /** Decode normalized LabPBR channels and linear albedo into physical surface parameters. */
     public static Specular decodeSpec(float red, float green, float blue, float alpha,
                                       float albedoR, float albedoG, float albedoB) {
         float smoothness = clamp01(red);
-        // LabPBR red is perceptual smoothness; roughness = (1 - perceptualSmoothness)^2 is LabPBR's
-        // LINEAR roughness, which is GGX alpha. That is the convention the whole pipeline uses (see
-        // RtMaterials.Profile and world.rgen's payloadRoughness), so it is stored as-is and never squared
-        // again downstream.
-        float roughness = (1.0f - smoothness) * (1.0f - smoothness);
+        float roughness = 1.0f - smoothness;
         float g = clamp01(green) * 255.0f;
         float metalness;
         float f0r;
@@ -48,13 +22,11 @@ public final class RtLabPbr {
         if (g < 229.5f) {
             metalness = 0.0f;
             f0r = f0g = f0b = clamp01(green);
-        } else if (g < 237.5f) {
-            metalness = 1.0f;
-            int metal = Math.round(g) - 230;
-            f0r = metalF0(metal, 0);
-            f0g = metalF0(metal, 1);
-            f0b = metalF0(metal, 2);
         } else {
+            // Predefined (230..237) and albedo metals both reflect with the albedo colour. This is the
+            // ITRP-PTGI default (LABPBR_PREDEFINED_METAL off): the measured iron/gold N,K constants give a
+            // flat ~0.53 reflectance that discards the texture, so a dark anvil or iron tool turned an even
+            // bright silver-white under sky and sun.
             metalness = 1.0f;
             f0r = clamp01(albedoR);
             f0g = clamp01(albedoG);
@@ -68,12 +40,10 @@ public final class RtLabPbr {
         return new Specular(roughness, metalness, f0r, f0g, f0b, emission, sss);
     }
 
-    private static float metalF0(int metal, int channel) {
-        float n = METAL_N[metal][channel];
-        float k = METAL_K[metal][channel];
-        float nm1 = n - 1.0f;
-        float np1 = n + 1.0f;
-        return (nm1 * nm1 + k * k) / (np1 * np1 + k * k);
+    /** LabPBR blue 0..64 stores porosity; 65..255 is the independent SSS category. */
+    public static float decodePorosity(float blue) {
+        float code=clamp01(blue)*255f;
+        return code<=64.5f ? Math.min(code/64f,1f) : 0f;
     }
 
     private static float clamp01(float value) {

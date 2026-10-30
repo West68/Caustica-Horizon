@@ -23,7 +23,7 @@ public abstract class GuiRendererMixin {
 			method = "draw",
 			at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GameRenderer;mainRenderTarget()Lcom/mojang/blaze3d/pipeline/RenderTarget;"))
 	private RenderTarget caustica$redirectGuiToOverlay(RenderTarget original) {
-		if (original != null && RtUiOverlay.enabled()) {
+		if (original != null && RtUiOverlay.redirectGui()) {
 			return RtUiOverlay.beginAndRedirect(original);
 		}
 		return original;

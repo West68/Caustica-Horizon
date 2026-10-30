@@ -8,6 +8,8 @@ import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.comfyfluffy.caustica.client.VanillaRenderController;
 import dev.comfyfluffy.caustica.client.WorldRenderScaler;
 import dev.comfyfluffy.caustica.rt.RtComposite;
+import dev.comfyfluffy.caustica.rt.entity.RtFirstPerson;
+import net.minecraft.client.renderer.SubmitNodeCollector;
 import dev.comfyfluffy.caustica.rt.RtReflex;
 import dev.comfyfluffy.caustica.rt.RtUiOverlay;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
@@ -43,10 +45,13 @@ public abstract class GameRendererMixin {
 	// or GUI render into it).
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V", at = @At("HEAD"))
 	private void caustica$beginOverlayFrame(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+        dev.comfyfluffy.caustica.rt.CausticaLoopProbe.gameRenderBegin();
 		RtUiOverlay.beginFrame();
+		RtFirstPerson.beginFrame();
 		// Clear the stale HDR-present flag every frame: composite() only runs while a level renders, so on
 		// menu frames it would otherwise stay true from the last world frame and present a black HDR image.
 		RtComposite.INSTANCE.beginFrame();
+		if (!dev.comfyfluffy.caustica.CausticaBuild.RELEASE) dev.comfyfluffy.caustica.client.CinematicDirector.beginFrame();
 		// Reflex RENDERSUBMIT_START: render-graph recording begins here; RENDERSUBMIT_END is set at
 		// VulkanGpuSurface.present() HEAD (VulkanGpuSurfaceMixin), just before the real present.
 		if (RtReflex.enabled()) {
@@ -62,6 +67,8 @@ public abstract class GameRendererMixin {
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V", at = @At("TAIL"))
 	private void caustica$endRtFrameStats(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
 		RtComposite.INSTANCE.endFrame();
+		if (!dev.comfyfluffy.caustica.CausticaBuild.RELEASE) dev.comfyfluffy.caustica.client.CinematicDirector.endFrame();
+        dev.comfyfluffy.caustica.rt.CausticaLoopProbe.gameRenderEnd();
 	}
 
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V",
@@ -79,6 +86,14 @@ public abstract class GameRendererMixin {
 					target = "Lnet/minecraft/client/renderer/GameRenderer;renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;FLorg/joml/Matrix4fc;)V"))
 	private void caustica$redirectHandToOverlay(GameRenderer self, CameraRenderState cameraState, float deltaPartialTick,
 			Matrix4fc modelViewMatrix, Operation<Void> original) {
+        if (RtFirstPerson.enabled()) {
+            RtFirstPerson.begin();
+            try { original.call(self,cameraState,deltaPartialTick,modelViewMatrix); }
+            finally { RtFirstPerson.end(); }
+            caustica$completeWorld();
+            // Restore raster hands immediately if the composite could not display captured geometry.
+            if (RtFirstPerson.enabled()) return;
+        }
 		boolean redirect = RtUiOverlay.enabled();
 		if (redirect) {
 			RtUiOverlay.beginOutputRedirect(this.mainRenderTarget);
@@ -92,6 +107,11 @@ public abstract class GameRendererMixin {
 		}
 	}
 
+    @ModifyArg(method="renderItemInHand",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/ItemInHandRenderer;submitHandsWithItems(FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;Lnet/minecraft/client/player/LocalPlayer;I)V"),index=2)
+    private SubmitNodeCollector ce$captureHand(SubmitNodeCollector collector){return RtFirstPerson.collector(collector);}
+    @WrapOperation(method="renderItemInHand",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;renderAllFeatures(Lnet/minecraft/client/renderer/SubmitNodeStorage;)V"))
+    private void ce$skipDuplicateRasterHand(FeatureRenderDispatcher dispatcher,SubmitNodeStorage storage,Operation<Void> original){if(!RtFirstPerson.collecting())original.call(dispatcher,storage);}
+
 	// Redirect the screen-effect flush (fire, underwater, view-blocking-block overlays submitted by
 	// ScreenEffectRenderer.submit) into the same combined UI overlay as the hand. This is the renderAllFeatures
 	// call in the "screenEffects" section of renderLevel — distinct from the one inside renderItemInHand.
@@ -102,7 +122,9 @@ public abstract class GameRendererMixin {
 					target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;renderAllFeatures(Lnet/minecraft/client/renderer/SubmitNodeStorage;)V"))
 	private void caustica$redirectScreenEffectsToOverlay(FeatureRenderDispatcher self, SubmitNodeStorage storage,
 			Operation<Void> original) {
-		boolean redirect = RtUiOverlay.enabled();
+        if(!RtComposite.INSTANCE.isHdrPresentActive())RtUiOverlay.compositeIfUsed();
+        RtComposite.INSTANCE.captureStreamlineBeforeUi(this.mainRenderTarget);
+		boolean redirect = RtUiOverlay.enabled() && RtComposite.INSTANCE.isHdrPresentActive();
 		if (redirect) {
 			RtUiOverlay.beginOutputRedirect(this.mainRenderTarget);
 		}
@@ -145,6 +167,13 @@ public abstract class GameRendererMixin {
 		return projection;
 	}
 
+    @ModifyArg(method = "renderLevel(Lnet/minecraft/client/DeltaTracker;)V",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/ProjectionMatrixBuffer;getBuffer(Lnet/minecraft/client/renderer/Projection;)Lcom/mojang/blaze3d/buffers/GpuBufferSlice;"), index = 0)
+    private net.minecraft.client.renderer.Projection caustica$captureHandProjection(net.minecraft.client.renderer.Projection projection) {
+        RtFirstPerson.captureProjection(projection);
+        return projection;
+    }
+
 	// Primary end-of-window: right after the 3D-HUD projection is set and *before*
 	// vanilla's pre-hand depth clear. The world (incl. entity outline targets and
 	// translucency compositing) has fully rendered at low res by this point; the
@@ -157,18 +186,34 @@ public abstract class GameRendererMixin {
 					ordinal = 1,
 					shift = At.Shift.AFTER))
 	private void caustica$endWorldScaleBeforeHand(DeltaTracker deltaTracker, CallbackInfo ci) {
+        if(RtFirstPerson.enabled())return;
+        caustica$completeWorld();
+    }
+    private void caustica$completeWorld() {
 		WorldRenderScaler.INSTANCE.end(this.mainRenderTarget);
 		// Fold RT world overlays into the shared transparent UI image before hand/screen effects and the GUI
 		// add their own layers. RtUiOverlay then performs the single final blend to SDR/HDR.
 		try {
-			RtWorldOverlay.INSTANCE.compositeIntoUiOverlay(
-					this.mainRenderTarget, RtComposite.INSTANCE.currentGraphicsUse());
+			dev.comfyfluffy.caustica.client.RtRasterFallback.draw(this.mainRenderTarget); // includes the Litematica bridge
+			RtWorldOverlay.INSTANCE.compositeIntoUiOverlay(this.mainRenderTarget);
 		} finally {
-			// The block-outline ray query consumes this frame's TLAS. Signal the shared RT frame token only
-			// after its transient command buffer has been placed later in the same graphics submission.
-			RtComposite.INSTANCE.finishGraphicsUse();
+			// The block-outline ray query consumes this frame's TLAS. Signal terrain retirement only after
+			// its transient command buffer has been placed later in the same graphics submission.
+			RtComposite.INSTANCE.finishTerrainGraphicsUse();
 		}
 	}
+
+    // SDR HUD draws directly on its real destination. Composite world overlays first so they
+    // remain underneath the HUD and INVERT blend sees scene colour, not transparent black.
+    @Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V",
+            at = @At(value = "INVOKE",
+                    target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"))
+    private void caustica$compositeBeforeNativeGui(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+        if (!dev.comfyfluffy.caustica.rt.RtUiOverlay.redirectGui()) {
+            dev.comfyfluffy.caustica.rt.RtUiOverlay.compositeIfUsed();
+            RtComposite.INSTANCE.captureStreamlineBeforeUi(this.mainRenderTarget);
+        }
+    }
 
 	// Composite the redirected UI overlay back over the world once the GUI has fully rendered into it.
 	// Done here (not at GuiRenderer.draw TAIL) because that TAIL inject did not fire on in-game HUD frames;

@@ -15,6 +15,9 @@
 	"caustica.options.rt.maxBounces": "路徑反彈",
 	"caustica.options.rt.maxBounces.tooltip": "主要命中之後的次級路徑追蹤反彈最大次數。數值越高能捕捉更多間接光，但成本也越高。",
 
+	"caustica.options.rt.sunSize": "太陽大小",
+	"caustica.options.rt.sunSize.tooltip": "太陽和月亮圓盤的角半徑。圓盤越大，投射的半影越柔和。",
+
 	"caustica.options.rt.entities": "光追實體",
 	"caustica.options.rt.entities.tooltip": "將實體和方塊實體加入光追場景。",
 
@@ -53,5 +56,7 @@
 	"caustica.options.rt.debugView.4": "粗糙度",
 	"caustica.options.rt.debugView.5": "運動",
 	"caustica.options.rt.debugView.6": "鏡面反射",
-	"caustica.options.rt.debugView.7": "鏡面運動"
+	"caustica.options.rt.debugView.7": "鏡面運動",
+	"caustica.options.rt.debugView.8": "發光遮罩",
+	"caustica.options.rt.debugView.9": "發光來源"
 }

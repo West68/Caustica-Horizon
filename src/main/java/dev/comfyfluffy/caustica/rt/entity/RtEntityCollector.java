@@ -75,6 +75,11 @@ import java.util.function.Predicate;
  * EntityRenderDispatcher.submit} fans out into {@code submitModel} here. Reused across entities.
  */
 public final class RtEntityCollector implements SubmitNodeCollector {
+    /** Identifies our vertex sinks without confusing GUI previews with world RT capture. */
+    public static boolean isGeometryCapture(VertexConsumer consumer) {
+        return consumer instanceof RtEntityCapture || consumer instanceof RtCustomQuadVertexConsumer;
+    }
+
     private static final Direction[] DIRECTIONS = Direction.values();
     private static final Predicate<Direction> NEVER_CULL = direction -> false;
     // Vanilla leash constants (LeashFeatureRenderer.LEASH_RENDER_STEPS / LEASH_WIDTH).
@@ -84,6 +89,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     private static final float[] ZERO_UV = new float[4];
 
     private RtEntityCapture capture;
+    private boolean itemFoil;
     private boolean profileDynamicEntity;
     private final RtEntityCapture parityCapture = new RtEntityCapture();
     private final RtCuboidEmitter cuboidEmitter = new RtCuboidEmitter();
@@ -99,6 +105,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     // Set by order(int) for the very next submitModel call (banner/shield pattern-layer stacking), then
     // consumed. Baked-quad paths (addQuad) don't use ordering and always reset the capture's order to 0.
     private int pendingOrder;
+    private final BakedQuadLayers bakedLayers = new BakedQuadLayers();
     private final RtTextVertexConsumer textVertexConsumer = new RtTextVertexConsumer();
     private final TextGlyphVisitor textGlyphVisitor = new TextGlyphVisitor();
     private final RtCustomQuadVertexConsumer customQuadVertexConsumer = new RtCustomQuadVertexConsumer();
@@ -111,6 +118,19 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     // glowing) per submitModel call — see EntityRenderer.extractCommon's outlineColor. Every submitModel
     // call for one entity carries the same value, so the last non-zero one seen this entity is enough.
     private int outlineColor;
+    // Opt-in first-person probe counters (see RtFirstPerson.probe()); written only with -Dcaustica.enhanced.punchyProbe=true.
+    public static int probeModel, probeItem, probeCustomGeometry, probeBlockModel, probeShapeOutline, probeOrdered;
+    /** Cubes and distinct model kinds seen through the hand collector this second. */
+    public static long probeModelCubes;
+    public static final java.util.LinkedHashSet<String> probeModelKinds = new java.util.LinkedHashSet<>();
+    /** Only the first-person hand collector counts; the entity collector shares these statics. */
+    private boolean probeHand;
+    public void probeHand(boolean on) { probeHand = on; }
+    /** Clears the aggregate probe counters; called once per emitted log line. */
+    public static void resetProbeCounters() {
+        probeModel = 0; probeItem = 0; probeCustomGeometry = 0; probeBlockModel = 0; probeShapeOutline = 0; probeOrdered = 0;
+        probeModelCubes = 0; probeModelKinds.clear();
+    }
 
     /**
      * Point the collector at the capture buffer for the next {@code dispatcher.submit}, resetting the
@@ -118,8 +138,12 @@ public final class RtEntityCollector implements SubmitNodeCollector {
      * call must NOT reset it — {@link RtEntities} reads {@link #outlineColor()} after that detach.
      */
     public void begin(RtEntityCapture capture, boolean profileDynamicEntity) {
-        this.capture = capture;
-        this.profileDynamicEntity = capture != null && profileDynamicEntity;
+        // Submissions that arrive before the RT material snapshot exists cannot be consumed later; their
+        // sprites/atlases would also fail material resolution mid-frame. Modded first-person layers (Punchy
+        // submits translucent arm overlays and the held item this early) hit exactly that window, so drop the
+        // capture instead of failing the frame - the geometry is simply absent until the tables are ready.
+        this.capture = capture != null && RtMaterialRegistry.INSTANCE.isReady() ? capture : null;
+        this.profileDynamicEntity = this.capture != null && profileDynamicEntity;
         if (capture != null) {
             this.outlineColor = 0;
             this.pendingOrder = 0;
@@ -141,6 +165,12 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public <S> void submitModel(Model<? super S> model, S state, PoseStack poseStack, RenderType renderType,
                                 int lightCoords, int overlayCoords, int tintedColor, TextureAtlasSprite sprite,
                                 int outlineColor, ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
+        if (probeHand && RtFirstPerson.probe()) {
+            probeModel++;
+            int cubes = countVisibleCuboids(model.root());
+            probeModelCubes += cubes;
+            if (probeModelKinds.size() < 6) probeModelKinds.add(model.getClass().getSimpleName() + ":" + cubes);
+        }
         if (capture == null) {
             return;
         }
@@ -151,6 +181,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // exactly coplanar cloth pass. Move every banner-pattern pass out one rank: base colour becomes 1,
         // and the explicitly ordered emblem layers become 2+. Otherwise the BVH can select white cloth.
         capture.currentOrder = pendingOrder + (isBannerPattern(renderType) ? 1 : 0);
+        if(renderType!=null){Object setup=((RenderTypeAccessor)renderType).caustica$state();String pass=((RenderSetupAccessor)setup).caustica$pipeline().getLocation().toString();if(pass.contains("eyes")||pass.contains("emissive")||pass.contains("glint")||pass.contains("energy_swirl"))capture.currentOrder++;}
         pendingOrder = 0;
         if (profileDynamicEntity) {
             RtFrameStats.FRAME.count("entityModelSubmissions", 1);
@@ -188,12 +219,18 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         } finally {
             RtFrameStats.FRAME.endStage("entity.capture.submit.material", materialStart);
         }
+        // The Wither has no emissive texture: its renderer only pins the light level to 15 (never darkened),
+        // which is not a light source. Only its energy-swirl armour layer (below half health) glows, and that
+        // arrives as its own additive submission.
+        capture.textureTransform=textureMatrix(renderType);
         // Pose the model from its render state (idempotent re-pose; mirrors what the renderer does for
         // its feature layers), then render the posed parts into the capture. renderToBuffer applies the
         // PoseStack to every vertex/normal, so the capture receives world-/camera-relative geometry.
+        RtCuboidEmitter.ModelTemplate directTemplate = cuboidEmitter.prepare(model);
+        boolean replayModel = directTemplate == null && RtModelCompat.enabled();
         long setupStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {
-            model.setupAnim(state);
+            if (!replayModel) model.setupAnim(state);
         } finally {
             RtFrameStats.FRAME.endStage("entity.capture.submit.setupAnim", setupStart);
         }
@@ -210,12 +247,13 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         int idxStart = capture.idx.size();
         int uvStart = capture.uvList.size();
         int primStart = capture.prim.size();
-        RtCuboidEmitter.ModelTemplate directTemplate = cuboidEmitter.prepare(model);
         long directCubeCounts = 0L;
         long drawStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {
             if (directTemplate != null) {
                 directCubeCounts = cuboidEmitter.emit(directTemplate, poseStack, capture, color);
+            } else if (replayModel) {
+                RtModelCompat.render(model,state,poseStack,renderType,lightCoords,overlayCoords,color,sprite,capture);
             } else {
                 model.renderToBuffer(poseStack, capture, lightCoords, overlayCoords, color);
             }
@@ -273,21 +311,27 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // Single un-ordered capture sink reused synchronously (no queuing): the caller always issues the
         // very next submission immediately after requesting an order, so stashing it for that one
         // submitModel call (see there) is enough to recover banner/shield pattern-layer stacking.
+        if (probeHand && RtFirstPerson.probe()) probeOrdered++;
         pendingOrder = order;
         return this;
     }
 
     /** Capture a list of baked quads (items / block models), each textured from its sprite's atlas. */
     private void addQuads(Matrix4f pose, List<BakedQuad> quads, int[] tintLayers) {
-        int idxStart = capture.idx.size();
-        long started = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
+        bakedLayers.begin();
         try {
-            for (BakedQuad q : quads) {
-                addQuad(pose, q, tintLayers);
+            int idxStart = capture.idx.size();
+            long started = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
+            try {
+                for (BakedQuad q : quads) {
+                    addQuad(pose, q, tintLayers);
+                }
+            } finally {
+                RtFrameStats.FRAME.endStage("entity.capture.submit.bakedQuads", started);
+                countBakedOutput(idxStart);
             }
         } finally {
-            RtFrameStats.FRAME.endStage("entity.capture.submit.bakedQuads", started);
-            countBakedOutput(idxStart);
+            bakedLayers.end(capture);
         }
     }
 
@@ -302,6 +346,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
 
     /** Capture one baked quad, resolving its atlas (block vs item) to a bindless slot stamped per-prim. */
     private void addQuad(Matrix4f pose, BakedQuad q, int[] tintLayers) {
+        capture.clearUvRemap();
         TextureAtlasSprite sprite = q.materialInfo().sprite();
         capture.currentTexSlot = sprite != null
                 ? RtEntityTextures.INSTANCE.slotForAtlas(sprite.atlasLocation())
@@ -310,12 +355,26 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // dropped and held translucent block items (glass, ice, etc.) use the thin-dielectric variant
         // instead of the opaque DEFAULT variant. No BlockState reaches submitItem, so the layer is the
         // authoritative semantic available here; glass-model roughness/IOR are profile-independent.
-        boolean transmissive = q.materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT;
+        String spriteName = sprite==null?null:sprite.contents().name().toString();
+        // Clear glass items bake in the cutout layer; like terrain, they are still a glass slab.
+        boolean transmissive = RtMaterials.refractiveSprite(spriteName,q.materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT
+                || (q.materialInfo().layer() != ChunkSectionLayer.SOLID && RtMaterials.clearGlassSprite(spriteName)));
         capture.currentAlphaBucket = alphaBucket(q.materialInfo().layer(), false);
         setSpriteMaterial(sprite, transmissive ? RtMaterials.Profile.GLASS : RtMaterials.Profile.DEFAULT,
                 transmissive, false);
-        capture.currentOrder = 0; // baked-quad paths never stack decal layers
+        capture.currentOrder = 0; // coplanar baked layers are resolved together after emission
         capture.addBakedQuad(pose, q, tintColor(q.materialInfo().tintIndex(), tintLayers));
+        bakedLayers.record(capture, q.materialInfo().layer() != ChunkSectionLayer.SOLID
+                || q.materialInfo().tintIndex() >= 0);
+        if(itemFoil) {
+            int baseSlot=capture.currentTexSlot,baseMaterial=capture.currentMaterialId;
+            var foil=RenderTypes.glint();
+            capture.clearUvRemap();capture.currentTexSlot=RtEntityTextures.INSTANCE.slotFor(foil);
+            capture.currentMaterialId=baseMaterial;
+            capture.currentAlphaBucket=RtAccel.ENTITY_BUCKET_ANY_HIT;capture.currentOrder=1;
+            capture.textureTransform=textureMatrix(foil);
+            capture.addFoilQuad(pose,q,sprite,baseSlot,tintColor(q.materialInfo().tintIndex(),tintLayers));capture.clearUvRemap();
+        }
     }
 
     /** Resolve block-atlas geometry through the same immutable material snapshot as terrain. */
@@ -326,6 +385,8 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     private void setSpriteMaterial(TextureAtlasSprite sprite, RtMaterials.Profile profile,
                                    boolean transmissive, boolean stochasticAlpha) {
         if (sprite != null && TextureAtlas.LOCATION_BLOCKS.equals(sprite.atlasLocation())) {
+            transmissive=RtMaterials.refractiveSprite(sprite.contents().name().toString(),transmissive);
+            if(!transmissive && profile==RtMaterials.Profile.GLASS)profile=RtMaterials.Profile.DEFAULT;
             int materialId = RtMaterialRegistry.INSTANCE.requireSnapshot()
                     .resolve(sprite, profile, transmissive, false);
             capture.currentMaterialId = stochasticAlpha
@@ -335,6 +396,20 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         } else {
             capture.currentMaterialId = RtMaterialRegistry.INSTANCE.entityFallbackId(stochasticAlpha);
         }
+    }
+
+    private static Matrix4f textureMatrix(RenderType type) {
+        if(type==null)return null;
+        Object state=((RenderTypeAccessor)type).caustica$state();
+        var transform=((RenderSetupAccessor)state).caustica$textureTransform();
+        if(transform==net.minecraft.client.renderer.rendertype.TextureTransform.GLINT_TEXTURING
+            ||transform==net.minecraft.client.renderer.rendertype.TextureTransform.ENTITY_GLINT_TEXTURING
+            ||transform==net.minecraft.client.renderer.rendertype.TextureTransform.ARMOR_ENTITY_GLINT_TEXTURING) {
+            float scale=transform==net.minecraft.client.renderer.rendertype.TextureTransform.GLINT_TEXTURING?8f:
+                transform==net.minecraft.client.renderer.rendertype.TextureTransform.ENTITY_GLINT_TEXTURING?.5f:.16f;
+            return RtGlintTransform.matrix(net.minecraft.util.Util.getMillis(),Minecraft.getInstance().options.glintSpeed().get(),scale);
+        }
+        return transform==net.minecraft.client.renderer.rendertype.TextureTransform.DEFAULT_TEXTURING?null:transform.createMatrix();
     }
 
     /** Whether a render type is alpha-blended (translucent) — its pipeline's color target has a blend
@@ -362,10 +437,16 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         if (cts != null && cts.blendFunction().isPresent()) {
             return RtAccel.ENTITY_BUCKET_ANY_HIT;
         }
-        // Vanilla's cutout pipelines carry the exact ALPHA_CUTOUT shader define. This is more robust
-        // than matching pipeline names and also works for mod-provided RenderPipelines.
+        // Vanilla's cutout pipelines carry the exact ALPHA_CUTOUT shader define.
         if (pipeline.getShaderDefines().values().containsKey("ALPHA_CUTOUT")
                 || pipeline.getShaderDefines().flags().contains("ALPHA_CUTOUT")) {
+            return RtAccel.ENTITY_BUCKET_ANY_HIT;
+        }
+        // Mod pipelines (Better Player Model / YSM, ...) discard transparent texels in their own shaders
+        // without that define. In the opaque bucket no alpha test runs, so a model's fully transparent
+        // planes became solid walls for bounce and shadow rays: invisible on screen, yet cutting a hard
+        // line through the light around the player. Only vanilla's own opaque pipelines skip the test.
+        if (!"minecraft".equals(pipeline.getLocation().getNamespace())) {
             return RtAccel.ENTITY_BUCKET_ANY_HIT;
         }
         return RtAccel.ENTITY_BUCKET_OPAQUE;
@@ -555,6 +636,26 @@ public final class RtEntityCollector implements SubmitNodeCollector {
 
     @Override
     public void submitFlame(PoseStack poseStack, EntityRenderState renderState, Quaternionf rotation) {
+        if(capture==null)return;
+        var atlas=Minecraft.getInstance().getAtlasManager().getAtlasOrThrow(net.minecraft.data.AtlasIds.BLOCKS);
+        var fire0=atlas.getSprite(net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft","block/fire_0"));
+        var fire1=atlas.getSprite(net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft","block/fire_1"));
+        capture.clearUvRemap();capture.currentOrder=0;capture.currentAlphaBucket=RtAccel.ENTITY_BUCKET_ANY_HIT;
+        float scale=Math.max(renderState.boundingBoxWidth*1.4f,.001f);
+        float remaining=renderState.boundingBoxHeight/scale,half=.5f,yShift=0f,z=0f;
+        var matrix=new Matrix4f(poseStack.last().pose()).scale(scale).rotate(rotation).translate(0f,0f,.3f-(int)remaining*.02f);
+        var point=new Vector3f();float[] xs=new float[4],ys=new float[4],zs=new float[4];
+        for(int layer=0;remaining>0f && layer<64;layer++) {
+            var sprite=(layer&1)==0?fire0:fire1;
+            capture.currentTexSlot=RtEntityTextures.INSTANCE.slotForAtlas(sprite.atlasLocation());
+            capture.currentMaterialId=RtMaterialRegistry.INSTANCE.requireSnapshot().resolve(sprite,RtMaterials.Profile.DEFAULT,false,true);
+            float u0=sprite.getU0(),u1=sprite.getU1();if((layer/2&1)==0){float swap=u0;u0=u1;u1=swap;}
+            float[] us={u1,u0,u0,u1},vs={sprite.getV1(),sprite.getV1(),sprite.getV0(),sprite.getV0()};
+            float[] xx={-half,half,half,-half},yy={-yShift,-yShift,1.4f-yShift,1.4f-yShift};
+            for(int i=0;i<4;i++){matrix.transformPosition(xx[i],yy[i],z,point);xs[i]=point.x;ys[i]=point.y;zs[i]=point.z;}
+            capture.addDirectQuad(xs,ys,zs,us,vs,0,0,0,-1,1f);
+            remaining-=.45f;yShift-=.45f;half*=.9f;z-=.03f;
+        }
     }
 
     // Leashes/leads: replicate LeashFeatureRenderer's geometry — a 24-segment curve with two crossed
@@ -659,27 +760,32 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         if (blockQuadEmitter == null) {
             blockQuadEmitter = Renderer.get().quadEmitter(this::addEmittedBlockQuad);
         }
-        Vec3 offset = applyBlockOffset ? state.getOffset(pos) : Vec3.ZERO;
-        emittedBlockPose = pose;
-        emittedBlockView = view;
-        emittedBlockState = state;
-        emittedBlockPos = pos;
-        emittedBlockOffsetX = (float) offset.x;
-        emittedBlockOffsetY = (float) offset.y;
-        emittedBlockOffsetZ = (float) offset.z;
-        int idxStart = capture.idx.size();
-        long started = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
+        bakedLayers.begin();
         try {
-            capture.clearUvRemap();
-            emittedBlockRandom.setSeed(seed);
-            model.emitQuads(blockQuadEmitter, view, pos, state, emittedBlockRandom, NEVER_CULL);
+            Vec3 offset = applyBlockOffset ? state.getOffset(pos) : Vec3.ZERO;
+            emittedBlockPose = pose;
+            emittedBlockView = view;
+            emittedBlockState = state;
+            emittedBlockPos = pos;
+            emittedBlockOffsetX = (float) offset.x;
+            emittedBlockOffsetY = (float) offset.y;
+            emittedBlockOffsetZ = (float) offset.z;
+            int idxStart = capture.idx.size();
+            long started = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
+            try {
+                capture.clearUvRemap();
+                emittedBlockRandom.setSeed(seed);
+                model.emitQuads(blockQuadEmitter, view, pos, state, emittedBlockRandom, NEVER_CULL);
+            } finally {
+                emittedBlockPose = null;
+                emittedBlockView = null;
+                emittedBlockState = null;
+                emittedBlockPos = null;
+                RtFrameStats.FRAME.endStage("entity.capture.submit.bakedQuads", started);
+                countBakedOutput(idxStart);
+            }
         } finally {
-            emittedBlockPose = null;
-            emittedBlockView = null;
-            emittedBlockState = null;
-            emittedBlockPos = null;
-            RtFrameStats.FRAME.endStage("entity.capture.submit.bakedQuads", started);
-            countBakedOutput(idxStart);
+            bakedLayers.end(capture);
         }
     }
 
@@ -705,15 +811,21 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitBlockModel(PoseStack poseStack, RenderType renderType, List<BlockStateModelPart> parts,
                                  int[] tintLayers, int lightCoords, int overlayCoords, int outlineColor) {
+        if (probeHand && RtFirstPerson.probe()) probeBlockModel++;
         if (capture == null) {
             return;
         }
-        Matrix4f pose = poseStack.last().pose();
-        for (BlockStateModelPart part : parts) {
-            addQuads(pose, part.getQuads(null), tintLayers);
-            for (Direction d : DIRECTIONS) {
-                addQuads(pose, part.getQuads(d), tintLayers);
+        bakedLayers.begin();
+        try {
+            Matrix4f pose = poseStack.last().pose();
+            for (BlockStateModelPart part : parts) {
+                addQuads(pose, part.getQuads(null), tintLayers);
+                for (Direction d : DIRECTIONS) {
+                    addQuads(pose, part.getQuads(d), tintLayers);
+                }
             }
+        } finally {
+            bakedLayers.end(capture);
         }
     }
 
@@ -729,14 +841,20 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public void submitBlockModel(PoseStack poseStack, Function<ChunkSectionLayer, RenderType> renderTypeByLayer,
                                  boolean hasTranslucency, List<BlockStateModelPart> parts, Mesh mesh,
                                  int[] tintLayers, int lightCoords, int overlayCoords, int outlineColor) {
+        if (probeHand && RtFirstPerson.probe()) probeBlockModel++;
         if (capture == null) {
             return;
         }
-        if (!parts.isEmpty()) {
-            submitBlockModel(poseStack, renderTypeByLayer.apply(ChunkSectionLayer.SOLID), parts, tintLayers,
-                    lightCoords, overlayCoords, outlineColor);
+        bakedLayers.begin();
+        try {
+            if (!parts.isEmpty()) {
+                submitBlockModel(poseStack, renderTypeByLayer.apply(ChunkSectionLayer.SOLID), parts, tintLayers,
+                        lightCoords, overlayCoords, outlineColor);
+            }
+            addMeshQuads(poseStack, mesh, tintLayers, false);
+        } finally {
+            bakedLayers.end(capture);
         }
-        addMeshQuads(poseStack, mesh, tintLayers, false);
     }
 
     /** Fabric item models can carry a mesh besides (or instead of) vanilla baked quads; the injected
@@ -745,11 +863,20 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords,
                            int overlayCoords, int outlineColor, int[] tintLayers, List<BakedQuad> quads,
                            MeshView mesh, ItemStackRenderState.FoilType foilType) {
+        if (probeHand && RtFirstPerson.probe()) probeItem++;
         if (capture == null) {
             return;
         }
-        addQuads(poseStack.last().pose(), quads, tintLayers);
-        addMeshQuads(poseStack, mesh, tintLayers, true);
+        bakedLayers.begin();
+        itemFoil=foilType!=ItemStackRenderState.FoilType.NONE;
+        int heldFrom=capture.verts.size();
+        try {
+            addQuads(poseStack.last().pose(), quads, tintLayers);
+            addMeshQuads(poseStack, mesh, tintLayers, true);
+        } finally {
+            itemFoil=false;capture.clearUvRemap();bakedLayers.end(capture);
+        }
+        recordHeldLight(displayContext, heldFrom, poseStack.last().pose());
     }
 
     /** Capture a Fabric Renderer API mesh; each quad already carries final atlas UVs. */
@@ -757,22 +884,28 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         if (mesh == null || mesh.size() == 0) {
             return;
         }
-        Matrix4f pose = poseStack.last().pose();
-        int idxStart = capture.idx.size();
-        long started = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
+        bakedLayers.begin();
         try {
-            capture.clearUvRemap();
-            mesh.forEach(quad -> addMeshQuad(pose, quad, tintLayers, itemMesh,
-                    null, null, null, 0f, 0f, 0f));
+            Matrix4f pose = poseStack.last().pose();
+            int idxStart = capture.idx.size();
+            long started = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
+            try {
+                capture.clearUvRemap();
+                mesh.forEach(quad -> addMeshQuad(pose, quad, tintLayers, itemMesh,
+                        null, null, null, 0f, 0f, 0f));
+            } finally {
+                RtFrameStats.FRAME.endStage("entity.capture.submit.bakedQuads", started);
+                countBakedOutput(idxStart);
+            }
         } finally {
-            RtFrameStats.FRAME.endStage("entity.capture.submit.bakedQuads", started);
-            countBakedOutput(idxStart);
+            bakedLayers.end(capture);
         }
     }
 
     private void addMeshQuad(Matrix4f pose, QuadView quad, int[] tintLayers, boolean itemMesh,
                              BlockAndTintGetter view, BlockPos pos, BlockState state,
                              float offsetX, float offsetY, float offsetZ) {
+        capture.clearUvRemap();
         TextureAtlasSprite sprite = Minecraft.getInstance().getAtlasManager()
                 .getAtlasOrThrow(quad.atlas().getId()).spriteFinder().find(quad);
         capture.currentTexSlot = RtEntityTextures.INSTANCE.slotForAtlas(quad.atlas().getTextureLocation());
@@ -788,7 +921,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             setSpriteMaterial(sprite, transmissive ? RtMaterials.Profile.GLASS : RtMaterials.Profile.DEFAULT,
                     transmissive, stochasticAlpha);
         }
-        capture.currentOrder = 0; // baked-quad paths never stack decal layers
+        capture.currentOrder = 0; // coplanar baked layers are resolved together after emission
         for (int i = 0; i < 4; i++) {
             pose.transformPosition(quad.x(i) + offsetX, quad.y(i) + offsetY, quad.z(i) + offsetZ, meshPos);
             meshX[i] = meshPos.x;
@@ -808,6 +941,21 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         int color = ARGB.multiply(averageQuadColor(quad), tint);
         float emission = quad.emissive() ? 1f : state != null ? state.getLightEmission() / 15f : 0f;
         capture.addDirectQuad(meshX, meshY, meshZ, meshU, meshV, 0f, 0f, 0f, color, emission);
+        bakedLayers.record(capture, quad.chunkLayer() != ChunkSectionLayer.SOLID || quad.tintIndex() >= 0);
+        if(itemMesh && itemFoil) {
+            int baseMaterial=capture.currentMaterialId,baseSlot=capture.currentTexSlot,primStart=capture.prim.size(),vertexStart=capture.verts.size()/3;
+            var foil=RenderTypes.glint();capture.currentTexSlot=RtEntityTextures.INSTANCE.slotFor(foil);
+            capture.currentMaterialId=baseMaterial;
+            capture.currentAlphaBucket=RtAccel.ENTITY_BUCKET_ANY_HIT;capture.currentOrder=1;
+            capture.textureTransform=textureMatrix(foil);
+            for(int i=0;i<4;i++) {
+                meshU[i]=(meshU[i]-sprite.getU0())/(sprite.getU1()-sprite.getU0());
+                meshV[i]=(meshV[i]-sprite.getV0())/(sprite.getV1()-sprite.getV0());
+            }
+            capture.addDirectQuad(meshX,meshY,meshZ,meshU,meshV,0,0,0,color);
+            capture.markFoilCoverage(primStart,vertexStart,baseSlot,quad.u(0),quad.v(0),quad.u(1),quad.v(1),
+                    quad.u(2),quad.v(2),quad.u(3),quad.v(3));capture.clearUvRemap();
+        }
     }
 
     /** Collapse Fabric's per-vertex colour into the flat per-primitive tint stored by the RT layout. */
@@ -830,6 +978,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitShapeOutline(PoseStack poseStack, VoxelShape shape, RenderType renderType, int color,
                                    float width, boolean afterTerrain) {
+        if (probeHand && RtFirstPerson.probe()) probeShapeOutline++;
     }
 
     // Held weapons/tools (via the in-hand layer) + dropped items (ItemEntity) render here as baked
@@ -840,19 +989,31 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         if (capture == null) {
             return;
         }
-        addQuads(poseStack.last().pose(), quads, tintLayers);
+        itemFoil=foilType!=ItemStackRenderState.FoilType.NONE;
+        int heldFrom=capture.verts.size();
+        try {addQuads(poseStack.last().pose(), quads, tintLayers);}
+        finally {itemFoil=false;capture.clearUvRemap();}
+        recordHeldLight(displayContext, heldFrom, poseStack.last().pose());
+    }
+
+    private void recordHeldLight(ItemDisplayContext context, int from, Matrix4fc itemPose) {
+        if(context==ItemDisplayContext.THIRD_PERSON_RIGHT_HAND || context==ItemDisplayContext.THIRD_PERSON_LEFT_HAND)
+            dev.comfyfluffy.caustica.rt.RtHeldLights.recordHeldItem(net.minecraft.client.Minecraft.getInstance(),
+                    context==ItemDisplayContext.THIRD_PERSON_RIGHT_HAND, capture.verts.elements(), from, capture.verts.size(),itemPose);
     }
 
     @Override
     public void submitCustomGeometry(PoseStack poseStack, RenderType renderType,
                                      SubmitNodeCollector.CustomGeometryRenderer customGeometryRenderer) {
+        if (probeHand && RtFirstPerson.probe()) probeCustomGeometry++;
         if (capture == null) {
             return;
         }
         PrimitiveTopology topology = primitiveTopology(renderType);
         boolean lines = topology == PrimitiveTopology.LINES || topology == PrimitiveTopology.DEBUG_LINES
                 || renderType == RenderTypes.lines() || renderType == RenderTypes.linesTranslucent();
-        if (!lines && topology != PrimitiveTopology.QUADS) {
+        if (!lines && topology != PrimitiveTopology.QUADS && topology != PrimitiveTopology.TRIANGLES
+                && topology != PrimitiveTopology.TRIANGLE_STRIP && topology != PrimitiveTopology.TRIANGLE_FAN) {
             return;
         }
 
@@ -862,19 +1023,20 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         boolean stochasticAlpha = isTranslucent(renderType);
         // Lines are untextured: bind the white slot so albedo is exactly the vertex colour (slot 0 is
         // the block atlas, whose (0,0) texel would tint the ribbon arbitrarily).
-        capture.currentTexSlot = lines ? RtEntityTextures.INSTANCE.whiteSlot()
+        capture.currentTexSlot = lines || RtEntityTextures.INSTANCE.resolveView(renderType)==0L ? RtEntityTextures.INSTANCE.whiteSlot()
                 : RtEntityTextures.INSTANCE.slotFor(renderType);
         capture.currentMaterialId = lines
                 ? RtMaterialRegistry.INSTANCE.entityFallbackId(false)
                 : RtEntityTextures.INSTANCE.materialIdFor(renderType, stochasticAlpha);
         capture.currentAlphaBucket = lines ? RtAccel.ENTITY_BUCKET_OPAQUE : alphaBucket(renderType);
+        capture.textureTransform=textureMatrix(renderType);
 
         if (lines) {
             lineVertexConsumer.begin();
             customGeometryRenderer.render(poseStack.last(), lineVertexConsumer);
             lineVertexConsumer.finish();
         } else {
-            customQuadVertexConsumer.begin();
+            customQuadVertexConsumer.begin(topology);
             customGeometryRenderer.render(poseStack.last(), customQuadVertexConsumer);
             customQuadVertexConsumer.finish();
             capture.requireCompleteQuads("custom geometry " + renderType);
@@ -891,19 +1053,42 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         private int color;
         private boolean pending;
 
-        void begin() {
-            pending = false;
+        private PrimitiveTopology topology;
+        private final float[][] triangleData=new float[3][8];
+        private final int[] triangleColors=new int[3];
+        private int triangleVertices, triangleParity;
+        void begin(PrimitiveTopology topology) {
+            pending=false;this.topology=topology;triangleVertices=triangleParity=0;
+        }
+        private void emitCorner(int i) {
+            float[] d=triangleData[i];
+            capture.addTriangleVertex(d[0],d[1],d[2],triangleColors[i],d[3],d[4],d[5],d[6],d[7]);
+        }
+        private void commitConnectedTriangle() {
+            float[] d=triangleData[triangleVertices];
+            d[0]=x;d[1]=y;d[2]=z;d[3]=u;d[4]=v;d[5]=nx;d[6]=ny;d[7]=nz;
+            triangleColors[triangleVertices++]=color;
+            if(triangleVertices<3)return;
+            boolean reverse=topology==PrimitiveTopology.TRIANGLE_STRIP && (triangleParity++&1)!=0;
+            emitCorner(reverse?1:0);emitCorner(reverse?0:1);emitCorner(2);
+            if(topology==PrimitiveTopology.TRIANGLE_STRIP) {
+                System.arraycopy(triangleData[1],0,triangleData[0],0,8);triangleColors[0]=triangleColors[1];
+            }
+            System.arraycopy(triangleData[2],0,triangleData[1],0,8);triangleColors[1]=triangleColors[2];
+            triangleVertices=2;
         }
 
         void finish() {
-            commit();
+            commit();capture.requireCompleteQuads("custom triangle/quad submission");
         }
 
         private void commit() {
             if (!pending) {
                 return;
             }
-            capture.addVertex(x, y, z, color, u, v, 0, 0, nx, ny, nz);
+            if(topology==PrimitiveTopology.TRIANGLE_STRIP || topology==PrimitiveTopology.TRIANGLE_FAN)commitConnectedTriangle();
+            else if(topology==PrimitiveTopology.TRIANGLES)capture.addTriangleVertex(x,y,z,color,u,v,nx,ny,nz);
+            else capture.addVertex(x, y, z, color, u, v, 0, 0, nx, ny, nz);
             pending = false;
         }
 

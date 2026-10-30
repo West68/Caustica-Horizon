@@ -53,6 +53,7 @@ public final class NgxRuntime {
      * (cleared by {@link #shutdown()} so a fresh device can re-init).
      */
     public synchronized NgxLibrary acquire(VulkanDevice device) {
+        if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())return null;
         if (initialized) {
             return lib;
         }

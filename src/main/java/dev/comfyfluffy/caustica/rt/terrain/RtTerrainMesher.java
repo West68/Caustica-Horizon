@@ -103,37 +103,14 @@ final class RtTerrainMesher {
         if (mesh.isEmpty()) {
             return new CpuSection(null, null);
         }
-        // RIS emitter-NEE light collection — BEFORE packing: it also stamps NEE membership into the prim
-        // records, which packSection then copies out. Only opaque + cutout can emit (glass is shaded
-        // emission-free, water never emits; lava lives in the opaque bucket).
-        float[] lights = EMPTY_LIGHTS;
-        if (CausticaConfig.Rt.Lights.RIS_CANDIDATES.value() > 0) {
-            FloatArrayList collected = new FloatArrayList();
-            float minFill = CausticaConfig.Rt.Lights.MIN_FILL_RATIO.value();
-            collectLights(collected, mesh.opaque, materials, minFill);
-            collectLights(collected, mesh.cutout, materials, minFill);
-            if (!collected.isEmpty()) {
-                lights = collected.toFloatArray();
-            }
-        }
         Geom cutout = mesh.cutoutOrEmpty();
         RtAccel.OpacityMicromapInput ommInput =
                 RtTerrainOmm.buildInput(cutout.triCount(), cutout.cornerUv.elements(),
                         cutout.ommSprites.elements(), cutout.ommSprites.size());
-        return new CpuSection(packSection(mesh, lights), ommInput);
+        return new CpuSection(packSection(mesh), ommInput);
     }
 
-    private static final float[] EMPTY_LIGHTS = new float[0];
-
-    private static void collectLights(FloatArrayList out, Geom geom,
-                                      RtMaterialRegistry.Snapshot materials, float minFillRatio) {
-        if (geom != null && !geom.idx.isEmpty()) {
-            RtLightCollector.collectBucket(out, geom.verts, geom.prim, geom.cornerUv,
-                    geom.ommSprites.elements(), materials, minFillRatio);
-        }
-    }
-
-    private static PackedSection packSection(SectionMesh mesh, float[] lights) {
+    private static PackedSection packSection(SectionMesh mesh) {
         Geom[] buckets = mesh.buckets(); // { solid, cutout, translucent, water }, indexed by RtAccel.BUCKET_*
         int vertFloats = 0, idxCount = 0, uvFloats = 0, primFloats = 0, triCount = 0;
         int[] bucketTris = new int[buckets.length];
@@ -178,7 +155,7 @@ final class RtTerrainMesher {
             vertBase += vertSize / 3;
             triAcc += bucketTris[b];
         }
-        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, lights);
+        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, mesh.torchCenters.toFloatArray());
     }
 
     private static void tessellate(BlockAndTintGetter region, BlockStateModelSet modelSet,
@@ -204,6 +181,7 @@ final class RtTerrainMesher {
                     // (15) rides the emission channel (water emits 0).
                     FluidState fluid = state.getFluidState();
                     if (!fluid.isEmpty()) {
+                        fluidCapture.skyLight=region.getBrightness(net.minecraft.world.level.LightLayer.SKY,m.above());
                         fluidCapture.emission = state.getLightEmission() / 15f;
                         // Water is the dielectric fluid; lava stays an opaque emitter. Tagged per-prim
                         // so the path tracer can branch (see emitQuad).
@@ -216,6 +194,18 @@ final class RtTerrainMesher {
                     BlockStateModel model = modelSet.get(state);
                     if (model == null) {
                         continue;
+                    }
+                    // Sampling hints only: actual radiance still comes from the traced material.
+                    // Unlit redstone torches must not attract the limited continuation budget.
+                    if (state.getLightEmission() > 0 && (state.is(net.minecraft.world.level.block.Blocks.TORCH)
+                            || state.is(net.minecraft.world.level.block.Blocks.WALL_TORCH)
+                            || state.is(net.minecraft.world.level.block.Blocks.SOUL_TORCH)
+                            || state.is(net.minecraft.world.level.block.Blocks.SOUL_WALL_TORCH)
+                            || state.is(net.minecraft.world.level.block.Blocks.REDSTONE_TORCH)
+                            || state.is(net.minecraft.world.level.block.Blocks.REDSTONE_WALL_TORCH))) {
+                        mesh.torchCenters.add(lx + .5f);
+                        mesh.torchCenters.add(ly + .7f);
+                        mesh.torchCenters.add(lz + .5f);
                     }
                     capture.state = state;
                     capture.pos = m;
@@ -236,10 +226,9 @@ final class RtTerrainMesher {
     record CpuSection(PackedSection packed, RtAccel.OpacityMicromapInput opacityMicromap) {
     }
 
-    /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays.
-     *  {@code lights} = packed section-local RIS light records (possibly empty), CPU-side only. */
+    /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays. */
     record PackedSection(float[] positions, int[] indices, float[] uvs, float[] material,
-                         int[] bucketTris, int[] triBase, float[] lights) {
+                         int[] bucketTris, int[] triBase, float[] torchCenters) {
     }
 
 
@@ -251,6 +240,7 @@ final class RtTerrainMesher {
      * into the packed section buffers during preparation, so each geometry's triangles occupy a contiguous range.
      */
     private static final class SectionMesh {
+        final FloatArrayList torchCenters = new FloatArrayList();
         // Conservative worker-side starting capacities. These trade a little transient RAM for avoiding the
         // repeated grow/copy ladder on normal terrain sections.
         private static final int OPAQUE_TRI_CAP = 768;
@@ -306,6 +296,7 @@ final class RtTerrainMesher {
 
         /** Empty the buckets keeping their backing arrays — the mesh is reused across jobs per worker thread. */
         void reset() {
+            torchCenters.clear();
             resetGeom(opaque);
             resetGeom(cutout);
             resetGeom(translucent);
@@ -441,7 +432,8 @@ final class RtTerrainMesher {
 
             ChunkSectionLayer layer = quad.chunkLayer();
             q.cutout = layer != ChunkSectionLayer.SOLID;
-            q.translucent = layer == ChunkSectionLayer.TRANSLUCENT;
+            q.translucent = layer == ChunkSectionLayer.TRANSLUCENT
+                    || (layer != ChunkSectionLayer.SOLID && dev.comfyfluffy.caustica.rt.material.RtMaterials.clearGlass(state));
 
             // Fabric colors are authored albedo. Continuity uses them for already-resolved overlay tint;
             // ordinary biome-tinted quads retain tintIndex and are multiplied by the world tint below.
@@ -468,10 +460,11 @@ final class RtTerrainMesher {
             }
             q.tr = tr; q.tg = tg; q.tb = tb;
 
+            for(int i=0;i<4;i++)q.rainSky[i]=rainSkyAt(view,pos,quad.x(i),quad.z(i),cullPos);
             q.emission = quad.emissive() ? 1f : (state != null ? state.getLightEmission() / 15f : 0f);
             TextureAtlasSprite sprite = spriteFinder.find(quad);
             q.sprite = sprite;
-            q.materialId = materials.resolve(sprite, state, q.translucent);
+            q.materialId = materials.resolve(sprite, state, dev.comfyfluffy.caustica.rt.material.RtMaterials.refractive(state,q.translucent));
         }
 
         /** Fabric's cull predicate returns true when the nominal face should be discarded. */
@@ -628,12 +621,25 @@ final class RtTerrainMesher {
                 prim.add(q.tb);
                 prim.add(0f);
                 prim.add(Float.intBitsToFloat(q.materialId)); // TerrainPrim.materialId uint bits
-                prim.add(0f); // flags
-                prim.add(0f); // aux0
+                prim.add(Float.intBitsToFloat(1)); // flags: interpolated sky-access bytes
+                int b=t==0?1:2,c=t==0?2:3;
+                prim.add(Float.intBitsToFloat(q.rainSky[0]|q.rainSky[b]<<8|q.rainSky[c]<<16));
                 prim.add(0f); // aux1
                 g.ommSprites.add(q.sprite);
             }
         }
+    }
+
+    // Continuous skylight lattice; shared vertices sample the same cells across block/section edges.
+    static int rainSkyAt(BlockAndTintGetter view,BlockPos pos,float localX,float localZ,BlockPos.MutableBlockPos cursor) {
+        double x=pos.getX()+localX-.5,z=pos.getZ()+localZ-.5;
+        int ix=(int)Math.floor(x),iz=(int)Math.floor(z),y=pos.getY()+1;
+        float fx=(float)(x-ix),fz=(float)(z-iz);
+        float a=view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix,y,iz));
+        float b=view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix+1,y,iz));
+        float c=view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix,y,iz+1));
+        float d=view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix+1,y,iz+1));
+        return Math.round(((a+(b-a)*fx)*(1-fz)+(c+(d-c)*fx)*fz)*17f);
     }
 
     /** One block's buffered quad, awaiting coplanar resolution before it is emitted into a section bucket. */
@@ -646,6 +652,7 @@ final class RtTerrainMesher {
         boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
         float tr, tg, tb, emission;
         int materialId;
+        final int[] rainSky=new int[4];
         TextureAtlasSprite sprite;
     }
 
@@ -686,6 +693,7 @@ final class RtTerrainMesher {
      * absorption). Lava keeps {@code tint.w == 0.0} and stays an opaque emitter.
      */
     private static final class FluidCapture implements VertexConsumer, FluidRenderer.Output {
+        int skyLight;
         SectionMesh cur;     // set before each section
         RtMaterialRegistry.Snapshot materials;
         float emission;      // set per fluid block (lava = 1, water = 0)
@@ -777,7 +785,7 @@ final class RtTerrainMesher {
                 prim.add(0f);
                 prim.add(Float.intBitsToFloat(materialId));
                 prim.add(0f);
-                prim.add(0f);
+                prim.add(Float.intBitsToFloat(skyLight));
                 prim.add(0f);
                 g.ommSprites.add(null);
             }

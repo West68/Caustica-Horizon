@@ -31,7 +31,11 @@ public final class VanillaRenderController {
 		this.worldSkipped = false;
 		this.baseReady = false;
 		this.inactiveReason = null;
+		boolean wasActive = this.rtActive;
 		this.rtActive = RtComposite.enabled();
+		if (this.rtActive && !wasActive) releaseRasterTerrain();
+		EntityCullingCompat.update(this.rtActive);
+		SodiumAnimationCompat.update(this.rtActive);
 
 		if (!Boolean.valueOf(this.rtActive).equals(this.lastLoggedRtActive)) {
 			this.lastLoggedRtActive = this.rtActive;
@@ -52,6 +56,18 @@ public final class VanillaRenderController {
 		} else {
 			logInactive(this.inactiveReason);
 		}
+	}
+
+	/** Explicit mode re-enable / world invalidation retries a fresh generation, not every failed frame. */
+	public void resetRuntimeState() {
+		failureLatched = false;
+		frameStarted = false;
+		baseReady = false;
+		projectionCaptured = false;
+		worldSkipped = false;
+		inactiveReason = null;
+		lastLoggedInactiveReason = null;
+		loggedActive = false;
 	}
 
 	public void markProjectionCaptured() {
@@ -91,12 +107,37 @@ public final class VanillaRenderController {
 		}
 	}
 
+	/**
+	 * RT switched back on after a raster session: Sodium still holds every section mesh it uploaded while
+	 * the raster world was drawn, next to the RT terrain, which pushed an 8 GB GPU into paging and kept the
+	 * frame rate low for the rest of the session. A Sodium reload drops those buffers; under RT the vanilla
+	 * world is skipped, so Sodium never rebuilds them until raster is used again.
+	 */
+	private static void releaseRasterTerrain() {
+		try {
+			Class<?> type = Class.forName("net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer");
+			Object renderer = type.getMethod("instanceNullable").invoke(null);
+			if (renderer != null) {
+				type.getMethod("reload").invoke(renderer);
+				CausticaMod.LOGGER.info("RT resumed: released Sodium raster terrain buffers");
+			}
+		} catch (ClassNotFoundException ignored) {
+		} catch (Throwable t) {
+			CausticaMod.LOGGER.warn("RT resumed: could not release Sodium raster terrain buffers", t);
+		}
+	}
+
 	public void markWorldSkipped() {
 		this.worldSkipped = true;
 	}
 
 	public boolean wasWorldSkippedThisFrame() {
 		return this.worldSkipped;
+	}
+
+	/** Capture replaces raster hands only when this frame actually skipped the vanilla world. */
+	public boolean shouldCaptureRtFirstPerson() {
+		return this.rtActive && this.baseReady && this.projectionCaptured && this.worldSkipped;
 	}
 
 	public boolean shouldCompositeRt() {

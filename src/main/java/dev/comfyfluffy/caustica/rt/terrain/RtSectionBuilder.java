@@ -43,11 +43,13 @@ final class RtSectionBuilder {
         RtBuffer material = null;
         RtBuffer upload = null;
         RtAccel.PreparedBlas blas = null;
+        TerrainPrimitiveStorage.Encoded primitives=TerrainPrimitiveStorage.encode(packed.material());
+        TerrainPrimitiveStorage.Encoded textureCoordinates=TerrainPrimitiveStorage.encodeUvs(packed.uvs());
         try {
             long positionsBytes = (long) packed.positions().length * Float.BYTES;
             long indicesBytes = (long) packed.indices().length * Integer.BYTES;
-            long uvsBytes = (long) packed.uvs().length * Float.BYTES;
-            long materialBytes = (long) packed.material().length * Float.BYTES;
+            long uvsBytes = textureCoordinates.byteSize();
+            long materialBytes = primitives.byteSize();
             int transferDst = VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
             positions = ctx.createAsyncBuffer(positionsBytes, asInput | transferDst, false,
@@ -64,19 +66,22 @@ final class RtSectionBuilder {
             cursor += positionsBytes;
             MemoryUtil.memIntBuffer(cursor, packed.indices().length).put(packed.indices());
             cursor += indicesBytes;
-            MemoryUtil.memFloatBuffer(cursor, packed.uvs().length).put(packed.uvs());
+            if(textureCoordinates.usesIndex()) MemoryUtil.memByteBuffer(cursor,textureCoordinates.byteSize()).put(textureCoordinates.indexed());
+            else MemoryUtil.memFloatBuffer(cursor, packed.uvs().length).put(packed.uvs());
             cursor += uvsBytes;
-            MemoryUtil.memFloatBuffer(cursor, packed.material().length).put(packed.material());
+            if(primitives.usesIndex()) MemoryUtil.memByteBuffer(cursor,primitives.byteSize()).put(primitives.indexed());
+            else MemoryUtil.memFloatBuffer(cursor, packed.material().length).put(packed.material());
+            if((material.deviceAddress&1L)!=0)throw new IllegalStateException("Unaligned material buffer address");
             upload.flush();
 
             blas = RtAccel.prepareTerrainBlas(ctx, positions, vertCount, indices,
                     packed.bucketTris(), ommInput, compactBlas, label + " BLAS");
             return new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                    packed.triBase(), sox, soy, soz, packed.lights());
+                    packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex());
         } catch (Throwable t) {
             if (blas != null) {
                 destroy(new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                        packed.triBase(), sox, soy, soz, packed.lights()));
+                        packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex()));
             } else {
                 if (upload != null) upload.destroy();
                 if (material != null) material.destroy();
@@ -130,11 +135,10 @@ final class RtSectionBuilder {
         prepared.positions.destroy();
     }
 
-    /** Worker-owned native section state paired with its prepared BLAS. {@code lights} = packed
-     *  section-local RIS light records (CPU-side, flattened into the global buffer at publish). */
+    /** Worker-owned native section state paired with its prepared BLAS. */
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
-                           RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas, int[] triBase,
-                           int sx, int sy, int sz, float[] lights) {
+                           RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas, int[] triBase, float[] torchCenters,
+                           int sx, int sy, int sz, boolean indexedMaterials, boolean indexedUvs) {
         void releaseUpload() {
             upload.destroy();
         }
@@ -146,7 +150,7 @@ final class RtSectionBuilder {
 
         PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
             return new PreparedSection(key, positions, indices, uvs, material, upload, replacement,
-                    triBase, sx, sy, sz, lights);
+                    triBase, torchCenters, sx, sy, sz, indexedMaterials, indexedUvs);
         }
     }
 }

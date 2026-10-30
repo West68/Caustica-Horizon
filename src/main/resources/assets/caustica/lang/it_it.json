@@ -15,6 +15,9 @@
 	"caustica.options.rt.maxBounces": "Rimbalzi del percorso",
 	"caustica.options.rt.maxBounces.tooltip": "Numero massimo di rimbalzi secondari del path tracing dopo il primo colpo. Valori più alti catturano più luce indiretta, ma costano di più.",
 
+	"caustica.options.rt.sunSize": "Dimensione del sole",
+	"caustica.options.rt.sunSize.tooltip": "Raggio angolare del disco del sole e della luna. Dischi più grandi proiettano penombre più morbide.",
+
 	"caustica.options.rt.entities": "Entità con ray tracing",
 	"caustica.options.rt.entities.tooltip": "Include entità ed entità blocco nella scena con ray tracing.",
 
@@ -53,5 +56,7 @@
 	"caustica.options.rt.debugView.4": "Rugosità",
 	"caustica.options.rt.debugView.5": "Movimento",
 	"caustica.options.rt.debugView.6": "Speculare",
-	"caustica.options.rt.debugView.7": "Movimento speculare"
+	"caustica.options.rt.debugView.7": "Movimento speculare",
+	"caustica.options.rt.debugView.8": "Maschera emissiva",
+	"caustica.options.rt.debugView.9": "Sorgente emissiva"
 }

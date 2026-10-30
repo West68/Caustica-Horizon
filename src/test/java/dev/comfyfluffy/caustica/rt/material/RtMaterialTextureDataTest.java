@@ -49,6 +49,16 @@ final class RtMaterialTextureDataTest {
         assertEquals(0.25f, reduced.surface0()[6], EPS);
     }
 
+    @Test
+    void auxiliaryPorosityOrEmissionMaskMipsPreserveMeanWithoutTouchingSss() {
+        float[] aux=repeatedNormal(4,.04f,.04f,.04f,0);
+        aux[3]=1;aux[7]=.5f;aux[11]=.25f;aux[15]=0;
+        var reduced=RtMaterialTextureData.reduce(level(repeatedNormal(4,.5f,0,0,.7f),
+                repeatedNormal(4,.5f,.5f,1,1),aux));
+        assertEquals(.4375f,reduced.surface1()[3],EPS);
+        assertEquals(.7f,reduced.surface0()[3],EPS);
+    }
+
     private static RtMaterialTextureData.Level level(float[] surface0, float[] normalAo, float[] surface1) {
         return new RtMaterialTextureData.Level(2, 2, surface0, normalAo, surface1);
     }

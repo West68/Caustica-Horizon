@@ -18,16 +18,12 @@ public final class RtMaterials {
         // The first four are the sprite-classifiable profiles ({@link #profile} can only return these);
         // RtMaterialRegistry's variant index depends on their ordinals (checked at its class load).
         // WATER/LAVA exist only for the dedicated fluid singleton headers.
-        //
-        // Roughness is LINEAR (GGX alpha), matching LabPBR's roughness = (1 - perceptualSmoothness)^2 and
-        // what DLSS-RR wants in its guide. The comment after each value is the perceptual smoothness it
-        // corresponds to, which is the easier number to reason about when re-tuning: alpha = (1 - s)^2.
-        DEFAULT(0.81f, 0.0f),    // s = 0.10
-        METAL(0.09f, 1.0f),      // s = 0.70
-        GLASS(0.01f, 0.0f),      // s = 0.90
-        SMOOTH(0.1225f, 0.0f),   // s = 0.65
-        WATER(0.0064f, 0.0f),    // s = 0.92
-        LAVA(0.49f, 0.0f);       // s = 0.30
+        DEFAULT(0.9f, 0.0f),
+        METAL(0.3f, 1.0f),
+        GLASS(0.1f, 0.0f),
+        SMOOTH(0.35f, 0.0f),
+        WATER(0.08f, 0.0f),
+        LAVA(0.7f, 0.0f);
 
         private final float roughness;
         private final float metalness;
@@ -46,12 +42,39 @@ public final class RtMaterials {
         }
     }
 
+    public static boolean refractiveSprite(String name,boolean translucent) {
+        if(!translucent || name==null)return false;
+        String p=name.toLowerCase(java.util.Locale.ROOT);
+        return p.contains("glass") || p.contains("ice") || p.contains("slime") || p.contains("honey");
+    }
+    /**
+     * Vanilla clear glass/panes render in the cutout layer, whose fully transparent pane centre is a hole
+     * to the alpha test (and an OMM-transparent region), so it had no refraction at all. Route them through
+     * the translucent dielectric like stained glass: alpha becomes slab tint, the centre stays clear.
+     */
+    public static boolean clearGlass(BlockState state) {
+        if(state==null || state.getSoundType()!=SoundType.GLASS)return false;
+        String path=net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath();
+        return path.endsWith("glass") || path.endsWith("glass_pane");
+    }
+    /** Item-side counterpart of {@link #clearGlass}: held/dropped items carry no BlockState. */
+    public static boolean clearGlassSprite(String name) {
+        if(name==null)return false;
+        String p=name.toLowerCase(java.util.Locale.ROOT);
+        return p.endsWith("glass") || p.endsWith("glass_pane_top");
+    }
+    public static boolean refractive(BlockState state,boolean translucent) {
+        return translucent && state!=null && (state.getSoundType()==SoundType.GLASS
+            || state.is(Blocks.ICE) || state.is(Blocks.FROSTED_ICE)
+            || state.is(Blocks.SLIME_BLOCK) || state.is(Blocks.HONEY_BLOCK));
+    }
+
     /** Water roughness; near-smooth so DLSS-RR resolves stable reflections. */
     public static final float WATER_ROUGH = Profile.WATER.roughness();
     /** Lava: opaque emitter, moderately rough. */
     public static final float LAVA_ROUGH = Profile.LAVA.roughness();
-    /** Default entity roughness (linear; s = 0.11). */
-    public static final float ENTITY_ROUGH = 0.64f;
+    /** Default entity roughness. */
+    public static final float ENTITY_ROUGH = 0.8f;
 
     private static final Set<Block> SMOOTH = Set.of(
             Blocks.QUARTZ_BLOCK, Blocks.SMOOTH_QUARTZ, Blocks.QUARTZ_BRICKS, Blocks.QUARTZ_PILLAR,
@@ -60,7 +83,7 @@ public final class RtMaterials {
             Blocks.POLISHED_DEEPSLATE, Blocks.POLISHED_BLACKSTONE,
             Blocks.PRISMARINE, Blocks.PRISMARINE_BRICKS, Blocks.DARK_PRISMARINE);
 
-    /** Linear roughness (GGX alpha) for this block's surface. */
+    /** Perceptual roughness for this block's surface. */
     public static float roughness(BlockState state) {
         return profile(state).roughness();
     }

@@ -22,12 +22,15 @@ import net.fabricmc.loader.api.FabricLoader;
  * {@code GameRenderer.render} HEAD when there was no RT tick work) and ends at render TAIL, so the hitch
  * decision uses one frame envelope rather than one action/pass at a time. Every completed frame is appended
  * as one row to {@code <gameDir>/rt-frame-stats/frame.csv} (fresh file per session), and a log line is
- * emitted only when the frame exceeds {@value #HITCH_MULTIPLIER}x its rolling median. That hitch line
+ * emitted only when the frame exceeds {@value #HITCH_MULTIPLIER}x its rolling median and 8 ms. That hitch line
  * includes all detailed stage timings and counters recorded during the frame.
  */
 public final class RtFrameStats {
     private static final int MEDIAN_WINDOW = 64;
     private static final double HITCH_MULTIPLIER = 1.5;
+    // Sub-frame stages (e.g. a 0.5ms profile against a 0.2ms median) are not hitches; logging every one of them
+    // floods latest.log with multi-KB lines per frame and itself costs CPU time.
+    private static final long HITCH_MIN_NANOS = 8_000_000L;
 
     // trackGc: per-frame GC deltas (collection count + reported pause ms) help distinguish JVM pauses from
     // uninstrumented render work when a hitch's unaccounted time is large.
@@ -57,28 +60,22 @@ public final class RtFrameStats {
                     "entity.capture.append.alloc",
                     "entity.capture.append.copy",
                     "entity.capture.append.blas",
-                    "entity.uploadFlush",
                     "entity.blockEntities",
                     "entity.particles",
                     "entity.blasRecord",
                     "frame.prepareTlas",
                     "frame.recordTlas",
                     "frame.trace",
-                    "frame.skyLut",
-                    // Wavefront trace and downstream debug stages.
-                    "frame.tracePrimary",
-                    "frame.traceIndirect",
                     "frame.exposure",
                     "frame.dlssRr",
                     "frame.upscale",
-                    "frame.bloom",
                     "frame.displayMap",
-                    "frame.debugPresent",
+                    "frame.itrpBloom",
                     "frame.copyOutput"
             },
             new String[] {"sectionsSnapshotted", "sectionCopies", "terrainBuildsCompleted",
                     "terrainMaterialEpochRejects", "entitiesCaptured", "blockEntitiesCaptured",
-                    "particlesCaptured", "refits", "entityReuse", "entityRigidFitSuccesses",
+                    "particlesCaptured", "weatherColumnsCaptured", "modelParticlesCaptured", "refits", "entityReuse", "entityThrottled", "entityRigidFitSuccesses",
                     "entityRigidFitFailures", "vmaBufferCreates",
                     "entityModelSubmissions", "entityCuboids",
                     "entityModelQuads", "entityModelVertices", "entityBakedQuads", "entityBakedVertices",
@@ -86,10 +83,7 @@ public final class RtFrameStats {
                     "entitySpecializedCuboids", "entityGenericCuboids",
                     "entityParityChecks", "entityVmaBufferCreates", "entityGeometryBufferReuses",
                     "entityScratchBufferReuses", "entityUploadBytes", "entityMotionUploadBytes",
-                    "entityPackedBytes", "entityPackedPaddingBytes", "entityRetainedGeometryBytes",
-                    "entityFrameListsWaits", "entityTableWaits", "entitySlotWaits",
-                    "entityGraphicsWaitNanos", "entityMotionFlushes", "entityTableFlushes",
-                    "entityBlockEntityRetirements", "entitySlotRetirements", "entityTableRetirements"},
+                    "entityPackedBytes", "entityPackedPaddingBytes", "entityRetainedGeometryBytes"},
             true);
 
     private static final List<GarbageCollectorMXBean> GC_BEANS = ManagementFactory.getGarbageCollectorMXBeans();
@@ -241,7 +235,7 @@ public final class RtFrameStats {
             if (historyCount < MEDIAN_WINDOW) {
                 historyCount++;
             }
-            boolean hitch = median > 0 && total > (long) (median * HITCH_MULTIPLIER);
+            boolean hitch = median > 0 && total > (long) (median * HITCH_MULTIPLIER) && total >= HITCH_MIN_NANOS;
             writeCsvRow(total, median, hitch, gcCount, gcMs);
             if (hitch) {
                 logHitch(total, median, gcCount, gcMs);
