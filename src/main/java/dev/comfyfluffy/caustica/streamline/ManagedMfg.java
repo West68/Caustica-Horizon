@@ -49,7 +49,9 @@ public final class ManagedMfg implements PreLaunchEntrypoint {
         if(!verified(target)) {
             // Only known reference locations; no network, executable proxy, or broad filesystem scan.
             List<Path> sources=List.of(root.resolve("native-experiments/asi"),
-                root.getParent().getParent().resolve("Prism-Fabulously Optimized/minecraft/config/super_resolution/libraries"));
+                root.getParent().getParent().resolve("Prism-Fabulously Optimized/minecraft/config/super_resolution/libraries"),
+                Path.of("C:/Projects/mc/Caustica-Enhanced/test-instances/user-full-current/native-experiments/asi"),
+                Path.of("C:/MINECRAFT/Minecraft_Game/.minecraft/versions/Fabulously Optimized/config/super_resolution/libraries"));
             Path source=null;
             for(Path candidate:sources) if(verified(candidate)) { source=candidate;break; }
             if(source==null) throw new IllegalStateException("Verified RTX40MFG 1.2 ASI/Core not found locally");

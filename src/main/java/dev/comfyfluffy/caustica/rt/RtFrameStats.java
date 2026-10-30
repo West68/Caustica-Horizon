@@ -41,6 +41,7 @@ public final class RtFrameStats {
                     "terrain.drainCompletion",
                     "terrain.snapshotDispatch",
                     "terrain.publish",
+                    "terrain.lightGridPublish",
                     "entity.capture",
                     "entity.capture.extract",
                     "entity.capture.submit",
@@ -60,6 +61,7 @@ public final class RtFrameStats {
                     "entity.capture.append.alloc",
                     "entity.capture.append.copy",
                     "entity.capture.append.blas",
+                    "entity.uploadFlush",
                     "entity.blockEntities",
                     "entity.particles",
                     "entity.blasRecord",
@@ -83,7 +85,10 @@ public final class RtFrameStats {
                     "entitySpecializedCuboids", "entityGenericCuboids",
                     "entityParityChecks", "entityVmaBufferCreates", "entityGeometryBufferReuses",
                     "entityScratchBufferReuses", "entityUploadBytes", "entityMotionUploadBytes",
-                    "entityPackedBytes", "entityPackedPaddingBytes", "entityRetainedGeometryBytes"},
+                    "entityPackedBytes", "entityPackedPaddingBytes", "entityRetainedGeometryBytes",
+                    "entityFrameListsWaits", "entityTableWaits", "entitySlotWaits",
+                    "entityGraphicsWaitNanos", "entityMotionFlushes", "entityTableFlushes",
+                    "entityBlockEntityRetirements", "entitySlotRetirements", "entityTableRetirements"},
             true);
 
     private static final List<GarbageCollectorMXBean> GC_BEANS = ManagementFactory.getGarbageCollectorMXBeans();
@@ -159,6 +164,8 @@ public final class RtFrameStats {
             this.stageIndices = index(stageNames);
             this.counterIndices = index(counterNames);
         }
+
+        public long frameIndex() { return frameIndex; }
 
         /** Start timing a new frame; clears this frame's stage/counter accumulators. */
         public void begin() {

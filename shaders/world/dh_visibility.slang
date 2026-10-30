@@ -1,5 +1,5 @@
 // Coverage rejection and dielectric shadow transmission shared by both DH representations.
-void dhVisibility(inout float4 shadowVis,EntityGeom g,Prim epr){
+void dhVisibility(inout Payload payload,EntityGeom g,Prim epr){
             WorldPush w=ConstPtr<WorldPush>(pc.worldPushAddr)[0];
             float3 hit=WorldRayOrigin()+WorldRayDirection()*RayTCurrent();
             // Hand off only to sections actually published by the fine RT renderer. A camera-radius
@@ -20,8 +20,8 @@ void dhVisibility(inout float4 shadowVis,EntityGeom g,Prim epr){
                 InterlockedAdd(counts[3],1u);
             }
             if(shadow&&(epr.flags&(4096u|8192u))!=0u) {
-                shadowVis.rgb*=lerp(float3(1),epr.tint.rgb,(epr.flags&4096u)!=0u?.5:.2);
-                if((epr.flags&4096u)!=0u)shadowVis.a=shadowVis.a<0?RayTCurrent():min(shadowVis.a,RayTCurrent());
+                payload.albedo*=lerp(float3(1),epr.tint.rgb,(epr.flags&4096u)!=0u?.5:.2);
+                if((epr.flags&4096u)!=0u)payload.hitT=payload.hitT<0?RayTCurrent():min(payload.hitT,RayTCurrent());
                 IgnoreHit();
             }
 

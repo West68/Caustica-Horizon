@@ -22,6 +22,7 @@ layout(push_constant) uniform Push {
     mat4 invViewProj;    // jitter-free camera-relative inverse view-projection (same as world.rgen)
     vec4 skyAxis;        // xyz celestial rotation axis, w rotation angle (the star field's wheel)
     vec4 night;          // x night strength (0 = off), y time (s), z rain, w Milky Way texture ready
+    mat4 prevViewProj;   // previous frame's camera-relative view-projection, for sky-mask reprojection
 } pc;
 
 // Night sky at full output resolution. The RT guide's alpha marks a camera ray that reached the sky
@@ -29,6 +30,8 @@ layout(push_constant) uniform Push {
 layout(binding = 5, set = 0, rgba16f) uniform readonly image2D guideImage; // render-res albedo guide
 layout(binding = 6) uniform sampler2D milkyWay;                            // NightSkyTexture, equirect
 const float MILKY_WAY_PEAK = 3.0;
+layout(binding = 7, set = 0, r32f) uniform readonly image2D coverHistory;  // last frame's stable sky mask
+layout(binding = 8, set = 0, r32f) uniform writeonly image2D coverOutput;  // copied to history after dispatch
 
 float skyCoverage(ivec2 pix, ivec2 size) {
     ivec2 gs = imageSize(guideImage);
@@ -49,6 +52,34 @@ vec3 viewDir(vec2 uv) {
     vec4 n = pc.invViewProj * vec4(ndc, 1.0, 1.0);
     vec4 f = pc.invViewProj * vec4(ndc, 0.0, 1.0);
     return normalize(f.xyz / f.w - n.xyz / n.w);
+}
+
+// The raw mask comes from the render-res, DLSS-jittered guide, and the night sky dims what it covers by up
+// to 72%, so each jitter step flipped silhouette pixels between dimmed and undimmed: a hard flicker along
+// every tree line against the night sky (the End and daytime have no such mask, hence no flicker). Resolve
+// it the way TAA resolves an edge: reproject history along the view direction (the sky is at infinity),
+// clamp to the guide's neighbourhood so nothing ghosts, and blend the new sample in slowly. Flat sky and
+// flat terrain have an empty clamp range and skip all of this.
+float stableSkyCoverage(ivec2 pix, ivec2 size, vec2 uv) {
+    float raw = skyCoverage(pix, size);
+    ivec2 gs = imageSize(guideImage);
+    ivec2 centre = ivec2(floor(uv * vec2(gs)));
+    float lo = 1e9, hi = -1e9;
+    for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+        float c = max(-imageLoad(guideImage, clamp(centre + ivec2(i, j), ivec2(0), gs - 1)).a, 0.0);
+        lo = min(lo, c); hi = max(hi, c);
+    }
+    if (hi - lo < 1e-3) return raw;
+    vec4 clip = pc.prevViewProj * vec4(viewDir(uv), 0.0);
+    if (clip.w <= 0.0) return raw;
+    vec2 hp = (clip.xy / clip.w * 0.5 + 0.5) * vec2(size) - 0.5;
+    ivec2 h0 = ivec2(floor(hp));
+    if (any(lessThan(h0, ivec2(0))) || any(greaterThanEqual(h0 + 1, size))) return raw;
+    vec2 f = hp - vec2(h0);
+    float history = mix(mix(imageLoad(coverHistory, h0).r, imageLoad(coverHistory, h0 + ivec2(1, 0)).r, f.x),
+                        mix(imageLoad(coverHistory, h0 + ivec2(0, 1)).r, imageLoad(coverHistory, h0 + ivec2(1, 1)).r, f.x), f.y);
+    if (isnan(history) || isinf(history)) return raw; // the image starts uninitialized
+    return mix(clamp(history, lo, hi), raw, 0.06);
 }
 
 vec3 rotateSky(vec3 v) { // inverse of the star wheel, as world.rmiss stars()
@@ -331,7 +362,8 @@ void main() {
     // terrain and its lighting are untouched, so night-time visibility stays the same.
     vec3 hdr=rt.rgb;
     if (pc.night.x > 0.0) {
-        float cover = skyCoverage(pix, size);
+        float cover = stableSkyCoverage(pix, size, uv);
+        imageStore(coverOutput, pix, vec4(cover));
         if (cover > 0.0) {
             float glow = dot(rt.rgb, vec3(0.2126, 0.7152, 0.0722)) * exposure;
             float darken = 0.72 * pc.night.x * cover * (1.0 - smoothstep(0.25, 0.9, glow));

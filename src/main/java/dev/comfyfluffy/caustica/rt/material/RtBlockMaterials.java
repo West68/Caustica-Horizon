@@ -61,7 +61,8 @@ public final class RtBlockMaterials {
                         float materialU, float materialV, float materialDu, float materialDv,
                         float albedoU, float albedoV, float albedoInvDu, float albedoInvDv,
                         RtMaterialDesc.EmissionSummary emissionSummary,
-                        RtMaterialDesc.EmissionSummary overrideEmissionSummary) {
+                        RtMaterialDesc.EmissionSummary overrideEmissionSummary,
+                        RtEmissionGrid emissionGrid, RtEmissionGrid overrideEmissionGrid) {
     }
 
     /** Each RGBA channel page is stored as two BC5 halves: RG and BA (see MaterialPageBc5). */
@@ -98,6 +99,8 @@ public final class RtBlockMaterials {
         int frame, frameCount = 1; // image frame of this tile; frameCount on the frame-0 candidate
         RtMaterialDesc.EmissionSummary emissionSummary = RtMaterialDesc.EmissionSummary.NONE;
         RtMaterialDesc.EmissionSummary overrideEmissionSummary = RtMaterialDesc.EmissionSummary.NONE;
+        RtEmissionGrid emissionGrid;
+        RtEmissionGrid overrideEmissionGrid;
 
         Candidate(TextureAtlasSprite sprite, Identifier name, Identifier albedoLocation, int features,
                   Identifier specLocation, Identifier normalLocation, int width, int height) {
@@ -278,6 +281,7 @@ public final class RtBlockMaterials {
                 Decoded decoded=decode(candidate);
                 candidate.emissionSummary=decoded.emissionSummary();
                 candidate.overrideEmissionSummary=decoded.overrideEmissionSummary();
+                candidate.emissionGrid=decoded.emissionGrid(); candidate.overrideEmissionGrid=decoded.overrideEmissionGrid();
                 candidate.tile=new PackedMaterialTile(decoded.levels());
             } catch(Throwable t) { warnOnce("RT canonical material decode failed for "+candidate.name,t); }
         });
@@ -360,7 +364,7 @@ public final class RtBlockMaterials {
         float fallbackUv = GUTTER / (float) pageSize;
         fallback = new Entry(0, 0, 0, fallbackUv, GUTTER / (float)pageHeights[0],
                 1.0f / pageSize, 1.0f / pageHeights[0], 0, 0, 1, 1,
-                RtMaterialDesc.EmissionSummary.NONE, RtMaterialDesc.EmissionSummary.NONE);
+                RtMaterialDesc.EmissionSummary.NONE, RtMaterialDesc.EmissionSummary.NONE, null, null);
         for (TextureAtlasSprite sprite : sprites) {
             if (sprite != null) entries.put(sprite, fallbackFor(sprite));
         }
@@ -374,7 +378,8 @@ public final class RtBlockMaterials {
                     candidate.blockSprite() ? candidate.sprite.getV0() : 0.0f,
                     candidate.blockSprite() ? inverseExtent(candidate.sprite.getU1() - candidate.sprite.getU0()) : 1.0f,
                     candidate.blockSprite() ? inverseExtent(candidate.sprite.getV1() - candidate.sprite.getV0()) : 1.0f,
-                    candidate.emissionSummary, candidate.overrideEmissionSummary);
+                    candidate.emissionSummary, candidate.overrideEmissionSummary,
+                    candidate.emissionGrid, candidate.overrideEmissionGrid);
             if (candidate.blockSprite() && candidate.frameCount > 1)
                 animatedFrames.computeIfAbsent(candidate.sprite, s -> new Entry[candidate.frameCount])[candidate.frame] = entry;
             if (candidate.blockSprite()) { if (candidate.frame == 0) entries.put(candidate.sprite, entry); }
@@ -498,12 +503,28 @@ public final class RtBlockMaterials {
                 fallback.materialU, fallback.materialV, fallback.materialDu, fallback.materialDv,
                 sprite.getU0(), sprite.getV0(), inverseExtent(sprite.getU1() - sprite.getU0()),
                 inverseExtent(sprite.getV1() - sprite.getV0()), RtMaterialDesc.EmissionSummary.NONE,
-                RtMaterialDesc.EmissionSummary.NONE);
+                RtMaterialDesc.EmissionSummary.NONE, null, null);
     }
 
     private record Decoded(List<RtMaterialTextureData.Level> levels,
                            RtMaterialDesc.EmissionSummary emissionSummary,
-                           RtMaterialDesc.EmissionSummary overrideEmissionSummary) {
+                           RtMaterialDesc.EmissionSummary overrideEmissionSummary,
+                           RtEmissionGrid emissionGrid, RtEmissionGrid overrideEmissionGrid) {
+    }
+
+    /** Reduce a per-texel emission mask to the light collector's summary grid (premultiplied by albedo). */
+    private static RtEmissionGrid emissionGrid(float[] linearAlbedo, float[] mask, int width, int height) {
+        RtEmissionGrid.Builder builder = new RtEmissionGrid.Builder(width, height);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int pixel = y * width + x;
+                float weight = Math.max(0.0f, Math.min(1.0f, mask[pixel]));
+                int i = pixel * 4;
+                builder.add(x, y, linearAlbedo[i] * weight, linearAlbedo[i + 1] * weight,
+                        linearAlbedo[i + 2] * weight, weight);
+            }
+        }
+        return builder.build();
     }
 
     /**
@@ -604,8 +625,11 @@ public final class RtBlockMaterials {
                 }
             }
             RtMaterialDesc.EmissionSummary emissionSummary = RtMaterialDesc.EmissionSummary.NONE;
+            RtEmissionGrid grid = null;
+            RtEmissionGrid overrideGrid = null;
             if (spec != null) {
                 emissionSummary = RtEmissionHeuristic.summarize(linearAlbedo, authoredEmission);
+                grid = emissionGrid(linearAlbedo, authoredEmission, width, height);
             }
             RtMaterialDesc.EmissionSummary overrideEmissionSummary = RtMaterialDesc.EmissionSummary.NONE;
             boolean heuristic = (candidate.features & RtMaterialRegistry.FEATURE_HEURISTIC_EMISSION) != 0;
@@ -619,10 +643,14 @@ public final class RtBlockMaterials {
                 }
                 if (heuristic) emissionSummary = emission.summary();
                 if (overrideMask) overrideEmissionSummary = emission.summary();
+                RtEmissionGrid maskGrid = emissionGrid(linearAlbedo, mask, width, height);
+                if (heuristic) grid = maskGrid;
+                if (overrideMask) overrideGrid = maskGrid;
             }
             int maxLod = maxLodFor(width, height);
             return new Decoded(RtMaterialTextureData.mipChain(new RtMaterialTextureData.Level(width, height,
-                    surface0, normalAo, surface1), maxLod), emissionSummary, overrideEmissionSummary);
+                    surface0, normalAo, surface1), maxLod), emissionSummary, overrideEmissionSummary,
+                    grid, overrideGrid);
         } finally {
             if (spec != null) spec.close();
             if (normal != null) normal.close();

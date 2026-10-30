@@ -36,6 +36,7 @@ public final class DhLodMaterials {
     private final java.util.BitSet mappedSets = new java.util.BitSet();
     private int lastRegistered = -1;
     private long materialEpoch = -1;
+    private Object level;
 
     /** Device address of the table for the DH geometry entries; 0 while DH's registry is unreachable. */
     public long address(RtContext ctx) {
@@ -69,9 +70,13 @@ public final class DhLodMaterials {
         var materials = RtMaterialRegistry.INSTANCE;
         if (!materials.isReady()) return;
         int registered = setIds.size();
-        // A resource reload rebuilds both registries; DH's tile ids then mean different blocks.
-        if (materials.epoch() != materialEpoch || registered < lastRegistered) {
+        // A resource reload rebuilds both registries, and DH re-registers its block states per world and
+        // dimension: either way a tile id now means a different block. Keeping the old mapping turned End
+        // stone into an Overworld lamp's tile (far End islands glowing white).
+        Object currentLevel = Minecraft.getInstance().level;
+        if (materials.epoch() != materialEpoch || registered < lastRegistered || currentLevel != level) {
             materialEpoch = materials.epoch();
+            level = currentLevel;
             mappedSets.clear();
             MemoryUtil.memSet(table.mapped, 0, BYTES);
             table.flush(0, BYTES);

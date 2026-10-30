@@ -26,6 +26,8 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
+import dev.comfyfluffy.caustica.rt.RtGpuExecutor.GraphicsUse;
+import dev.comfyfluffy.caustica.rt.RtGpuExecutor.TrackedGraphicsUse;
 
 import java.util.List;
 
@@ -973,7 +975,8 @@ public final class RtAccel {
         private final int instanceCount;
         private final String label;
 
-        private PreparedTlas(RtAccel accel, RtBuffer instanceBuffer, RtBuffer scratch, int instanceCount, String label) {
+        private PreparedTlas(RtAccel accel, RtBuffer instanceBuffer, RtBuffer scratch, int instanceCount,
+                             String label) {
             this.accel = accel;
             this.instanceBuffer = instanceBuffer;
             this.scratch = scratch;
@@ -983,16 +986,12 @@ public final class RtAccel {
     }
 
     /**
-     * Reusable per-frame TLAS resources. Allocating the instance buffer + AS backing + scratch fresh every
-     * frame (and defer-destroying them 4 frames later) occasionally hit VMA's slow path — a fresh
-     * VkDeviceMemory block allocation + map — observed as rare 20–50ms prepareTlas spikes. The ring keeps
-     * {@value #RING} slots, each sized for a capacity instance count, and rebuilds the same AS in place: a
-     * slot is reused every {@value #RING} frames (the established frames-in-flight horizon), so its
-     * previous build/trace is off all queues before the instance buffer is rewritten. A slot is recreated
-     * only when the instance count outgrows its capacity.
+     * Owns {@value #RING} reusable per-frame TLAS slots. Each slot contains a capacity-sized instance
+     * buffer, acceleration structure, and scratch buffer. Graphics timeline completion guards reuse;
+     * instance-count growth recreates the selected slot with a larger capacity.
      */
     public static final class TlasRing {
-        private static final int RING = 4;           // = the frames-in-flight KEEP_FRAMES horizon
+        private static final int RING = 4;           // depth avoids routine reuse waits
         private static final float GROWTH = 1.25f;   // capacity headroom on (re)size
         private static final int MIN_CAPACITY = 1024;
         private final Slot[] slots = new Slot[RING];
@@ -1003,6 +1002,7 @@ public final class RtAccel {
             RtBuffer instanceBuffer;
             RtBuffer scratch;
             int capacity;
+            final TrackedGraphicsUse graphicsUse = new TrackedGraphicsUse();
             final InstancePrefixCache prefix = new InstancePrefixCache();
 
             void destroy() {
@@ -1028,10 +1028,6 @@ public final class RtAccel {
      * rebuilt in place — BUILD mode overwrites). Do NOT call {@link PreparedTlas#destroyAll} on the
      * result: the ring owns the resources.
      */
-    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> instances, TlasRing ring) {
-        return prepareTlas(ctx, instances, List.of(), ring);
-    }
-
     /** Per-slot cache; the owner advances revision on every prefix mutation. */
     public static final class InstancePrefixCache {
         private Object source;
@@ -1048,21 +1044,19 @@ public final class RtAccel {
         }
     }
 
-    /** Pack terrain and dynamic instances as two contiguous ranges. */
-    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> baseInstances,
-                                           List<Instance> dynamicInstances, TlasRing ring) {
-        return prepareTlas(ctx, baseInstances, dynamicInstances, ring, -1L);
-    }
-
     /** Only versioned terrain may skip uploads; dynamic instances are always rewritten. */
     public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> baseInstances,
-            List<Instance> dynamicInstances, TlasRing ring, long baseRevision) {
+            List<Instance> dynamicInstances, TlasRing ring, long baseRevision, GraphicsUse graphicsUse) {
         int baseCount = baseInstances.size();
         int count = Math.addExact(baseCount, dynamicInstances.size());
         TlasRing.Slot slot = ring.slots[ring.cursor];
+        // Complete the slot's prior graphics use before rewriting, rebuilding, or resizing it.
+        if (slot != null) {
+            ctx.gpuExecutor().graphicsUseWaiter().await(slot.graphicsUse);
+        }
         if (slot == null || count > slot.capacity) {
-            // Outgrown (or first use). The slot's previous use is RING frames behind — off all queues by
-            // the same convention the old per-frame deferred free relied on — so immediate destroy is safe.
+            // Outgrown (or first use). The slot's previous use is confirmed off all queues by the wait
+            // above, so immediate destroy is safe.
             if (slot != null) {
                 slot.destroy();
             }
@@ -1082,6 +1076,7 @@ public final class RtAccel {
             slot.instanceBuffer.flush((long) firstWritten * VkAccelerationStructureInstanceKHR.SIZEOF,
                     (long) (count - firstWritten) * VkAccelerationStructureInstanceKHR.SIZEOF);
         }
+        slot.graphicsUse.mark(graphicsUse);
         return new PreparedTlas(slot.accel, slot.instanceBuffer, slot.scratch, count,
                 "frame TLAS " + count + " instances");
     }

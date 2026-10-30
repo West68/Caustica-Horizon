@@ -124,7 +124,8 @@ public final class RtVideoOptions {
                     row(scalar("torchBrightness", CausticaConfig.Rt.Visuals.TORCH_BRIGHTNESS, 0f, 8f), CausticaConfig.Rt.Visuals.TORCH_BRIGHTNESS),
                     row(scalar("torchKelvin", CausticaConfig.Rt.Look.TORCH_KELVIN, 1000f, 12000f), CausticaConfig.Rt.Look.TORCH_KELVIN),
                     row(toggle("caustica.enhanced.itrpLightColors", CausticaConfig.Rt.Visuals.ITRP_LIGHT_COLORS), CausticaConfig.Rt.Visuals.ITRP_LIGHT_COLORS),
-                    row(toggle("caustica.enhanced.entityEmission", CausticaConfig.Rt.Visuals.VANILLA_ENTITY_EMISSION), CausticaConfig.Rt.Visuals.VANILLA_ENTITY_EMISSION)),
+                    row(toggle("caustica.enhanced.entityEmission", CausticaConfig.Rt.Visuals.VANILLA_ENTITY_EMISSION), CausticaConfig.Rt.Visuals.VANILLA_ENTITY_EMISSION),
+                    row(lightSampling(), CausticaConfig.Rt.Lights.MODE)),
                 section("heldLights",
                     row(toggle("caustica.enhanced.heldLights", CausticaConfig.Rt.Visuals.HELD_LIGHTS), CausticaConfig.Rt.Visuals.HELD_LIGHTS),
                     row(scalar("heldRadius", CausticaConfig.Rt.Visuals.HELD_RADIUS, 1f, 32f), CausticaConfig.Rt.Visuals.HELD_RADIUS),
@@ -341,6 +342,14 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(-50, 50),
             Math.clamp(Math.round(setting.value() * 10.0f), -50, 50),
             tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<Integer> lightSampling() {
+        return new OptionInstance<>("caustica.enhanced.lightSampling", OptionInstance.cachedConstantTooltip(
+            Component.translatable("caustica.enhanced.lightSampling.tooltip")),
+            (caption, value) -> Component.translatable("caustica.enhanced.lightSampling." + value),
+            new OptionInstance.Enum<>(List.of(0, 1, 2), Codec.INT),
+            Math.clamp(CausticaConfig.Rt.Lights.MODE.value(), 0, 2), CausticaConfig.Rt.Lights.MODE::set);
     }
 
     private static OptionInstance<String> parallax() {

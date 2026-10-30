@@ -3,7 +3,7 @@
 	"id": "caustica",
 	"version": "${version}",
 	"icon": "assets/caustica/icon.png",
-  "name": "Caustica Enhanced",
+  "name": "Caustica Horizon",
 	"description": "Lightweight 0.1.1 derivative; original renderer with compatibility and optional visual enhancements.",
 	"authors": [
 		"i"

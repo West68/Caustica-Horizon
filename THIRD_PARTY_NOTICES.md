@@ -49,7 +49,7 @@ Upstream: https://github.com/dashdogy/RTX40MFG-Unlock/tree/v1.4.2
 
 ## Shader pack noise textures (release jars only)
 
-Caustica Enhanced release jars include two 64×64 noise textures used for clouds and the End sky:
+Caustica Horizon release jars include two 64×64 noise textures used for clouds and the End sky:
 `assets/caustica/external/seus_blue_noise.png` (from SEUS PTGI) and `assets/caustica/external/itrp_noise.png`
 (from ITRP). They are not part of this source repository, are not covered by the LGPL, and remain the property of
 their original authors. Please support the original shader packs.

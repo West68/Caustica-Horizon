@@ -51,8 +51,13 @@ void shadeDh(inout Payload payload,EntityGeom g,Prim pr){
             // Far streets and windows next to lamps keep that glow (vanilla lightmap curve), at a fraction of a
             // real emitter. Like any emitter it is gathered only by rays that hit it: no light-sampling rays.
             float faceLight=float((pr.flags>>16)&15u)/15.0;
-            float glow=!water && !glass ? .15*faceLight/(4.0-3.0*faceLight) : 0.0;
-            float emission=max(max(emissive?1.0:0.0,lightEmission),glow);
+            // Not in the End: DH fills its sky-less islands with full block light, which turned every far end
+            // stone face into a white emitter. Real End lamps still glow through lightEmission above.
+            float glow=!water && !glass && w.environment.x!=2.0 ? .15*faceLight/(4.0-3.0*faceLight) : 0.0;
+            // Whether a face emits comes only from DH's per-block class (DH tests the block's own light level).
+            // Tiles are shared by look-alike blocks, so the tile table may only set HOW bright an emitter is:
+            // trusting it alone let a lamp's tile light up plain End stone.
+            float emission=max(emissive?(lightEmission>0.0?lightEmission:1.0):0.0,glow);
             // Overworld rain darkens and smooths far tops like near terrain, without its puddle field.
             bool top=n.y>.5;
             if(!water && !glass && top && w.environment.x==0.0) {

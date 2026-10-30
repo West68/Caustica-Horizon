@@ -83,7 +83,7 @@ public final class RtBloomPipeline {
             int set=0;
             for(int i=0;i<down.length;i++) {
                 var high=i==0?source:down[i-1];bind(set,high,high,down[i]);
-                scheduled.add(new Pass(set++,down[i],0,0));
+                scheduled.add(new Pass(set++,down[i],i==0?2:0,0)); // 2: first level, Karis-averaged
             }
             for(int i=up.length-1;i>=0;i--) {
                 var low=i==up.length-1?down[i+1]:up[i+1];bind(set,down[i],low,up[i]);

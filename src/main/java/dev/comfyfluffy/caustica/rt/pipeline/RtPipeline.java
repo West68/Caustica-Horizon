@@ -31,6 +31,7 @@ import java.nio.LongBuffer;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
+import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 
@@ -85,6 +86,7 @@ public final class RtPipeline {
     private final long descriptorSetLayout;
     private final long descriptorPool;
     private final long[] descriptorSets;
+    private final RtGpuExecutor.TrackedGraphicsUse[] descriptorSetUses;
     private int currentSet;
     private final long pipelineLayout;
     private final long pipeline;
@@ -110,6 +112,10 @@ public final class RtPipeline {
         this.descriptorSetLayout = dsl;
         this.descriptorPool = pool;
         this.descriptorSets = sets;
+        this.descriptorSetUses = new RtGpuExecutor.TrackedGraphicsUse[sets.length];
+        for (int i = 0; i < descriptorSetUses.length; i++) {
+            descriptorSetUses[i] = new RtGpuExecutor.TrackedGraphicsUse();
+        }
         this.currentSet = 0;
         this.pipelineLayout = layout;
         this.pipeline = pipeline;
@@ -381,12 +387,12 @@ public final class RtPipeline {
         return entityBucket == RtAccel.ENTITY_BUCKET_ANY_HIT;
     }
 
-    /**
-     * Bind a new TLAS into the next ring slot (which in-flight frames are no longer reading, since
-     * swaps are many frames apart) and make it current, so the binding can change without a drain.
-     */
-    public void setTlas(long tlas) {
+    /** Bind a new TLAS after the selected descriptor slot's exact prior graphics use completes. */
+    public void setTlas(long tlas, RtGpuExecutor.GraphicsUse graphicsUse,
+                        RtGpuExecutor.GraphicsUseWaiter graphicsUseWaiter) {
         currentSet = (currentSet + 1) % RING;
+        RtGpuExecutor.TrackedGraphicsUse slotUse = descriptorSetUses[currentSet];
+        graphicsUseWaiter.await(slotUse);
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkWriteDescriptorSetAccelerationStructureKHR asWrite = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR).pAccelerationStructures(stack.longs(tlas));
@@ -395,6 +401,7 @@ public final class RtPipeline {
                     .descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
             VK10.vkUpdateDescriptorSets(ctx.vk(), write, null);
         }
+        slotUse.mark(graphicsUse);
     }
 
     /** Write the storage image into every ring slot (set once at init / on resize, when idle). */

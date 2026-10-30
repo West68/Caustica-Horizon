@@ -32,7 +32,7 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
     /** Push constants: int hdrEnabled, float paperWhiteNits, float headroom, int itrpLook. */
-    private static final int PUSH_BYTES = 160; // base16 + two float4 grades + sharpen (pad to 64) + night-sky mat4 + 2 float4
+    private static final int PUSH_BYTES = 224; // base16 + two float4 grades + sharpen (pad to 64) + night-sky mat4 + 2 float4 + previous view-projection
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -56,7 +56,7 @@ public final class RtDisplayPipeline {
     public static RtDisplayPipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(7, stack);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(9, stack);
             binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(1).binding(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -73,6 +73,11 @@ public final class RtDisplayPipeline {
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(6).binding(6).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            // 7/8: stable sky-mask history (read) and this frame's mask (written, then copied into history).
+            binds.get(7).binding(7).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(8).binding(8).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(rt display)");
@@ -80,7 +85,7 @@ public final class RtDisplayPipeline {
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, "display descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
-            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(5);
+            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(7);
             poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(2);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(rt display)");
@@ -161,7 +166,7 @@ public final class RtDisplayPipeline {
     }
 
     public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView, long bloomImageView,
-                          long guideImageView) {
+                          long guideImageView, long coverHistoryView, long coverOutputView) {
         // Called only at a quiesced target/bloom generation change. Numeric VkImageView handles
         // may be recycled after destruction: equal handles do NOT preserve descriptor validity.
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -174,7 +179,7 @@ public final class RtDisplayPipeline {
             VkDescriptorImageInfo.Buffer hdrInfo = VkDescriptorImageInfo.calloc(1, stack);
             hdrInfo.get(0).imageView(hdrImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
 
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(boundSkyView == 0L ? 7 : 6, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(boundSkyView == 0L ? 9 : 8, stack);
             writes.get(0).sType$Default().dstSet(descriptorSet).dstBinding(0)
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(outputInfo);
             writes.get(1).sType$Default().dstSet(descriptorSet).dstBinding(1)
@@ -191,10 +196,18 @@ public final class RtDisplayPipeline {
             guideInfo.get(0).imageView(guideImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
             writes.get(5).sType$Default().dstSet(descriptorSet).dstBinding(5).descriptorCount(1)
                     .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(guideInfo);
+            var coverHistoryInfo=VkDescriptorImageInfo.calloc(1,stack);
+            coverHistoryInfo.get(0).imageView(coverHistoryView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+            writes.get(6).sType$Default().dstSet(descriptorSet).dstBinding(7).descriptorCount(1)
+                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(coverHistoryInfo);
+            var coverOutputInfo=VkDescriptorImageInfo.calloc(1,stack);
+            coverOutputInfo.get(0).imageView(coverOutputView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+            writes.get(7).sType$Default().dstSet(descriptorSet).dstBinding(8).descriptorCount(1)
+                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(coverOutputInfo);
             if (boundSkyView == 0L) { // valid stand-in until the Milky Way is baked
                 var standIn=VkDescriptorImageInfo.calloc(1,stack);
                 standIn.get(0).imageView(bloomImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL).sampler(bloomSampler);
-                writes.get(6).sType$Default().dstSet(descriptorSet).dstBinding(6).descriptorCount(1)
+                writes.get(8).sType$Default().dstSet(descriptorSet).dstBinding(6).descriptorCount(1)
                         .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(standIn);
             }
             VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
@@ -207,7 +220,7 @@ public final class RtDisplayPipeline {
      */
     public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float paperWhiteNits, float headroom, boolean itrpLook, float bloomBlend,
                          org.joml.Matrix4fc invViewProj, float axisX, float axisY, float axisZ, float angle,
-                         float nightStrength, float time, float rain) {
+                         float nightStrength, float time, float rain, org.joml.Matrix4fc prevViewProj) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, stack.longs(descriptorSet), null);
@@ -231,6 +244,7 @@ public final class RtDisplayPipeline {
             push.putFloat(128, axisX).putFloat(132, axisY).putFloat(136, axisZ).putFloat(140, angle);
             push.putFloat(144, overworld ? nightStrength : 0f).putFloat(148, time).putFloat(152, rain)
                 .putFloat(156, boundSkyView != 0L ? 1f : 0f);
+            prevViewProj.get(160, push);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

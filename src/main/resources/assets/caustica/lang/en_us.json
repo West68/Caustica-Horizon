@@ -65,8 +65,8 @@
   "caustica.options.rt.fg.active": "%sx (present count confirmed)",
   "caustica.options.rt.fg.unavailable": "%sx (unsupported by current backend; not applied)",
   "caustica.options.rt.fg.tooltip": "Native NGX backend. Up to %s generated frames; current multiplier %s; %s successful evaluations. %s",
-  "caustica.enhanced.entry": "Caustica Enhanced",
-  "caustica.enhanced.home": "Caustica Enhanced",
+  "caustica.enhanced.entry": "Caustica Horizon",
+  "caustica.enhanced.home": "Caustica Horizon",
   "caustica.enhanced.presets": "Visual presets — preserves RT / DLSS budgets",
   "caustica.enhanced.preset.itrp": "Restore ITRP Look",
   "caustica.enhanced.preset.original": "Caustica Original",
@@ -259,5 +259,10 @@
   "caustica.enhanced.param.detailSharpen": "ITRP Detail Sharpen",
   "caustica.enhanced.param.detailSharpen.tooltip": "ITRP default 1.00: restrained post-tonemap micro-contrast on fine texture, overworld only; flat areas and the sky are untouched. 0 disables.",
   "caustica.enhanced.param.sunRims": "ITRP Sunlight Rims",
-  "caustica.enhanced.param.sunRims.tooltip": "ITRP default 1.00: a thin rim of sunlight on convex block and leaf edges when backlit, only where the far side is actually lit. 0 disables."
+  "caustica.enhanced.param.sunRims.tooltip": "ITRP default 1.00: a thin rim of sunlight on convex block and leaf edges when backlit, only where the far side is actually lit. 0 disables.",
+  "caustica.enhanced.lightSampling": "Block Light Sampling",
+  "caustica.enhanced.lightSampling.tooltip": "Torches, glowstone and other block lights directly light their surroundings: less noise indoors and in caves, at a frame-rate cost. Light: only surfaces you see directly; Full: one more bounce. Off still shows lights, just noisier.",
+  "caustica.enhanced.lightSampling.0": "Off",
+  "caustica.enhanced.lightSampling.1": "Light",
+  "caustica.enhanced.lightSampling.2": "Full"
 }

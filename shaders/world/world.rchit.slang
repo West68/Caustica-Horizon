@@ -15,6 +15,7 @@ import portal_material;
 
 // Private to this closest-hit invocation; query and ordinary shading never share storage.
 static bool reliefQuery;
+static bool diffuseRay; // diffuse continuation: normal-map detail at its hit averages out of the image
 static float3 reliefDirection;
 static float reliefInputDepth;
 
@@ -352,7 +353,7 @@ Surface evaluateMaterial(MaterialHeader header, float2 atlasUv, float lod, float
             surface.emission = surface1.a * strength;
         }
     }
-    if ((header.features & MATERIAL_FEATURE_NORMAL) != 0u) {
+    if ((header.features & MATERIAL_FEATURE_NORMAL) != 0u && !diffuseRay) {
         float4 normalAo = samplePageNormalAo(page, pageUv, materialLod);
         surface.normal = perturbNormal(geometricNormal, p0, p1, p2, uv0, uv1, uv2,
                 vdir, normalAo, surface.ao);
@@ -425,6 +426,7 @@ float3 applyBreaking(float3 albedo, uint rayCone, float3 rayOrigin, float3 rayDi
 [shader("closesthit")]
 void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) {
     reliefQuery=(payload.flags & PAYLOAD_RELIEF_QUERY)!=0u;
+    diffuseRay=(payload.flags & (PAYLOAD_CAMERA_MISS|PAYLOAD_SHOW_CELESTIAL))==0u;
     reliefDirection=payload.normal; // query input only; ordinary shading overwrites its output
     reliefInputDepth=payload.hitT;
     float2 attribs = attr.barycentrics;
@@ -843,6 +845,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
     }
     if(skyAccess>=14.99) payload.flags |= PAYLOAD_RAIN_EXPOSED; // hit-only rain exposure
+    if ((pr.flags & TERRAIN_PRIM_IN_LIGHT_BUFFER) != 0u) payload.flags |= PAYLOAD_EMITTER_IN_LIST;
     if (material == MATERIAL_WATER && entering) {
         payload.flags |= PAYLOAD_WATER_ENTERING;
     }

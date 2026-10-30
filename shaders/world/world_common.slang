@@ -16,6 +16,13 @@ public struct WorldPushConstants {
     public uint64_t tableAddr;
     public uint64_t entityTableAddr;
     public uint64_t materialTableAddr;
+    // RIS emitter NEE (upstream Caustica #23/#27): read in world.rgen's candidate loop, so kept here rather
+    // than behind worldPushAddr. 0 = nothing published.
+    public uint64_t lightBufAddr;        // global light buffer (Light records)
+    public uint64_t lightAliasAddr;      // power-weighted O(1) alias table (0 = uniform fallback)
+    public uint64_t lightLocalAliasAddr; // power aliases relative to each section's range
+    public uint64_t lightGridCellAddr;   // dense light grid cell headers (0 = global proposals only)
+    public uint64_t lightGridSpanAddr;   // packed weighted section spans referenced by cell headers
     public uint frameIndex;
     public uint debugView;
 };
@@ -87,7 +94,49 @@ public struct WorldPush {
     public uint skyLutHeight;
     // ITRP NetherColor.glsl NetherLighting(): biome-smoothed Nether ambient (rgb, already * 8e-5).
     public float4 netherLighting;
+    public float4   lightRebase;      // xyz hierarchy-to-current rebase, w inverse total light power
+    public float4   lightGridOrigin;  // xyz minimum cell origin in rebased blocks, w cell size
+    public int4     lightGridDims;    // xyz dense grid dimensions, w reserved
+    public uint     lightCount;       // packed Light records in pc.lightBufAddr
+    public uint     risCandidates;    // RIS candidate count M per diffuse vertex (0 = emitter NEE off)
 };
+
+// 32-byte area-light record. Radiance is packed R11G11B10 (albedo * mask * state light, before this fork's
+// EMISSIVE_STRENGTH/visual gains, which world.rgen applies exactly as for a direct hit). section packs a
+// 9:9:9 grid-relative section coordinate, bits 27-29 the light kind (RtLightCollector.KIND_*) and bit 30
+// the normal flip. The rect spans 2U x 2V, so its area is 4|U x V|.
+public struct Light {
+    public float3 pos;      // rebased world centre
+    public uint   le;       // bitcast R11G11B10 radiance
+    public uint   halfUxy;  // half2(U.x, U.y)
+    public uint   halfUzVx; // half2(U.z, V.x)
+    public uint   halfVyz;  // half2(V.y, V.z)
+    public uint   section;
+};
+
+// Eight-byte Vose alias-table column. PDFs are reconstructed from the selected Light.
+public struct LightAlias {
+    public uint  aliasIndex;
+    public float accept;
+};
+
+// Dense light grid cell entry. Empty coordinates have spanCount=0.
+public struct LightGridCell {
+    public uint spanOffset;
+    public uint spanCount;
+    public float invWeightSum;
+};
+
+// One 16-byte Vose alias column for a cell's section distribution. The two light counts are uint16s.
+public struct LightGridSpan {
+    public uint firstLight;
+    public uint aliasFirstLight;
+    public uint packedLightCounts; // low16 self, high16 alias
+    public float accept;
+};
+
+// TerrainPrim.flags bit 1: this emissive quad is in the light buffer (bit 0 is the sky-access marker).
+public static const uint TERRAIN_PRIM_IN_LIGHT_BUFFER = 2u;
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.
 public struct Payload {
@@ -118,6 +167,9 @@ public static const uint PAYLOAD_REFLECTION_GUIDE = 256u;
 public static const uint PAYLOAD_SHOW_CELESTIAL = 4u;
 // Miss-input only: this ray is building the sky LUT, so the miss must evaluate the exact sky.
 public static const uint PAYLOAD_SKY_LUT_BUILD = 0x80000000u;
+// Same bit after a terrain HIT: the emitter is in the RIS light buffer, so raygen gates its direct-hit
+// emission on diffuse continuation rays (the previous vertex's RIS already counted it).
+public static const uint PAYLOAD_EMITTER_IN_LIST = 0x80000000u;
 
 // Equirectangular sky LUT shared by the builder (raygen) and the consumer (miss).
 public float2 skyLutUv(float3 dir) {

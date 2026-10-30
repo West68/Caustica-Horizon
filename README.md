@@ -1,4 +1,4 @@
-# Caustica Enhanced
+# Caustica Horizon
 
 An enhanced fork of [Caustica](https://github.com/ComfyFluffy/Caustica) by ComfyFluffy — a Vulkan hardware
 path-traced renderer for Minecraft 26.2. Maintained by **Ruiwen68**.
@@ -42,8 +42,7 @@ repository; release jars bundle them under NVIDIA's license (see `THIRD_PARTY_NO
 ## Credits
 
 - **ComfyFluffy** — original Caustica renderer.
-- Visual style references: **ITRP** and **SEUS PTGI** shader packs. No GLSL source from those packs is included;
-  the Slang shaders here are written for Caustica. See `THIRD_PARTY_NOTICES.md` for the noise textures.
+- **ITRP** (Tahnass) and **SEUS PTGI** (Sonic Ether): some sky, cloud, fog, lighting and post-processing shaders in this repository were ported or adapted from these packs into Slang. Their authors have not reviewed this project; rights to that material remain with them, and it is not relicensed by this project. See `THIRD_PARTY_NOTICES.md` for the noise textures.
 - **NVIDIA** — DLSS, Streamline.
 - **Distant Horizons** team.
 
@@ -56,7 +55,7 @@ NVIDIA SDK components are not covered by the LGPL.
 
 ## 中文说明
 
-Caustica Enhanced 是 ComfyFluffy 的 [Caustica](https://github.com/ComfyFluffy/Caustica) 的增强分支，作者 **Ruiwen68**。
+Caustica Horizon（原名 Caustica Enhanced，因与他人项目重名而改名）是 ComfyFluffy 的 [Caustica](https://github.com/ComfyFluffy/Caustica) 的增强分支，作者 **Ruiwen68**。
 它基于 Caustica 0.1.1，为 Minecraft 26.2 提供 Vulkan 硬件路径追踪。
 
 主要新增：

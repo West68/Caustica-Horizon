@@ -65,8 +65,8 @@
   "caustica.options.rt.fg.active": "%s×（已确认呈现）",
   "caustica.options.rt.fg.unavailable": "%s×（当前后端不支持，未应用）",
   "caustica.options.rt.fg.tooltip": "当前为原生 NGX 后端。最多追加 %s 帧；当前倍率 %s；成功求值 %s 次。%s",
-  "caustica.enhanced.entry": "Caustica Enhanced",
-  "caustica.enhanced.home": "Caustica Enhanced",
+  "caustica.enhanced.entry": "Caustica Horizon",
+  "caustica.enhanced.home": "Caustica Horizon",
   "caustica.enhanced.presets": "画面预设（保留光追与 DLSS 参数）",
   "caustica.enhanced.preset.itrp": "恢复 ITRP 推荐画面",
   "caustica.enhanced.preset.original": "Caustica 原版画面",
@@ -259,5 +259,10 @@
   "caustica.enhanced.param.detailSharpen": "ITRP 细节锐化",
   "caustica.enhanced.param.detailSharpen.tooltip": "ITRP 默认 1.00：色调映射后对细小纹理做克制的局部对比增强，只在主世界生效，平坦区域和天空不受影响。0 关闭。",
   "caustica.enhanced.param.sunRims": "ITRP 阳光轮廓光",
-  "caustica.enhanced.param.sunRims.tooltip": "ITRP 默认 1.00：逆光时方块和树叶的凸起边缘出现一圈阳光描边，边缘后方确实受光才会出现。0 关闭。"
+  "caustica.enhanced.param.sunRims.tooltip": "ITRP 默认 1.00：逆光时方块和树叶的凸起边缘出现一圈阳光描边，边缘后方确实受光才会出现。0 关闭。",
+  "caustica.enhanced.lightSampling": "方块光源采样",
+  "caustica.enhanced.lightSampling.tooltip": "火把、萤石等方块光源直接照亮周围，室内和洞穴噪点更少，但会降低帧率。轻量：只处理你直接看到的表面；完整：多处理一次反弹。关闭时光源仍会发光，只是噪点多一些。",
+  "caustica.enhanced.lightSampling.0": "关闭",
+  "caustica.enhanced.lightSampling.1": "轻量",
+  "caustica.enhanced.lightSampling.2": "完整"
 }

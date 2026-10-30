@@ -77,11 +77,11 @@ final class RtSectionBuilder {
             blas = RtAccel.prepareTerrainBlas(ctx, positions, vertCount, indices,
                     packed.bucketTris(), ommInput, compactBlas, label + " BLAS");
             return new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                    packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex());
+                    packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex(), packed.lights());
         } catch (Throwable t) {
             if (blas != null) {
                 destroy(new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                        packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex()));
+                        packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex(), packed.lights()));
             } else {
                 if (upload != null) upload.destroy();
                 if (material != null) material.destroy();
@@ -135,10 +135,11 @@ final class RtSectionBuilder {
         prepared.positions.destroy();
     }
 
-    /** Worker-owned native section state paired with its prepared BLAS. */
+    /** Worker-owned native section state paired with its prepared BLAS. {@code lights} = packed
+     *  section-local RIS light records (CPU-side, flattened into the global buffer at publish). */
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
                            RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas, int[] triBase, float[] torchCenters,
-                           int sx, int sy, int sz, boolean indexedMaterials, boolean indexedUvs) {
+                           int sx, int sy, int sz, boolean indexedMaterials, boolean indexedUvs, float[] lights) {
         void releaseUpload() {
             upload.destroy();
         }
@@ -150,7 +151,7 @@ final class RtSectionBuilder {
 
         PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
             return new PreparedSection(key, positions, indices, uvs, material, upload, replacement,
-                    triBase, torchCenters, sx, sy, sz, indexedMaterials, indexedUvs);
+                    triBase, torchCenters, sx, sy, sz, indexedMaterials, indexedUvs, lights);
         }
     }
 }
