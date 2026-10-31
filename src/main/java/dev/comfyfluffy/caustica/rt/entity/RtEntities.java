@@ -727,6 +727,35 @@ public final class RtEntities {
     public static long probeHandNanos,probeHandTimedFrames;
     public static void resetHandProbeCounters(){probeHandAttempts=0;probeHandDisabled=0;probeHandNull=0;probeHandEmpty=0;probeHandBuildFull=0;probeHandKeyCollide=0;probeHandTris=0;probeHandReused=0;probeHandFallback=0;probeHandNanos=0;probeHandTimedFrames=0;}
     private EntityPrev previousHand;
+    private final Matrix4f handPrevViewRotation=new Matrix4f();
+    private double handPrevCamX,handPrevCamY,handPrevCamZ;
+
+    /** Displacement of {@link #capture}'s vertices as if fixed to the camera since the last hand frame. */
+    private Motion cameraLockedHandMotion(RtContext ctx,FrameBuild build,float ex,float ey,float ez,
+                                          double camX,double camY,double camZ,Matrix4f viewRotation){
+        beginBuildIfNeeded(ctx,build);
+        Matrix4f previousToWorld=new Matrix4f(handPrevViewRotation).invert();
+        float mx=(float)(camX-handPrevCamX),my=(float)(camY-handPrevCamY),mz=(float)(camZ-handPrevCamZ);
+        float[] verts=capture.verts.elements();
+        int vc=capture.verts.size()/3;
+        long bytes=(long)vc*4L*Float.BYTES;
+        MotionSlice disp=build.motion.allocate(ctx,bytes);
+        long out=disp.mapped;
+        var v=new org.joml.Vector3f();
+        for(int i=0;i<vc;i++) {
+            float rx=verts[i*3]-ex,ry=verts[i*3+1]-ey,rz=verts[i*3+2]-ez;
+            v.set(rx,ry,rz);
+            viewRotation.transformDirection(v);
+            previousToWorld.transformDirection(v);
+            MemoryUtil.memPutFloat(out,rx+mx-v.x);
+            MemoryUtil.memPutFloat(out+4,ry+my-v.y);
+            MemoryUtil.memPutFloat(out+8,rz+mz-v.z);
+            MemoryUtil.memPutFloat(out+12,0f);
+            out+=16;
+        }
+        return new Motion(disp.deviceAddress,0f,0f,0f);
+    }
+
     private void captureFirstPerson(RtContext ctx,FrameBuild build,Minecraft mc,int rbx,int rby,int rbz,
                                     double camX,double camY,double camZ,Matrix4f projection,Matrix4f viewRotation){
         long handProbeStart=System.nanoTime();
@@ -814,7 +843,12 @@ public final class RtEntities {
             capture.verts.set(i+1,ey+(float)((capture.verts.getFloat(i+1)-ey)*retract));
             capture.verts.set(i+2,ez+(float)((capture.verts.getFloat(i+2)-ez)*retract));
         }
-        Motion motion=uploadVertexMotion(ctx,build,capture.verts,previousHand,rbx,rby,rbz);
+        // Clipping at the eye plane changes the vertex count as YSM arms animate, leaving no per-vertex history. The
+        // hand then still rides the camera: without this RR reprojected it as world geometry and it smeared on turns.
+        Motion motion=previousHand!=null && previousHand.size!=capture.verts.size()
+                ?cameraLockedHandMotion(ctx,build,ex,ey,ez,camX,camY,camZ,viewRotation)
+                :uploadVertexMotion(ctx,build,capture.verts,previousHand,rbx,rby,rbz);
+        handPrevViewRotation.set(viewRotation);handPrevCamX=camX;handPrevCamY=camY;handPrevCamZ=camZ;
         previousHand=storeEntityPrev(previousHand,capture.verts,rbx,rby,rbz);
         if(RtFirstPerson.probe()){probeHandTris+=capture.idx.size()/3;probeHandTimedFrames++;probeHandNanos+=System.nanoTime()-handProbeStart;}
         boolean handReused=appendRigidReuse(ctx,build,motion,HAND_ENTITY_KEY,MASK_PRIMARY,0f,0f,0f);

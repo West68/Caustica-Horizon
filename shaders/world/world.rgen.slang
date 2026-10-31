@@ -1633,7 +1633,25 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             L+=throughput*heldLighting(hitPos,n,-rd,float3(0,0,0),float3(.02,.02,.02),
                     max(payloadRoughness(),MIN_ROUGH),true,float2(1,1),inWater,waterExt,seed);
             float cosI = clamp(dot(-rd, n), 0.0, 1.0);
-            if (bounce == gvBounce) { // primary water hit: feed RR a smooth dielectric specular surface
+            // Seen steeply, water shows mainly what lies under it, and that moves differently from the surface when the
+            // camera moves. Surface guides made RR reproject the floor with the surface and smear it. As for clear glass,
+            // the floor's virtual image supplies the guides. Decided on the flat plane so ripples cannot make it flicker.
+            float waterEtaRatio = (inWater ? materialIor : 1.0) / (inWater ? 1.0 : materialIor);
+            float waterPlaneCos = abs(dot(-rd, waterPlaneNormal));
+            float waterPlaneSin2 = waterEtaRatio * waterEtaRatio * (1.0 - waterPlaneCos * waterPlaneCos);
+            bool waterUnfold = bounce == gvBounce && bounce < maxBounces && !rc_update && !firstPersonReceiver
+                    && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u && waterPlaneSin2 < 1.0
+                    && fresnelDielectric(waterPlaneCos, inWater ? materialIor : 1.0, inWater ? 1.0 : materialIor) < 0.08;
+            if (waterUnfold) {
+                gv_normal = n;
+                gv_rough = clamp(payloadRoughness(), 0.12, 1.0);
+                gv_hitCamRel = hitPos - worldPush.camOffset;
+                gv_motionHitCamRel = gv_hitCamRel;
+                gv_motionUseRefracted = false;
+                gv_motionObjDisp = float3(0.0, 0.0, 0.0);
+                gv_albedo = float3(0.0, 0.0, 0.0);
+                gv_specAlb = float3(0.02, 0.02, 0.02);
+            } else if (bounce == gvBounce) { // primary water hit: feed RR a smooth dielectric specular surface
                 gv_normal = n;
                 // RR guide only: a perfect mirror tells RR to keep every high-frequency sample, grain included.
                 gv_rough = clamp(payloadRoughness(), 0.12, 1.0);
@@ -1703,6 +1721,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 ro = hitPos + n * SURF_BIAS; // reflected ray stays on the incidence side
             } else {
                 rd = refract(rd, n, etaI / etaT); // F < 1 here, so this is never total internal reflection
+                if (waterUnfold && mirrorGuideAppendTransmission(psrTransform, hitPos - worldPush.camOffset, waterPlaneNormal,
+                        waterEtaRatio, waterPlaneCos, sqrt(1.0 - waterPlaneSin2))) {
+                    gv_psr = true;
+                    gvBounce = bounce + 1;
+                }
                 throughput *= transmission;
                 throughTransmission = true;
                 ro = hitPos - n * SURF_BIAS;       // transmitted ray crosses to the far side
