@@ -624,6 +624,34 @@ bool reflectedSky(float3 origin, float3 dir, out float3 sky) {
     return miss;
 }
 
+// As reflectedSky where it escapes, and otherwise the sun on the reflected surface, so the part of a reflection that holds
+// most of its energy needs no random choice. shaded: that surface is diffuse enough for this to replace its own sun sample.
+bool reflectedDirect(float3 origin, float3 dir, inout uint seed, out float3 radiance, out bool shaded) {
+    radiance = float3(0.0, 0.0, 0.0);
+    shaded = false;
+    Payload saved = payload;
+    payload.hitT = -1.0;
+    payloadSetTraceState(!afterDiffuse, RAY_CONE_MIN_WIDTH, RAY_CONE_MIN_SPREAD);
+    HitObject hObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_NONE, secondaryReceiverMask, SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u,
+            makeRay(origin, RAY_TMIN, dir, 10000.0), payload);
+    HitObject::Invoke(topLevelAS, hObj, payload);
+    bool miss = payload.hitT < 0.0;
+    if (miss) {
+        radiance = max(payload.albedo, float3(0.0, 0.0, 0.0));
+    } else if (payloadMaterial() == MATERIAL_OPAQUE && payloadMetalness() < 0.5) {
+        shaded = true;
+        float3 albedo = max(payload.albedo, float3(0.0, 0.0, 0.0)) * (1.0 - payloadMetalness());
+        float3 hitNormal = payload.normal;
+        float3 hitPos = origin + dir * payload.hitT + hitNormal * SURF_BIAS;
+        float3 lightDir = worldPush.lightDir.xyz;
+        if (worldPush.lightDir.w > 0.0) lightDir = sampleSquare(lightDir, worldPush.lightDir.w, seed);
+        float ndl = dot(hitNormal, lightDir);
+        if (ndl > 0.0) radiance = albedo * INV_PI * worldPush.lightRadiance.xyz * ndl * visibility(hitPos, lightDir, 10000.0);
+    }
+    payload = saved;
+    return miss;
+}
+
 float3 heldLighting(float3 hitPos,float3 n,float3 v,float3 diffAlb,float3 F0,float rough,
         bool pbr,float2 localVisibility,bool inWater,float3 extinction,inout uint seed) {
     if((payload.flags & PAYLOAD_HELD_OWNER)!=0u)return float3(0,0,0);
@@ -1297,6 +1325,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     // Surfaces SHADED so far, unlike `bounce`, which also counts glass/water interfaces: a wall behind a
     // pane is bounce 1 but shaded depth 0 — visually primary, so it keeps full RIS.
     int diffuseDepth = 0;
+    bool skipSunOnce = false; // the next surface's sun was already added without a random choice (reflectedDirect)
+    float psrPrimarySpec = 0.0; // Fresnel of the dielectric the guides were unfolded through
+    int clearInterfaces = 0; // unfolded glass/water faces so far: they spend bounces without shading anything
     bool pathDiffuse = false; // left a diffuse lobe; diffuseDepth also counts mirrors, whose reflections must stay exact
     bool risRanPrev = false; // the previous shaded vertex resampled emitters, so direct hits on them are gated
     for (int bounce = 0; bounce <= maxBounces; bounce++) {
@@ -1466,16 +1497,22 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             float3 glassMirror=reflect(rd,staticGlass?normalize(lerp(refractNormal,n,0.15)):n);
             if(deterministic && !glassSkyDone && F>1.0e-4) { // eta=1 mob veils reflect nothing
                 glassSkyDone=true;
-                glassHitSurface=!reflectedSky(hitPos+n*SURF_BIAS,glassMirror,glassSky);
+                float3 glassDirect=float3(0.0);
+                bool glassShaded=false;
+                if(F>=0.06 && !afterDiffuse && !heldGlass) {
+                    glassHitSurface=!reflectedDirect(hitPos+n*SURF_BIAS,glassMirror,seed,glassDirect,glassShaded);
+                    if(!glassHitSurface)glassSky=glassDirect;
+                    else if(glassShaded)L+=throughput*F*glassDirect;
+                } else glassHitSurface=!reflectedSky(hitPos+n*SURF_BIAS,glassMirror,glassSky);
                 if(glassHitSurface) {
                     // Reflected geometry at a steep view is too faint to see but its samples read as grain, so it fades
                     // out. Above that a low floor on the chance: each reflected pixel loses the view through the pane.
                     // Held glass reflects nothing anyone can make out, so it never takes a reflected path.
-                    float reflectWeight=heldGlass?0.0:F*smoothstep(0.06,0.18,F);
+                    float reflectWeight=heldGlass?0.0:F*smoothstep(0.10,0.25,F);
                     float reflectChance=reflectWeight>0.0?max(reflectWeight,0.06):0.0;
                     reflected=reflectChance>0.0 && glassFresnelSample(DispatchRaysIndex().xy+uint2(0x9E3779B9u,0u),glassSampleOrdinal)<reflectChance;
                     throughput*=reflected?reflectWeight/reflectChance:(1.0-F)/(1.0-reflectChance);
-                    if(reflected) { reflectedPathBase=L; reflectedPathCap=reflectWeight/reflectChance; }
+                    if(reflected) { reflectedPathBase=L; reflectedPathCap=reflectWeight/reflectChance; skipSunOnce=glassShaded; }
                 }
             }
             if(!totalInternal && !deterministic) {
@@ -1533,7 +1570,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 throughTransmission=true;
                 // Still on the camera's straight line of sight (clear static glass, unfolded guides).
                 cameraThroughGlass=unfold && clearGlass && !heldGlass && !mobVeil && (bounce==0 || viaGlass);
-                if(unfold)psrTint*=tint;
+                if(unfold) {
+                    psrTint*=tint; psrPrimarySpec=max(psrPrimarySpec,F);
+                    // A pane is two faces: without this the floor behind it was at bounce 2, where roulette cuts hard and
+                    // indirect light ends early, which read as grain and a darker room than the same view without glass.
+                    if(clearInterfaces<4) { clearInterfaces++; maxBounces+=1; rrStart+=1; }
+                }
                 rd=nextDir;ro=hitPos-boundaryNormal*GLASS_TRANSMIT_BIAS;
             }
             if(unfold) { gv_psr=true;gvBounce=bounce+1; }
@@ -1688,17 +1730,25 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             if (waterSplit) {
                 // Escaping reflections add the sky exactly; ones that hit geometry follow a real path.
                 float3 waterSky;
-                if (reflectedSky(hitPos + n * SURF_BIAS, reflect(rd, n), waterSky)) {
+                bool waterShaded = false;
+                bool waterMiss;
+                if (F >= 0.06 && !afterDiffuse && !inWater) {
+                    waterMiss = reflectedDirect(hitPos + n * SURF_BIAS, reflect(rd, n), seed, waterSky, waterShaded);
+                    if (waterShaded) L += throughput * F * waterSky;
+                } else {
+                    waterMiss = reflectedSky(hitPos + n * SURF_BIAS, reflect(rd, n), waterSky);
+                }
+                if (waterMiss) {
                     L += throughput * F * waterSky;
                     throughput *= 1.0 - F;
                     reflectNow = false;
                 } else {
                     // As for glass: faint reflected geometry fades out, a low floor on the chance above that.
-                    float reflectWeight = F * smoothstep(0.04, 0.10, F);
+                    float reflectWeight = F * smoothstep(0.10, 0.25, F);
                     float reflectChance = reflectWeight > 0.0 ? max(reflectWeight, 0.10) : 0.0;
                     reflectNow = reflectChance > 0.0 && glassFresnelSample(DispatchRaysIndex().xy + uint2(0u, 0x85EBCA6Bu), glassSampleOrdinal) < reflectChance;
                     throughput *= reflectNow ? reflectWeight / reflectChance : (1.0 - F) / (1.0 - reflectChance);
-                    if (reflectNow) { reflectedPathBase = L; reflectedPathCap = reflectWeight / reflectChance; }
+                    if (reflectNow) { reflectedPathBase = L; reflectedPathCap = reflectWeight / reflectChance; skipSunOnce = waterShaded; }
                 }
             } else {
                 // Nearly all reflection (far grazing water, close to total reflection): always follow it, so the pixel
@@ -1723,6 +1773,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 rd = refract(rd, n, etaI / etaT); // F < 1 here, so this is never total internal reflection
                 if (waterUnfold && mirrorGuideAppendTransmission(psrTransform, hitPos - worldPush.camOffset, waterPlaneNormal,
                         waterEtaRatio, waterPlaneCos, sqrt(1.0 - waterPlaneSin2))) {
+                    psrPrimarySpec = max(psrPrimarySpec, F);
+                    if (clearInterfaces < 4) { clearInterfaces++; maxBounces += 1; rrStart += 1; }
                     gv_psr = true;
                     gvBounce = bounce + 1;
                 }
@@ -1813,13 +1865,13 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 // bounces without limit: a closed room of bright walls came out several times brighter than
                 // the traced path with the cache off, which read as light leaking in.
                 if (rc_update) {
-                } else if ((worldPush.cacheFlags & 1u) != 0u && (rcFit > 0.75 || bounce>=2)) {
+                } else if ((worldPush.cacheFlags & 1u) != 0u && (rcFit > 0.75 || bounce-clearInterfaces>=2)) {
                     // The visible pass used to switch from the traced path to the cache in one step, which drew
                     // a line at a fixed distance from the camera. Across fit 0.75..1.35 the cached radiance
                     // takes over a growing share of the path's remaining throughput while the rest keeps
                     // tracing: continuous, no random choice, and only a narrow band traces further than before.
                     // From the second bounce on the cache ends the path wherever it has data, whatever the footprint.
-                    float rcTake = bounce>=2 ? 1.0 : smoothstep(0.75, 1.35, rcFit);
+                    float rcTake = bounce-clearInterfaces>=2 ? 1.0 : smoothstep(0.75, 1.35, rcFit);
                     float3 cached, cachedNext;
                     bool hit = rcQuery(entries, resolved, hash, worldPush.cacheCapacity, worldPush.cacheParams.y, cached);
                     if (rcW > 0.0) {
@@ -1881,7 +1933,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             lightDir = sampleSquare(lightDir, lightHalfAngle, seed);
         }
         float ndl = max(0.0, dot(n, lightDir));
-        if (ndl > 0.0) {
+        bool skipSun = skipSunOnce;
+        skipSunOnce = false;
+        if (ndl > 0.0 && !skipSun) {
             float3 vis = visibility(p, lightDir, 10000.0);
             // Underwater receiver whose shadow ray crossed a water surface: scale the direct light by
             // the wave-refraction caustic at the exit point. Focusing scales the incident irradiance,
@@ -1955,7 +2009,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             }
         }
 
-        if(bounce<2)L+=throughput*heldLighting(hitPos,n,v,diffAlb,F0,rough,pbr,heldHeightVisibility,inWater,waterExt,seed);
+        if(bounce-clearInterfaces<2)L+=throughput*heldLighting(hitPos,n,v,diffAlb,F0,rough,pbr,heldHeightVisibility,inWater,waterExt,seed);
 
         // RIS direct lighting from block emitters: front lobe + SSS backlighting share ONE shadow ray (a light
         // is either in front of n or behind it). SSS only on the surfaces the sun SSS term also serves.
@@ -2056,7 +2110,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         // Russian roulette on deeper bounces: survive with prob = max channel, rescale survivors.
         if (bounce >= rrStart && !psrMirror) {
             // A floor on the first bounce: cutting it hard left too little signal for the denoiser while moving.
-            float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), bounce == 1 ? 0.75 : 0.02, 1.0);
+            float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), bounce - clearInterfaces == 1 ? 0.75 : 0.02, 1.0);
             if (rndf(seed) > q) {
                 break;
             }
@@ -2066,7 +2120,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     // One reflected sample is a lone pixel among its neighbours: a bright one is a sparkle the denoiser keeps while moving.
     if (reflectedPathCap >= 0.0) {
         float3 reflectedPart = max(L - reflectedPathBase, float3(0.0, 0.0, 0.0));
-        float limit = reflectedPathCap * luminance(worldPush.lightRadiance.xyz) * 0.5;
+        float limit = reflectedPathCap * luminance(worldPush.lightRadiance.xyz) * 0.2;
         float amount = luminance(reflectedPart);
         if (amount > limit) L = reflectedPathBase + reflectedPart * (limit / amount);
     }
@@ -2078,6 +2132,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         if(dot(gv_normal,gv_normal)>0.25) gv_normal=mirrorGuideNormal(psrTransform,gv_normal);
         gv_albedo*=psrTint;
         gv_specAlb*=psrTint;
+        // The dielectric in front still reflects: RR's reflection quality depends on seeing both surfaces' specular.
+        gv_specAlb=saturate(psrPrimarySpec+(1.0-psrPrimarySpec)*gv_specAlb);
     }
     // Update pass: each recorded vertex receives the radiance that left it along this path
     // (its own emission/direct light plus everything gathered after it), divided by its throughput.
