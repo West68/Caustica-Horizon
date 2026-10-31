@@ -23,12 +23,9 @@ import net.minecraft.client.renderer.state.level.QuadParticleRenderState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
-import net.minecraft.world.phys.shapes.CollisionContext;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.lwjgl.system.MemoryUtil;
@@ -877,11 +874,17 @@ public final class RtEntities {
         org.joml.Vector3fc camForward = mc.gameRenderer.mainCamera().forwardVector();
         int capturedThisFrame = 0;
         for (Entity entity : level.entitiesForRendering()) {
-            if (build.full() || capturedThisFrame >= maxOrdinaryEntities()) {
-                break;
-            }
-            if (entity.isInvisible()) {
-                continue;
+            // Over budget stops GEOMETRY, not name tags: a server board can easily sit past the cap, and
+            // vanilla would still draw its text.
+            boolean overBudget = build.full() || capturedThisFrame >= maxOrdinaryEntities();
+            // Invisible entities are not "nothing to draw": vanilla still draws their name tag, and an
+            // invisible armor stand still renders what it wears (server holograms: text-only stands, or
+            // book/head/flags wired into a display). Only the body itself is hidden, which the vanilla
+            // renderer already does from the render state, so it must reach submit() untouched.
+            boolean invisible = entity.isInvisible();
+            boolean meshWanted = true;
+            if (invisible) {
+                meshWanted = invisibleArmorStandWearsSomething(entity);
             }
             // A spectator camera has no body (vanilla still poses its head); filmed and free-cam shots must not
             // carry a shadow of the camera itself.
@@ -926,6 +929,11 @@ public final class RtEntities {
                 // name-tagged entity. RtWorldOverlay renders them in a completely separate raster pass.
                 if (nameTags && !firstPersonSelf && state.nameTag != null) {
                     captureNameTag(level, state, ix, iy, iz, rbx, rby, rbz);
+                }
+                // No geometry this frame: a body-only invisible entity (or a full budget). Its name tag was
+                // already gathered above, and it never takes part in motion history because it never meshes.
+                if (!meshWanted || overBudget) {
+                    continue;
                 }
                 collector.begin(capture, true);
                 dev.comfyfluffy.caustica.rt.RtHeldLights.beginPlayerCapture(entity == mc.player);
@@ -1032,11 +1040,28 @@ public final class RtEntities {
      * together in {@code EntityRenderer.extractNameTags}). Positions are world-space (unrebased) until the
      * very end, matching {@code level.clip}'s coordinate space; the rebase subtraction happens last.
      *
-     * <p>Vanilla draws a translucent "ghost" copy of the tag through walls (see {@code
-     * SubmitNodeCollection.submitNameTag}'s {@code seeThroughNameTags} phase) instead of hiding it — v1
-     * here just hides occluded tags, a simplification to avoid a second draw/blend mode; revisit if that
-     * turns out to look wrong in practice.
+     * <p>Vanilla draws name tags in the {@code seeThroughNameTags} phase, i.e. through walls; this matches
+     * that (no occlusion cull, no separate ghost pass needed because the raster overlay never depth-tests
+     * tags either).
      */
+    /**
+     * An invisible non-armor-stand entity contributes nothing but its name tag, so it never needs a mesh.
+     * An invisible armor stand does: vanilla keeps rendering everything in its six equipment slots while
+     * hiding the pose body. Everything empty is the server-hologram case (hundreds of them on a board),
+     * and costs one extract for the tag instead of a mesh build, a BLAS record and a TLAS slot.
+     */
+    private static boolean invisibleArmorStandWearsSomething(net.minecraft.world.entity.Entity entity) {
+        if (!(entity instanceof net.minecraft.world.entity.decoration.ArmorStand stand)) {
+            return false;
+        }
+        for (net.minecraft.world.entity.EquipmentSlot slot : net.minecraft.world.entity.EquipmentSlot.values()) {
+            if (!stand.getItemBySlot(slot).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void captureNameTag(ClientLevel level, EntityRenderState state, double ix, double iy, double iz,
                                  int rbx, int rby, int rbz) {
         Vec3 attach = state.nameTagAttachment;
@@ -1046,14 +1071,10 @@ public final class RtEntities {
         double wx = ix + attach.x;
         double wy = iy + attach.y + 0.5;
         double wz = iz + attach.z;
-        // The 5-arg (Vec3,Vec3,Block,Fluid,Entity) overload NPEs on a null entity (it unconditionally builds
-        // an EntityCollisionContext via CollisionContext.of, which requireNonNulls it) — this raycast isn't
-        // for any particular entity's own collision shape, so pass an empty CollisionContext directly.
-        HitResult hit = level.clip(new ClipContext(cameraState.pos, new Vec3(wx, wy, wz),
-                ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, CollisionContext.empty()));
-        if (hit.getType() != HitResult.Type.MISS) {
-            return; // a block is between the camera and the tag
-        }
+        // No occlusion test: vanilla submits name tags in the see-through phase (no depth test), so a tag is
+        // drawn through walls and never hidden by the block it is glued to. Culling on a camera->tag clip
+        // hid exactly the server-board case (a marker stand standing in front of, or inside, a block face)
+        // while vanilla kept showing it.
         nameTagBatches.add(new NameTagEntity(state.nameTag,
                 (float) (wx - rbx), (float) (wy - rby), (float) (wz - rbz)));
     }

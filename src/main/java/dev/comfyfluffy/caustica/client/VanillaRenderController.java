@@ -62,7 +62,14 @@ public final class VanillaRenderController {
 	public void releaseRasterForResume() {
 		if (!this.rtActive) {
 			this.rtActive = true;
-			releaseRasterTerrain();
+			// A Sodium reload rebuilds every visible section on the raster side; doing that on every key press
+			// during a stuck rebuild storm is what made repeated toggles worse than useless. Once per 5 s is
+			// plenty - the buffers it frees cannot come back that fast.
+			long now = System.currentTimeMillis();
+			if (now - lastRasterReleaseMs >= 5000L) {
+				lastRasterReleaseMs = now;
+				releaseRasterTerrain();
+			}
 		}
 	}
 
@@ -176,6 +183,8 @@ public final class VanillaRenderController {
 			latchFailure("missed before-hand RT composite seam after vanilla world was skipped");
 		}
 	}
+
+	private static long lastRasterReleaseMs = 0L;
 
 	private String findInactiveReason(RenderTarget mainTarget) {
 		if (this.failureLatched || RtComposite.INSTANCE.hasFailed()) {

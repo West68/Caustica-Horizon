@@ -33,6 +33,14 @@ public final class CausticaClient implements ClientModInitializer {
 	private static boolean recoveryNotified = false;
 	private static boolean watchResume = false;
 	private static long lastToggleMs = 0L;
+	// A recovery rebuild tears RT down and brings it back up over several ticks. Mashing the toggle during
+	// that window used to restart the whole cycle (and reset the stuck timer below), so RT never finished
+	// coming up - the "press T after a resource reload and ray tracing never returns" report. The toggle now
+	// only records the wanted state while a rebuild is running and applies it once the rebuild finishes.
+	private static boolean rebuildInProgress = false;
+	private static long rebuildStartedMs = 0L;
+	private static Boolean pendingToggle = null;
+	private static long lastRasterReleaseMs = 0L;
 
 	@Override
 	public void onInitializeClient() {
@@ -48,6 +56,14 @@ public final class CausticaClient implements ClientModInitializer {
 				if (now - lastToggleMs < 500L) continue;
 				lastToggleMs = now;
 				boolean enabled = !dev.comfyfluffy.caustica.CausticaConfig.Rt.ENABLED.value();
+				if (rebuildInProgress) {
+					// Never destroy a rebuild that is still running: remember the target and let it apply.
+					pendingToggle = enabled;
+					CausticaMod.LOGGER.info("RT toggle during rebuild: requested={} queued until the rebuild finishes ({} ms in)", enabled, now - rebuildStartedMs);
+					if (client.player != null) client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable(
+							"caustica.enhanced.key.rebuild.start"));
+					continue;
+				}
 				dev.comfyfluffy.caustica.CausticaConfig.Rt.ENABLED.set(enabled);
 				dev.comfyfluffy.caustica.CausticaConfig.save();
 				if (client.player != null) client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable(
@@ -94,7 +110,9 @@ public final class CausticaClient implements ClientModInitializer {
 					watchResume = true;
 				}
 				recoveryRebuilding = false;
-				recoveryWaitTicks = 0;
+				// Deliberately NOT recoveryWaitTicks = 0: every toggle used to restart the stuck countdown,
+				// so a player who mashed the key never got a single recovery attempt ("RT is not rendering"
+				// never appears in their log). Only a real recovery clears it, below.
 			}
 			if (recoverIfStuck(client)) {
 				return;
@@ -104,6 +122,18 @@ public final class CausticaClient implements ClientModInitializer {
 				RtContext ctx = RtContext.get();
 				if (ctx != null) {
 					rtInitDone = true;
+					if (rebuildInProgress) {
+						rebuildInProgress = false;
+						long ms = System.currentTimeMillis() - rebuildStartedMs;
+						CausticaMod.LOGGER.info("RT rebuild finished in {} ms (attempts used: {})", ms, recoveryAttempts);
+						if (client.player != null) client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable(
+								"caustica.enhanced.key.rebuild.done", String.format(java.util.Locale.ROOT, "%.1f", ms / 1000.0)));
+						// A rebuild that reached bring-up is a real recovery: only now is the counter reset.
+						recoveryWaitTicks = 0;
+						recoveryAttempts = 0;
+						recoveryNotified = false;
+						applyPendingToggle(client);
+					}
 					if (restarting && dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()) {
 						dev.comfyfluffy.caustica.streamline.StreamlineSwapchainCoordinator.INSTANCE.requestReconfigure();
 					}
@@ -167,10 +197,14 @@ public final class CausticaClient implements ClientModInitializer {
 		}
 		recoveryWaitTicks = 0;
 		if (recoveryAttempts >= RECOVERY_ATTEMPTS) {
-			if (!recoveryNotified && client.player != null) {
+			if (!recoveryNotified) {
 				recoveryNotified = true;
-				CausticaMod.LOGGER.error("RT did not recover after {} attempts", RECOVERY_ATTEMPTS);
-				client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable("caustica.enhanced.key.toggle.failed"));
+				CausticaMod.LOGGER.error("RT did not recover after {} attempts (last state: rtInitDone={}, context={}, terrain={})",
+						RECOVERY_ATTEMPTS, rtInitDone, dev.comfyfluffy.caustica.rt.RtContext.currentOrNull() != null,
+						dev.comfyfluffy.caustica.rt.terrain.RtTerrain.currentOrNull() != null);
+				rebuildInProgress = false;
+				if (client.player != null) client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable(
+						"caustica.enhanced.key.rebuild.failed", RECOVERY_ATTEMPTS));
 			}
 			return false;
 		}
@@ -181,10 +215,32 @@ public final class CausticaClient implements ClientModInitializer {
 			RtComposite.INSTANCE.resetFailureLatch();
 			return false;
 		}
+		CausticaMod.LOGGER.warn("RT rebuild {} of {} starting: tearing RT down and rebuilding it", recoveryAttempts, RECOVERY_ATTEMPTS);
 		shutdownRt();
 		runtimeWasRequested = false;
 		recoveryRebuilding = true;
+		rebuildInProgress = true;
+		rebuildStartedMs = System.currentTimeMillis();
+		if (client.player != null) client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable(
+				"caustica.enhanced.key.rebuild.start"));
 		return true;
+	}
+
+	/** Apply a toggle that arrived while a rebuild was running, now that the rebuild has finished. */
+	private static void applyPendingToggle(net.minecraft.client.Minecraft client) {
+		if (pendingToggle == null) {
+			return;
+		}
+		boolean wanted = pendingToggle;
+		pendingToggle = null;
+		if (dev.comfyfluffy.caustica.CausticaConfig.Rt.ENABLED.value() == wanted) {
+			return;
+		}
+		dev.comfyfluffy.caustica.CausticaConfig.Rt.ENABLED.set(wanted);
+		dev.comfyfluffy.caustica.CausticaConfig.save();
+		CausticaMod.LOGGER.info("Applied queued RT toggle: enabled={}", wanted);
+		if (client.player != null) client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable(
+				wanted ? "caustica.enhanced.key.toggle.on" : "caustica.enhanced.key.toggle.off"));
 	}
 
 	private static void shutdownRt() {

@@ -1328,6 +1328,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     bool skipSunOnce = false; // the next surface's sun was already added without a random choice (reflectedDirect)
     float psrPrimarySpec = 0.0; // Fresnel of the dielectric the guides were unfolded through
     int clearInterfaces = 0; // unfolded glass/water faces so far: they spend bounces without shading anything
+    // Rain veil sheets passed on this path. They are not vertices, so they never spend a bounce (see the
+    // rain branch); this only bounds a pathological stack of them.
+    int veilCrossings = 0;
+    static const int MAX_RAIN_VEIL_CROSSINGS = 8;
     bool pathDiffuse = false; // left a diffuse lobe; diffuseDepth also counts mirrors, whose reflections must stay exact
     bool risRanPrev = false; // the previous shaded vertex resampled emitters, so direct hits on them are gated
     for (int bounce = 0; bounce <= maxBounces; bounce++) {
@@ -1602,10 +1606,22 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             L += throughput * a * (worldPush.lightRadiance.xyz * 0.001 + 0.002);
             throughput *= 1.0 - a;
             ro = hitPos + rd * SURF_BIAS;
-            gvBounce = bounce + 1;
             cameraThroughRain = bounce == 0;
-            if (bounce >= maxBounces) break;
-            maxBounces += 1; // the veil is not a path vertex
+            // The veil is NOT a path vertex: step over it without advancing the bounce index, so the surface
+            // behind is shaded at exactly the depth it would have with no rain. Advancing (the old
+            // maxBounces += 1) made every bounce==0 rule fire on a bounce==1 surface - roulette floor 0.75
+            // dropping to 0.02, the radiance cache taking over, relief/depth/held-light/volume/DH branches
+            // skipped, receiver mask and RR guides taken from the wrong path - which read as rain-streak
+            // shaped bright speckle on every surface facing the camera. Bounded, because a ray can cross
+            // several veil layers; past the cap the veil falls back to occupying a bounce (old behaviour),
+            // which cannot loop.
+            if (veilCrossings < MAX_RAIN_VEIL_CROSSINGS) {
+                veilCrossings++;
+                bounce--; // the for-loop increment restores the same depth for the next hit
+            } else if (bounce >= maxBounces) {
+                break;
+            }
+            gvBounce = bounce + 1; // the vertex feeding the guides is the one the next iteration runs at
             continue;
         }
         if (material == MATERIAL_PARTICLE) {
