@@ -1,4 +1,5 @@
 {
+  "caustica.enhanced.key.toggle.failed": "Ray tracing could not resume. Please restart the game.",
   "caustica.enhanced.nebula": "Nebula",
   "caustica.enhanced.nebula.tooltip": "The nebula in the night sky. Off leaves only stars and the moon.",
   "caustica.enhanced.cloudShadow": "Cloud shadows",

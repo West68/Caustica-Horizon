@@ -511,11 +511,13 @@ Payload makeRadiancePayload(uint flags, uint rayCone) {
     return p;
 }
 
+// After a diffuse vertex a cutout's holes average out of the image, and skipping any-hit there saves its texture fetch.
+static bool afterDiffuse=false;
 HitObject traceRadianceReordered(uint cullMask, float3 ro, float tmin, float3 rd, float tmax) {
     uint traceFlags = payload.flags;
     uint traceCone = payload.rayCone;
     Payload tracePayload = makeRadiancePayload(traceFlags, traceCone);
-    HitObject hObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_NONE, cullMask,
+    HitObject hObj = HitObject::TraceRay(topLevelAS, afterDiffuse?RAY_FLAG_FORCE_OPAQUE:RAY_FLAG_NONE, cullMask,
             SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u, makeRay(ro, tmin, rd, tmax), tracePayload);
 #if !defined(CAUSTICA_DISABLE_REORDER)
     // Optional coherence hint (cacheFlags bit 2): also group by path stage (primary / indirect, specular
@@ -608,7 +610,7 @@ bool reflectedSky(float3 origin, float3 dir, out float3 sky) {
     sky = float3(0.0, 0.0, 0.0);
     Payload saved = payload;
     payload.hitT = -1.0;
-    payloadSetTraceState(true, RAY_CONE_MIN_WIDTH, RAY_CONE_MIN_SPREAD);
+    payloadSetTraceState(!afterDiffuse, RAY_CONE_MIN_WIDTH, RAY_CONE_MIN_SPREAD);
     HitObject hObj = HitObject::TraceRay(topLevelAS,
             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
             secondaryReceiverMask, SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u,
@@ -1295,8 +1297,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     // Surfaces SHADED so far, unlike `bounce`, which also counts glass/water interfaces: a wall behind a
     // pane is bounce 1 but shaded depth 0 — visually primary, so it keeps full RIS.
     int diffuseDepth = 0;
+    bool pathDiffuse = false; // left a diffuse lobe; diffuseDepth also counts mirrors, whose reflections must stay exact
     bool risRanPrev = false; // the previous shaded vertex resampled emitters, so direct hits on them are gated
     for (int bounce = 0; bounce <= maxBounces; bounce++) {
+        afterDiffuse=pathDiffuse;
         payload.hitT = -1.0;
         payloadSetTraceState(showCelestial, rayConeWidth, rayConeSpread);
         uint incomingCone=payload.rayCone;
@@ -1533,7 +1537,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 rd=nextDir;ro=hitPos-boundaryNormal*GLASS_TRANSMIT_BIAS;
             }
             if(unfold) { gv_psr=true;gvBounce=bounce+1; }
-            showCelestial=true;
+            // Behind a diffuse vertex the sun already came through its shadow ray, which is tinted by glass.
+            // Showing the disc again counts it twice, as lone white pixels in any room with a window.
+            showCelestial=!pathDiffuse;
             if(bounce>=rrStart && !unfold) {
                 float q=clamp(max(throughput.r,max(throughput.g,throughput.b)),0.02,1.0);
                 if(rndf(seed)>q)break;
@@ -1599,7 +1605,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             ro = hitPos + n * SURF_BIAS;
             rd = cosineDir(n, seed);
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
-            showCelestial = false; // diffuse receiver: direct sun/moon was handled by NEE above
+            showCelestial = false; pathDiffuse = true; // diffuse receiver: direct sun/moon was handled by NEE above
             continue;
         }
 
@@ -1617,6 +1623,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             // Ripple the (near-flat) surface normal before any Fresnel/guide use → glints, broken
             // reflections, wobbling refraction. This water body's biome tint (carried in payload.albedo
             // for water hits) sets the absorption applied to the next submerged segment.
+            float3 waterPlaneNormal = n;
             if (waterWaves) {
                 // World-stable wave domain: rebased hit XZ + the pushed anchor (terrain origin mod 4096)
                 // reconstructs a world-pinned coordinate that survives the per-move terrain rebase.
@@ -1679,6 +1686,15 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 reflectNow = rndf(seed) < F;
             }
             if (reflectNow) {
+                // Seen from below, total internal reflection is a perfect mirror. Like a metal mirror the reflected
+                // vertex supplies the guides, so RR keeps that surface's texture instead of denoising it away where
+                // only soft indirect light reaches it. The flat plane keeps the guide motion steady under ripples.
+                if (F >= 0.999 && bounce == gvBounce && !rc_update && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u) {
+                    mirrorGuideAppend(psrTransform, hitPos - worldPush.camOffset, waterPlaneNormal);
+                    gvBounce = bounce + 1;
+                    if (!gv_psr) { maxBounces += 1; rrStart += 1; }
+                    gv_psr = true;
+                }
                 rd = reflect(rd, n);
                 ro = hitPos + n * SURF_BIAS; // reflected ray stays on the incidence side
             } else {
@@ -1691,8 +1707,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 inWater = materialEntering;
             }
             // Specular interface (mirror reflect / clear refract): the continuation ray should see the
-            // sun/moon disc directly — no NEE happened here to double-count it.
-            showCelestial = true;
+            // sun/moon disc directly — no NEE happened here to double-count it. Behind a diffuse vertex one did.
+            showCelestial = !pathDiffuse;
             if (bounce >= rrStart) {
                 float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
                 if (rndf(seed) > q) {
@@ -1990,14 +2006,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 if (guideWeight <= 0.0) break;
                 ro = p;
                 rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
-                showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
+                showCelestial = false; pathDiffuse = true; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
             }
         } else {
             float guideWeight;
             rd = torchGuidedDiffuse(p, n, seed, guideWeight);
             throughput *= albedo * guideWeight;
             if (guideWeight <= 0.0) break;
-            showCelestial = false; // diffuse bounce: hide the disc (covered by NEE)
+            showCelestial = false; pathDiffuse = true; // diffuse bounce: hide the disc (covered by NEE)
             ro = p;
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
         }

@@ -58,6 +58,22 @@ public final class VanillaRenderController {
 		}
 	}
 
+	/** Frees raster terrain ahead of RT bring-up, which would otherwise allocate while it still holds its VRAM. */
+	public void releaseRasterForResume() {
+		if (!this.rtActive) {
+			this.rtActive = true;
+			releaseRasterTerrain();
+		}
+	}
+
+	public boolean hasLatchedFailure() {
+		return this.failureLatched;
+	}
+
+	public boolean onVanillaFallback() {
+		return this.failureLatched || RtComposite.INSTANCE.hasFailed();
+	}
+
 	/** Explicit mode re-enable / world invalidation retries a fresh generation, not every failed frame. */
 	public void resetRuntimeState() {
 		failureLatched = false;

@@ -19,6 +19,20 @@ import net.fabricmc.fabric.api.client.rendering.v1.InvalidateRenderStateCallback
 public final class CausticaClient implements ClientModInitializer {
 	private static boolean rtInitDone = false;
 	private static boolean runtimeWasRequested = true;
+	// One failed frame latches the vanilla path, and turning RT back on competes for VRAM with the raster world that
+	// ran meanwhile. Such failures can clear: retry in place first, then rebuild all of RT, a bounded number of times.
+	private static final int RECOVERY_FAILED_TICKS = 5 * 20;
+	private static final int RECOVERY_STUCK_TICKS = 60 * 20; // RT back on, nothing failed, world still not replaced
+	private static final int RECOVERY_HEALTHY_TICKS = 60 * 20;
+	private static final int RECOVERY_SOFT_ATTEMPTS = 2;
+	private static final int RECOVERY_ATTEMPTS = 5;
+	private static int recoveryAttempts = 0;
+	private static int recoveryWaitTicks = 0;
+	private static int recoveryHealthyTicks = 0;
+	private static boolean recoveryRebuilding = false;
+	private static boolean recoveryNotified = false;
+	private static boolean watchResume = false;
+	private static long lastToggleMs = 0L;
 
 	@Override
 	public void onInitializeClient() {
@@ -29,6 +43,10 @@ public final class CausticaClient implements ClientModInitializer {
 						org.lwjgl.glfw.GLFW.GLFW_KEY_K, net.minecraft.client.KeyMapping.Category.MISC));
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			while (toggleKey.consumeClick()) {
+				// Held or mashed keys would tear down and rebuild all of RT for each repeat.
+				long now = System.currentTimeMillis();
+				if (now - lastToggleMs < 500L) continue;
+				lastToggleMs = now;
 				boolean enabled = !dev.comfyfluffy.caustica.CausticaConfig.Rt.ENABLED.value();
 				dev.comfyfluffy.caustica.CausticaConfig.Rt.ENABLED.set(enabled);
 				dev.comfyfluffy.caustica.CausticaConfig.save();
@@ -69,6 +87,17 @@ public final class CausticaClient implements ClientModInitializer {
 				runtimeWasRequested = true;
 				VanillaRenderController.INSTANCE.resetRuntimeState();
 				RtComposite.INSTANCE.resetFailureLatch();
+				VanillaRenderController.INSTANCE.releaseRasterForResume();
+				if (!recoveryRebuilding) {
+					recoveryAttempts = 0;
+					recoveryNotified = false;
+					watchResume = true;
+				}
+				recoveryRebuilding = false;
+				recoveryWaitTicks = 0;
+			}
+			if (recoverIfStuck(client)) {
+				return;
 			}
 			// Bring up the RT device/context once; terrain residency + the composite follow below.
 			if (!rtInitDone && RtDeviceBringup.rtRequested()) {
@@ -115,6 +144,47 @@ public final class CausticaClient implements ClientModInitializer {
 		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
 			shutdownRt();
 		});
+	}
+
+	/** True when RT was torn down for a rebuild, which the next tick starts through the restart path. */
+	private static boolean recoverIfStuck(net.minecraft.client.Minecraft client) {
+		boolean failed = VanillaRenderController.INSTANCE.onVanillaFallback();
+		if (client.level == null || (!failed && VanillaRenderController.INSTANCE.wasWorldSkippedThisFrame())) {
+			recoveryWaitTicks = 0;
+			if (client.level != null && ++recoveryHealthyTicks >= RECOVERY_HEALTHY_TICKS) {
+				recoveryAttempts = 0;
+				recoveryNotified = false;
+				watchResume = false;
+			}
+			return false;
+		}
+		if (!failed && !watchResume) {
+			return false; // First join: terrain and materials can legitimately take a long time.
+		}
+		recoveryHealthyTicks = 0;
+		if (++recoveryWaitTicks < (failed ? RECOVERY_FAILED_TICKS : RECOVERY_STUCK_TICKS)) {
+			return false;
+		}
+		recoveryWaitTicks = 0;
+		if (recoveryAttempts >= RECOVERY_ATTEMPTS) {
+			if (!recoveryNotified && client.player != null) {
+				recoveryNotified = true;
+				CausticaMod.LOGGER.error("RT did not recover after {} attempts", RECOVERY_ATTEMPTS);
+				client.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.translatable("caustica.enhanced.key.toggle.failed"));
+			}
+			return false;
+		}
+		recoveryAttempts++;
+		CausticaMod.LOGGER.warn("RT is not rendering; recovery attempt {} of {}", recoveryAttempts, RECOVERY_ATTEMPTS);
+		if (recoveryAttempts <= RECOVERY_SOFT_ATTEMPTS) {
+			VanillaRenderController.INSTANCE.resetRuntimeState();
+			RtComposite.INSTANCE.resetFailureLatch();
+			return false;
+		}
+		shutdownRt();
+		runtimeWasRequested = false;
+		recoveryRebuilding = true;
+		return true;
 	}
 
 	private static void shutdownRt() {

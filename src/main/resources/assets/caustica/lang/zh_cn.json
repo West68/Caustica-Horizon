@@ -1,4 +1,5 @@
 {
+  "caustica.enhanced.key.toggle.failed": "光追未能恢复，请重启游戏",
   "caustica.enhanced.nebula": "星云",
   "caustica.enhanced.nebula.tooltip": "夜空中的星云。关闭后夜空只剩星星和月亮。",
   "caustica.enhanced.cloudShadow": "云影",

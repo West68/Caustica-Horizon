@@ -102,6 +102,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     private BlockPos emittedBlockPos;
     private float emittedBlockOffsetX, emittedBlockOffsetY, emittedBlockOffsetZ;
     private final RandomSource emittedBlockRandom = RandomSource.create();
+    private boolean playerOnRealPath; // per entity capture; see submitModel
     // Set by order(int) for the very next submitModel call (banner/shield pattern-layer stacking), then
     // consumed. Baked-quad paths (addQuad) don't use ordering and always reset the capture's order to 0.
     private int pendingOrder;
@@ -138,6 +139,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
      * call must NOT reset it — {@link RtEntities} reads {@link #outlineColor()} after that detach.
      */
     public void begin(RtEntityCapture capture, boolean profileDynamicEntity) {
+        playerOnRealPath = false;
         // Submissions that arrive before the RT material snapshot exists cannot be consumed later; their
         // sprites/atlases would also fail material resolution mid-frame. Modded first-person layers (Punchy
         // submits translucent arm overlays and the held item this early) hit exactly that window, so drop the
@@ -226,7 +228,11 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // Pose the model from its render state (idempotent re-pose; mirrors what the renderer does for
         // its feature layers), then render the posed parts into the capture. renderToBuffer applies the
         // PoseStack to every vertex/normal, so the capture receives world-/camera-relative geometry.
-        RtCuboidEmitter.ModelTemplate directTemplate = cuboidEmitter.prepare(model);
+        // A player whose body a mod replaced (EMF/ETF variants) has its cape and armour attached to that body's pose by
+        // the real render path. On the cuboid shortcut those layers separate from it; plain players keep the shortcut.
+        boolean playerModel = state instanceof net.minecraft.client.renderer.entity.state.AvatarRenderState;
+        RtCuboidEmitter.ModelTemplate directTemplate = playerModel && playerOnRealPath ? null : cuboidEmitter.prepare(model);
+        if (playerModel && directTemplate == null) playerOnRealPath = true;
         boolean replayModel = directTemplate == null && RtModelCompat.enabled();
         long setupStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {

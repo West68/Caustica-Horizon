@@ -18,6 +18,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class LevelExtractorEntitiesMixin {
     @Inject(method = "extractVisibleEntities", at = @At("HEAD"), cancellable = true, require = 0)
     private void caustica$rtExtractsEntities(CallbackInfo ci) {
-        if (VanillaRenderController.rtRuntimeWorkRequested() && !Boolean.getBoolean("caustica.test.vanillaEntityExtract")) ci.cancel();
+        // While RT is on but has fallen back to the vanilla path, vanilla is the only one drawing entities.
+        if (VanillaRenderController.rtRuntimeWorkRequested() && !VanillaRenderController.INSTANCE.onVanillaFallback()
+                && !Boolean.getBoolean("caustica.test.vanillaEntityExtract")) ci.cancel();
     }
 }
