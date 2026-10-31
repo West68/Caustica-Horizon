@@ -249,10 +249,12 @@ Surface evaluateMaterial(MaterialHeader header, float2 atlasUv, float lod, float
                         heightNormal=normalize(hit.sideNormal.x*dualU+hit.sideNormal.y*dualV);
                     }
                 } else {
-                    // Full reconstruction/search on the camera surface; bounded inexpensive secondary approximation.
+                    // Full reconstruction/search on the camera surface and whatever a mirror or water shows of it, where
+                    // too few steps read as sliced shards; bounded inexpensive secondary approximation under diffuse light.
+                    bool sharpRelief=primarySurface || !diffuseRay;
                     // The relief fades out over lod 1..2; past lod 1 a surface spans few texels on screen, so half the
                     // march resolves the same visible depth.
-                    uint steps=primarySurface ? max(8u,uint(float(min(40u,quality*4u+uint((1.0-viewZ)*8.0)))*(1.0-0.5*saturate(lod)))) : 4u;
+                    uint steps=sharpRelief ? max(8u,uint(float(min(40u,quality*4u+uint((1.0-viewZ)*8.0)))*(1.0-0.5*saturate(lod)))) : 4u;
                     HeightHit hit;
                     if(reliefQuery) {
                         // The first hit already solved this intersection. Reconstruct its exact UV
@@ -260,7 +262,7 @@ Surface evaluateMaterial(MaterialHeader header, float2 atlasUv, float lod, float
                         hit.depth=reliefInputDepth;
                         hit.uv=localUv-rayUv*hit.depth;
                         hit.gradient=float2(0);
-                    } else hit=traceSmoothHeight(header,localUv,rayUv,tileSize,steps,primarySurface ? 3u : 1u);
+                    } else hit=traceSmoothHeight(header,localUv,rayUv,tileSize,steps,sharpRelief ? 3u : 1u);
                     reliefHit=hit;
                     localUv=frac(hit.uv);
                     surface.displaced=hit.depth>1e-6;

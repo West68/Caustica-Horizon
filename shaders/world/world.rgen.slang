@@ -1683,13 +1683,17 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                     if (reflectNow) { reflectedPathBase = L; reflectedPathCap = reflectWeight / reflectChance; }
                 }
             } else {
-                reflectNow = rndf(seed) < F;
+                // Nearly all reflection (far grazing water, close to total reflection): always follow it, so the pixel
+                // keeps one set of guides instead of alternating with the little light that refracts.
+                bool waterMirror = F >= 0.9 && bounce == gvBounce && !rc_update;
+                reflectNow = waterMirror || rndf(seed) < F;
+                if (waterMirror) throughput *= F;
             }
             if (reflectNow) {
-                // Seen from below, total internal reflection is a perfect mirror. Like a metal mirror the reflected
+                // Total internal reflection seen from below, and grazing water, are mirrors. Like a metal mirror the reflected
                 // vertex supplies the guides, so RR keeps that surface's texture instead of denoising it away where
                 // only soft indirect light reaches it. The flat plane keeps the guide motion steady under ripples.
-                if (F >= 0.999 && bounce == gvBounce && !rc_update && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u) {
+                if (F >= 0.9 && bounce == gvBounce && !rc_update && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u) {
                     mirrorGuideAppend(psrTransform, hitPos - worldPush.camOffset, waterPlaneNormal);
                     gvBounce = bounce + 1;
                     if (!gv_psr) { maxBounces += 1; rrStart += 1; }
@@ -1967,7 +1971,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         // Indirect continuation: importance-sample the diffuse OR the GGX specular lobe, chosen by their
         // relative reflectance. Only the diffuse direction proposal changes; GGX and light energy are unchanged.
         bool psrMirror = bounce == gvBounce && (bounce==0 || bounce<maxBounces) && pbr && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u
-                && metal >= 0.99 && rough <= max(MIN_ROUGH, 0.06) && !firstPersonReceiver;
+                && metal >= 0.99 && rough <= max(MIN_ROUGH, 0.12) && !firstPersonReceiver;
         if (psrMirror) {
             // Perfect reflection (no diffuse lobe on a full metal); the reflected vertex supplies the guides.
             float3 F = fresnelSchlick(max(0.0, dot(n, v)), F0);
