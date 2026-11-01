@@ -126,6 +126,9 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public static final java.util.LinkedHashSet<String> probeModelKinds = new java.util.LinkedHashSet<>();
     /** Only the first-person hand collector counts; the entity collector shares these statics. */
     private boolean probeHand;
+    private record ModelSurface(int start, int end) {}
+    private final java.util.IdentityHashMap<ModelPart, ModelSurface> modelSurfaces = new java.util.IdentityHashMap<>();
+    private final java.util.IdentityHashMap<ModelPart, Integer> modelLayerOrders = new java.util.IdentityHashMap<>();
     public void probeHand(boolean on) { probeHand = on; }
     /** Clears the aggregate probe counters; called once per emitted log line. */
     public static void resetProbeCounters() {
@@ -149,6 +152,8 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         if (capture != null) {
             this.outlineColor = 0;
             this.pendingOrder = 0;
+            modelSurfaces.clear();
+            modelLayerOrders.clear();
         }
     }
 
@@ -183,7 +188,33 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // exactly coplanar cloth pass. Move every banner-pattern pass out one rank: base colour becomes 1,
         // and the explicitly ordered emblem layers become 2+. Otherwise the BVH can select white cloth.
         capture.currentOrder = pendingOrder + (isBannerPattern(renderType) ? 1 : 0);
-        if(renderType!=null){Object setup=((RenderTypeAccessor)renderType).caustica$state();String pass=((RenderSetupAccessor)setup).caustica$pipeline().getLocation().toString();if(pass.contains("eyes")||pass.contains("emissive")||pass.contains("glint")||pass.contains("energy_swirl"))capture.currentOrder++;}
+        String passName = "";
+        if(renderType!=null){Object setup=((RenderTypeAccessor)renderType).caustica$state();String pass=((RenderSetupAccessor)setup).caustica$pipeline().getLocation().toString();passName=pass;if(pass.contains("eyes")||pass.contains("emissive")||pass.contains("glint")||pass.contains("energy_swirl"))capture.currentOrder++;}
+        // The enchantment glint is a SECOND draw of the same model with its own render type. The cuboid
+        // shortcut caches one template per model class, so the glint pass reused the base pass's cuboids
+        // (and for armour, the inflated outer-shell dimensions) and drew a box around the model instead of
+        // hugging it. The glint path below decorates the original captured triangles.
+        boolean glintPass = passName.contains("glint");
+        if (glintPass) {
+            // Reuse the exact base surface: an enchantment must never add an opaque body shell.
+            ModelSurface base = modelSurfaces.get(model.root());
+            if (base != null) {
+                var source = net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "textures/misc/enchanted_glint_item.png");
+                Matrix4f foilTransform = textureMatrix(renderType);
+                if (foilTransform == null) foilTransform = RtGlintTransform.matrix(net.minecraft.util.Util.getMillis(),
+                        Minecraft.getInstance().options.glintSpeed().get(), 8f);
+                capture.applyModelFoil(base.start(), base.end(), RtEntityTextures.INSTANCE.slotForAtlas(source),
+                        foilTransform, Minecraft.getInstance().options.glintStrength().get().floatValue());
+            }
+            pendingOrder = 0;
+            return;
+        }
+        if (state instanceof net.minecraft.client.renderer.entity.state.VillagerRenderState) {
+            // Biome/profession clothing resubmits identical geometry; preserve its draw order.
+            int rank = modelLayerOrders.getOrDefault(model.root(), 0);
+            capture.currentOrder += rank;
+            modelLayerOrders.put(model.root(), rank + 1);
+        }
         pendingOrder = 0;
         if (profileDynamicEntity) {
             RtFrameStats.FRAME.count("entityModelSubmissions", 1);
@@ -231,7 +262,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // A player whose body a mod replaced (EMF/ETF variants) has its cape and armour attached to that body's pose by
         // the real render path. On the cuboid shortcut those layers separate from it; plain players keep the shortcut.
         boolean playerModel = state instanceof net.minecraft.client.renderer.entity.state.AvatarRenderState;
-        RtCuboidEmitter.ModelTemplate directTemplate = playerModel && playerOnRealPath ? null : cuboidEmitter.prepare(model);
+        RtCuboidEmitter.ModelTemplate directTemplate = (playerModel && playerOnRealPath) || glintPass ? null : cuboidEmitter.prepare(model);
         if (playerModel && directTemplate == null) playerOnRealPath = true;
         boolean replayModel = directTemplate == null && RtModelCompat.enabled();
         long setupStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
@@ -269,6 +300,14 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                     : "entity.capture.submit.modelDraw.fallback", drawStart);
             RtFrameStats.FRAME.endStage("entity.capture.submit.modelDraw", drawStart);
         }
+        // Character-only indirect rays must alpha-test their own clothing/hat layers.
+        if (state instanceof net.minecraft.client.renderer.entity.state.AvatarRenderState
+                || state instanceof net.minecraft.client.renderer.entity.state.VillagerRenderState) {
+            for (int p = primStart; p < capture.prim.size(); p += 12) {
+                capture.prim.set(p + 9, Float.intBitsToFloat(Float.floatToRawIntBits(capture.prim.getFloat(p + 9)) | 4096));
+            }
+        }
+        modelSurfaces.put(model.root(), new ModelSurface(primStart, capture.prim.size()));
         int addedVertices = (capture.verts.size() - vertStart) / 3;
         int addedQuads = (capture.idx.size() - idxStart) / 6;
         if (profileDynamicEntity) {
@@ -401,6 +440,22 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             capture.currentMaterialId = RtMaterialRegistry.INSTANCE.resolveEntitySprite(sprite, stochasticAlpha);
         } else {
             capture.currentMaterialId = RtMaterialRegistry.INSTANCE.entityFallbackId(stochasticAlpha);
+        }
+    }
+
+    /** Vanilla beacon beam sheet; the beam's own render type resolves to the white fallback. */
+    private static final net.minecraft.resources.Identifier BEACON_BEAM_TEXTURE =
+            net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "textures/entity/beacon_beam.png");
+
+    /** True when this submission is the beacon/end-beam custom-geometry pass. */
+    private static boolean isBeaconBeam(RenderType renderType) {
+        if (renderType == null) return false;
+        try {
+            Object setup = ((RenderTypeAccessor) renderType).caustica$state();
+            RenderPipeline pipeline = ((RenderSetupAccessor) setup).caustica$pipeline();
+            return pipeline.getLocation().toString().contains("beacon_beam");
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -1029,8 +1084,18 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         boolean stochasticAlpha = isTranslucent(renderType);
         // Lines are untextured: bind the white slot so albedo is exactly the vertex colour (slot 0 is
         // the block atlas, whose (0,0) texel would tint the ribbon arbitrarily).
-        capture.currentTexSlot = lines || RtEntityTextures.INSTANCE.resolveView(renderType)==0L ? RtEntityTextures.INSTANCE.whiteSlot()
-                : RtEntityTextures.INSTANCE.slotFor(renderType);
+        // The beacon beam is a standalone texture bound under a per-frame render type; resolving it
+        // through the render type lands on the white fallback (a flat, untextured white column with no
+        // scroll animation), so bind beacon_beam.png directly.
+        boolean beaconBeam = isBeaconBeam(renderType);
+        net.minecraft.resources.Identifier beamTexture = beaconBeam
+                ? RtEntityTextures.INSTANCE.textureLocation(renderType)
+                : null;
+        if (beaconBeam && beamTexture == null) beamTexture = BEACON_BEAM_TEXTURE;
+        capture.currentTexSlot = beamTexture != null
+                ? RtEntityTextures.INSTANCE.slotForAtlas(beamTexture)
+                : (lines || RtEntityTextures.INSTANCE.resolveView(renderType)==0L ? RtEntityTextures.INSTANCE.whiteSlot()
+                : RtEntityTextures.INSTANCE.slotFor(renderType));
         capture.currentMaterialId = lines
                 ? RtMaterialRegistry.INSTANCE.entityFallbackId(false)
                 : RtEntityTextures.INSTANCE.materialIdFor(renderType, stochasticAlpha);

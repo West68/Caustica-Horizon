@@ -1112,7 +1112,8 @@ public final class RtComposite {
                             CausticaConfig.Rt.Look.ITRP.value() && dimension==0 ? CausticaConfig.Rt.Look.SUN_RIMS.value() : 0f,
                             CausticaConfig.Rt.Look.SUN_DISC_SIZE.value() * (CausticaConfig.Rt.Look.SUN_SHAPE.value() == 1 ? -1f : 1f),
                             CausticaConfig.Rt.Look.SUN_GLOW.value() + 4f * Math.round(CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS.value() * 100f)
-                                    + 4000f * ((CausticaConfig.Rt.Look.NEBULA.value() ? 0 : 1) + (CausticaConfig.Rt.Look.CLOUD_SHADOW.value() ? 0 : 2))), // see lookSwitches
+                                    + 4000f * ((CausticaConfig.Rt.Look.NEBULA.value() ? 0 : 1) + (CausticaConfig.Rt.Look.CLOUD_SHADOW.value() ? 0 : 2)
+                                    + (CausticaConfig.Rt.Entities.ARMOR_SKIN_LIT.value() ? 4 : 0))), // see lookSwitches
                     torchGuideAddress,
                     new Float4(torchGuidance.originX() - terrain.blockX, torchGuidance.originY() - terrain.blockY,
                             torchGuidance.originZ() - terrain.blockZ, TorchGuidanceGrid.CELL_SIZE),

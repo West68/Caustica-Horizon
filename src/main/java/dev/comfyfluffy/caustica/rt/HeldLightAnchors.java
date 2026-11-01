@@ -72,7 +72,11 @@ final class HeldLightAnchors {
     }
 
     static float influenceRadius(float configured, boolean creativeFlying) {
-        // Creative flight in empty air keeps near-hand illumination, without lighting distant ground.
-        return creativeFlying ? Math.min(configured,3f) : configured;
+        // Creative flight used to clamp the radius to 3 blocks "so it does not light distant ground". That
+        // made the held light collapse into a small bright disc as soon as the player left the ground,
+        // because heldFalloff reaches 0 exactly at the radius. The configured radius already bounds the
+        // reach, and the falloff (w*w/(d*d+4)) keeps the ground dimmer as the player climbs, so the clamp
+        // is gone: flying and standing now use the same radius.
+        return configured;
     }
 }

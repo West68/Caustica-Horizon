@@ -696,6 +696,14 @@ public final class CausticaConfig {
                     bool("caustica.rt.glow", "entities.glow.enabled", true);
             public static final BooleanSetting NAME_TAGS_ENABLED =
                     bool("caustica.rt.nameTags", "entities.name-tags.enabled", true);
+            /**
+             * Keep the skin under armour lit. Every armour piece sits 1-2 texels off the body, so its own
+             * geometry is the first thing a body vertex's sun/moon shadow ray meets: wearing only boots
+             * turned the whole upper body black. With this on, an entity surface starts its light rays
+             * outside that armour shell instead of on it. Turn it off to get the old hard self-shadowing.
+             */
+            public static final BooleanSetting ARMOR_SKIN_LIT =
+                    bool("caustica.rt.armorSkinLit", "entities.armor-skin-lit", true);
             /** Debug-only: render each model submission twice and require bitwise-identical CPU captures. */
             public static final BooleanSetting CAPTURE_PARITY =
                     bool("caustica.rt.entityCaptureParity", "entities.debug.capture-parity", false);

@@ -79,7 +79,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
         // Baked foil shades the base material plus a faint deterministic tint, never an opaque/noisy shell.
         if(bakedFoil) {
-            if((RayFlags()&RAY_FLAG_SKIP_CLOSEST_HIT_SHADER)!=0u)IgnoreHit();
+            if ((RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u && (epr.flags & 8192u) == 0u) IgnoreHit();
             return;
         }
         MaterialHeader materialHeader = (MaterialHeader)0;
@@ -134,16 +134,16 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             return;
         }
         if (materialHeader.model != MATERIAL_GLASS) {
-            if (stochasticAlpha) {
-                // No hit distance in the salt: it changed with every sub-pixel camera move and turned the
-                // 8x8 ordered pattern into white noise that DLSS-RR showed as crawling dots on mobs. The
-                // pattern now stays stratified in screen space and only rotates by the frame index.
-                uint salt = pid * 1664525u
-                        ^ (InstanceID() & IDX_MASK) * 1013904223u;
-                if (alphaDitherThreshold(salt) >= clamp(texel.a, 0.0, 1.0)) {
-                    IgnoreHit();
-                }
-            } else if (texel.a < ENTITY_ALPHA_CUTOFF) {
+            // EVERY entity texel test is a cutout test now, never a random coverage mask.
+            //
+            // The dither that used to live here rolled a per-frame threshold against the texel alpha, so
+            // every partly transparent texel of a mob/player layer (resource-pack HD skins and ETF overlay
+            // layers are full of them) flipped in and out per frame. DLSS-RR cannot integrate a mask that
+            // changes with the frame index: the model came out covered in white sparkle, worst on the lit
+            // side, and the same pixels leaked over everything behind it. Translucent mob layers are
+            // already a tinted veil (see the branch above, and the eta=1 slab in the closest hit), so
+            // coverage here only has to remove genuinely empty texels.
+            if (texel.a < ENTITY_ALPHA_CUTOFF) {
                 IgnoreHit();
             }
         }
@@ -201,6 +201,16 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             float4 texel=blockAlbedoAtlas.SampleLevel(coord,0.0);
             float3 tint=glassSlabTint(srgbToLinear(texel.rgb)*pr.tint.rgb,texel.a);
             payload.albedo*=glassShadowBoundary(tint,materialHeader.params.z,materialHeader.params.w);
+            IgnoreHit();
+            return;
+        }
+        // Per-texel cutout FIRST: "fancy" leaves and HD leaf packs keep their holes in the translucent
+        // layer, and the whole-sprite average below is opaque. Without this test every leaf block became a
+        // solid cube that also blocked its own shadow ray, so leaves no longer let light through at all.
+        ConstPtr<float2> cutoutUv = ConstPtr<float2>(terrainUvTriangleAddress(sec.uvAddr, tri));
+        float2 cutoutCoord = bary.x * cutoutUv[0] + bary.y * cutoutUv[1] + bary.z * cutoutUv[2];
+        float4 cutoutTexel = blockAlbedoAtlas.SampleLevel(cutoutCoord, 0.0);
+        if (cutoutTexel.a < ALPHA_CUTOFF) {
             IgnoreHit();
             return;
         }

@@ -288,7 +288,7 @@ public final class RtEntityTextures {
 
     /** Recover the resource Identifier of {@code renderType}'s primary texture (Sampler0), or null. The
      *  {@code RenderSetup.TextureBinding} class is package-private, so {@code location()} is reflective. */
-    private Identifier textureLocation(RenderType renderType) {
+    Identifier textureLocation(RenderType renderType) {
         if (renderType == null) return null;
         if (locationCache.containsKey(renderType)) return locationCache.get(renderType);
         Identifier result = null;

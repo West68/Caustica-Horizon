@@ -334,6 +334,27 @@ public final class RtEntityCapture implements VertexConsumer {
         return (Float.floatToFloat16(uvList.getFloat(vertex*2))&65535)
                 |(Float.floatToFloat16(uvList.getFloat(vertex*2+1))&65535)<<16;
     }
+    /** Bake model glint on the existing base triangles; never introduce opaque effect geometry. */
+    void applyModelFoil(int start, int end, int foilSlot, Matrix4f transform, float strength) {
+        for (int p = start; p < end; p += 12) {
+            int oldFlags = Float.floatToRawIntBits(prim.getFloat(p + 9));
+            if ((oldFlags & (512 | 1024 | 16384)) != 0) continue;
+            int triangle = p / 12;
+            int baseSlot = Math.round(prim.getFloat(p + 7));
+            for (int corner = 0; corner < 3; corner++) {
+                int vertex = idx.getInt(triangle * 3 + corner);
+                float u = uvList.getFloat(vertex * 2), v = uvList.getFloat(vertex * 2 + 1);
+                float fu = transform == null ? u : transform.m00() * u + transform.m10() * v + transform.m30();
+                float fv = transform == null ? v : transform.m01() * u + transform.m11() * v + transform.m31();
+                int packed = (Float.floatToFloat16(fu) & 65535) | (Float.floatToFloat16(fv) & 65535) << 16;
+                prim.set(p + (corner == 0 ? 3 : corner == 1 ? 10 : 11), Float.intBitsToFloat(packed));
+            }
+            prim.set(p + 7, foilSlot);
+            // 8192 distinguishes a decorated BASE surface from the pre-existing item decal path.
+            prim.set(p + 9, Float.intBitsToFloat((oldFlags & 4096) | 8192 | 16384 | Math.clamp(Math.round(strength * 255f), 0, 255) | (baseSlot << 16)));
+        }
+    }
+
     void markFoilCoverage(int primStart,int vertexStart,int baseSlot,
             float u0,float v0,float u1,float v1,float u2,float v2,float u3,float v3) {
         for(int t=0;t<2;t++) {

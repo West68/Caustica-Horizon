@@ -64,7 +64,7 @@ import java.util.Queue;
  * entity path. A per-frame entity geometry table ({@code {primAddr, idxAddr, uvAddr, disp, triBase[]}})
  * gives the hit shader each entity's per-triangle data, motion-vector displacement, and the base needed
  * to map each BLAS geometry's local primitive index into the packed index/primitive arrays.
- * Non-model entities (items/arrows — geometry via submitItem/submitBlockModel, which the collector
+ * Non-model entities (items/arrows …geometry via submitItem/submitBlockModel, which the collector
  * ignores) are skipped.
  *
  * <p>Per-frame cost is real (per-entity capture + buffer uploads + a BLAS build); capped by {@code
@@ -89,7 +89,7 @@ public final class RtEntities {
     /** Default mask: visible to every ray (terrain and ordinary entities use this). */
     private static final int MASK_ALL = 0xFF;
     /** Particles are primary-ray-only: visible/lit by the camera path, invisible to shadows/GI/reflections. */
-    // 0x10: also visible to specular continuations (mirrors, glass and water) — never to the dominant
+    // 0x10: also visible to specular continuations (mirrors, glass and water) …never to the dominant
     // diffuse/shadow rays, which keep skipping particles (world.rgen CULL_SPECULAR_PARTICLES).
     private static final int PARTICLE_MASK = MASK_PRIMARY | 0x10;
     public static boolean particlesEnabled() {
@@ -126,14 +126,14 @@ public final class RtEntities {
         return CausticaConfig.Rt.Entities.entityMapCapacity();
     }
 
-    // Chunk radius around the player to scan for block entities (chests/signs/…) each frame.
+    // Chunk radius around the player to scan for block entities (chests/signs/… each frame.
     private static int beViewChunks() {
         return CausticaConfig.Rt.Entities.BE_VIEW_CHUNKS.value();
     }
 
     // Block entities keep a cached mesh + BLAS keyed by BlockPos. Each frame the BE is re-meshed (cheap)
-    // and its mesh hashed; the expensive BLAS is rebuilt ONLY when the mesh actually changed — so static
-    // BEs cost no GPU work while animating ones (chest lid, spawner, …) rebuild every frame. New/changed
+    // and its mesh hashed; the expensive BLAS is rebuilt ONLY when the mesh actually changed …so static
+    // BEs cost no GPU work while animating ones (chest lid, spawner, … rebuild every frame. New/changed
     // rebuilds are capped per frame so a burst of newly loaded chunks can't stall (over-budget BEs keep
     // their last geometry / pop in over later frames, like terrain's worker dispatch budget).
     private static int beBuildsPerFrame() {
@@ -153,7 +153,7 @@ public final class RtEntities {
     //
     // Rigid reuse: when this frame's capture is a rigid transform (translation and/or yaw) of the mesh the
     // entity's AS was last built from, reference that AS with the fitted TLAS instance transform and skip
-    // the mesh upload + refit entirely — still mobs, item frames/armor stands, and spinning/bobbing
+    // the mesh upload + refit entirely …still mobs, item frames/armor stands, and spinning/bobbing
     // dropped items become table-entry + instance writes only.
 
     // Max per-axis residual (blocks) for a capture to count as a rigid transform of the reference mesh.
@@ -188,7 +188,7 @@ public final class RtEntities {
     // Particle capture: a VertexConsumer adapter that funnels MC's billboard quads into `capture` (the
     // shared entity mesh). We extract each live particle into `particleScratch`, accumulate per-vertex
     // motion-vector displacements in `particleDisp`, and key the previous-frame center off particle
-    // identity in `particlePrev` (rebuilt each frame → prunes dead particles).
+    // identity in `particlePrev` (rebuilt each frame →?prunes dead particles).
     private int billboardParticlesCaptured;
     private int modelParticleFailures;
     private final RtParticleCapture particleCapture = new RtParticleCapture(capture);
@@ -251,7 +251,7 @@ public final class RtEntities {
 
     // This frame's visible name tags (see NameTagEntity), captured off the SAME EntityRenderState vanilla's
     // own EntityRenderer.extractNameTags already populates (shouldShowName/crosshair-look/distance rules,
-    // computed as a side effect of the dispatcher.extractEntity call captureEntities already makes) — no
+    // computed as a side effect of the dispatcher.extractEntity call captureEntities already makes) …no
     // reimplementation of that logic. Positions are rebase-space (same convention as glowBatches); consumed
     // by RtNameTagFeature's raster pass, which reuses glowCamOffset{X,Y,Z} (same camera, same frame).
     private final List<NameTagEntity> nameTagBatches = new ArrayList<>();
@@ -261,7 +261,7 @@ public final class RtEntities {
         return nameTagBatches;
     }
 
-    /** This frame's camera orientation (view-to-world rotation) — the billboard rotation name tags face. */
+    /** This frame's camera orientation (view-to-world rotation) …the billboard rotation name tags face. */
     public Quaternionf cameraOrientation() {
         return cameraState.orientation;
     }
@@ -293,7 +293,7 @@ public final class RtEntities {
 
     /**
      * Cached block-entity geometry. The mesh is captured in <b>block-local</b> space (identity submit pose),
-     * so it is rebase-independent — only the per-frame TLAS instance transform ({@code blockPos − rebase})
+     * so it is rebase-independent …only the per-frame TLAS instance transform ({@code blockPos −rebase})
      * changes, exactly like a terrain section. The BLAS + mesh buffers are this entry's own VMA allocations
      * and persist until the BE is evicted (out of window / unloaded) or rebuilt (its mesh changed);
      * {@code idx/uv/prim} are read by the hit shader every frame via the geometry table, so they must stay
@@ -306,8 +306,8 @@ public final class RtEntities {
         long indexAddr, uvAddr, primAddr;
         int[] bucketTris;
         int bx, by, bz;                          // block position (drives the per-frame instance transform)
-        long meshHash;                           // hash of the captured mesh — rebuild only when it changes
-        long lastSeen;                           // last frame this BE was in the scan window — for eviction
+        long meshHash;                           // hash of the captured mesh …rebuild only when it changes
+        long lastSeen;                           // last frame this BE was in the scan window …for eviction
         float[] prevVerts;                       // block-local verts at this build, for the per-vertex MV diff
         final TrackedGraphicsUse graphicsUse = new TrackedGraphicsUse();
     }
@@ -339,7 +339,7 @@ public final class RtEntities {
         final EntitySlot[] ring = new EntitySlot[REFIT_RING];
         int cursor;
         long lastSeen;
-        // Rigid-reuse reference (refAccel == null → no reusable build yet). refVerts are the exact
+        // Rigid-reuse reference (refAccel == null →?no reusable build yet). refVerts are the exact
         // positions the AS was last built/refit from; a frame whose capture is a rigid transform of them
         // reuses the AS through the TLAS instance transform. Reuse frames only READ the AS, so referencing
         // the last-written ring slot while it is in flight is safe.
@@ -374,12 +374,12 @@ public final class RtEntities {
 
     /** One glowing entity's body mesh (rebased-space positions, copied out of {@link #capture} before the
      *  next entity resets it) plus its vanilla outline colour, for {@code RtGlowOutlineFeature}'s full-res raster
-     *  mask pass. Captured as a side effect of the normal RT capture — no extra posing/animation work. */
+     *  mask pass. Captured as a side effect of the normal RT capture …no extra posing/animation work. */
     public record GlowEntity(float[] verts, int[] idx, int color) {
     }
 
     /** One visible name tag: display text + the attachment point's world position (rebase-space, same
-     *  convention as entity capture — see {@link RtEntities#glowCamOffsetX()} for the camera-relative
+     *  convention as entity capture …see {@link RtEntities#glowCamOffsetX()} for the camera-relative
      *  offset needed to finish the transform to camera-relative space). */
     public record NameTagEntity(Component text, float x, float y, float z) {
     }
@@ -581,9 +581,9 @@ public final class RtEntities {
         FrameLists lists;
         List<RtAccel.Instance> instances;
         List<RtAccel.PreparedBlas> blas;        // all BLAS ops to record this frame (BUILD + refit UPDATE)
-        List<RtAccel.PreparedBlas> pooledBlas;  // transient one-shot entity BLAS ops → releaseEntityBlas
-        List<RtBuffer> refitScratch;            // per-frame scratch from refit ops → destroy() (AS persists)
-        List<RtBuffer> buffers;                 // transient motion/particle buffers → destroy()
+        List<RtAccel.PreparedBlas> pooledBlas;  // transient one-shot entity BLAS ops →?releaseEntityBlas
+        List<RtBuffer> refitScratch;            // per-frame scratch from refit ops →?destroy() (AS persists)
+        List<RtBuffer> buffers;                 // transient motion/particle buffers →?destroy()
         MotionArena motion;                     // suballocated entity/BE/particle displacement uploads
         long tableBase;
         long geomTableAddr;
@@ -920,10 +920,10 @@ public final class RtEntities {
                 iy = state.y;
                 iz = state.z;
                 // extractEntity already ran EntityRenderer.extractNameTags (shouldShowName, crosshair-look,
-                // distance cutoff, the attachment point) as a normal part of building the render state — no
+                // distance cutoff, the attachment point) as a normal part of building the render state …no
                 // need to reimplement any of that here, just read the result. Name tags billboard to face
-                // the camera every frame (see RtNameTagFeature), so — unlike glow, whose mesh is captured
-                // straight into the SAME rigid entity mesh used for the BLAS — they are never mixed into
+                // the camera every frame (see RtNameTagFeature), so …unlike glow, whose mesh is captured
+                // straight into the SAME rigid entity mesh used for the BLAS …they are never mixed into
                 // `capture`: doing so would make every frame's mesh a non-rigid transform of the last
                 // whenever the camera turns, defeating rigid-reuse/motion-vector fitting for every
                 // name-tagged entity. RtWorldOverlay renders them in a completely separate raster pass.
@@ -957,13 +957,12 @@ public final class RtEntities {
                 resetPoseStack(entityPoseStack);
             }
             if (capture.isEmpty()) {
-                continue; // non-model entity (arrow/etc.) — no body geometry captured
+                continue; // non-model entity (arrow/etc.) …no body geometry captured
             }
             if (glow && !firstPersonSelf) {
-                // Vanilla never draws the local player's own body in first person (no model to outline —
-                // only the held-item hand), so it never shows the Glowing outline on yourself either. Our
+                // Vanilla never draws the local player's own body in first person (no model to outline …                // only the held-item hand), so it never shows the Glowing outline on yourself either. Our
                 // capture still meshes the first-person self (for reflections/shadows/GI), so the glow mask
-                // must explicitly skip it to match — otherwise it'd show an outline vanilla never would.
+                // must explicitly skip it to match …otherwise it'd show an outline vanilla never would.
                 int glowColor = collector.outlineColor();
                 if (glowColor != 0) {
                     glowBatches.add(new GlowEntity(copyTranslatedVertices(capture.verts,
@@ -982,7 +981,7 @@ public final class RtEntities {
             if (TRACE_ENTITY != null && entity.getType().toShortString().equals(TRACE_ENTITY)) traceEntity(entity, prev, ix, iy, iz, partial);
             curVerts.put(id, storeEntityPrev(prev, capture.verts, ix, iy, iz));
             // Rigid reuse first: a pose that is a rigid transform of the entity's last-built mesh
-            // re-references that AS through the instance transform — no upload, no refit.
+            // re-references that AS through the instance transform …no upload, no refit.
             boolean reused;
             long reuseStart = RtFrameStats.FRAME.startStage();
             try {
@@ -1071,10 +1070,15 @@ public final class RtEntities {
         double wx = ix + attach.x;
         double wy = iy + attach.y + 0.5;
         double wz = iz + attach.z;
-        // No occlusion test: vanilla submits name tags in the see-through phase (no depth test), so a tag is
-        // drawn through walls and never hidden by the block it is glued to. Culling on a camera->tag clip
-        // hid exactly the server-board case (a marker stand standing in front of, or inside, a block face)
-        // while vanilla kept showing it.
+        // The full-resolution overlay has no world depth attachment. Cull block-occluded tags here;
+        // a short endpoint tolerance preserves tags mounted flush against their supporting block.
+        {
+            var obstruction = level.clip(new net.minecraft.world.level.ClipContext(cameraState.pos,
+                    new Vec3(wx, wy, wz), net.minecraft.world.level.ClipContext.Block.COLLIDER,
+                    net.minecraft.world.level.ClipContext.Fluid.NONE, Minecraft.getInstance().player));
+            if (obstruction.getType() != net.minecraft.world.phys.HitResult.Type.MISS
+                    && obstruction.getLocation().distanceToSqr(new Vec3(wx, wy, wz)) > 0.01) return;
+        }
         nameTagBatches.add(new NameTagEntity(state.nameTag,
                 (float) (wx - rbx), (float) (wy - rby), (float) (wz - rbz)));
     }
@@ -1242,8 +1246,7 @@ public final class RtEntities {
     /**
      * Capture this frame's billboard particles as ONE combined mesh + BLAS (cutout, camera-only receiver),
      * with per-particle motion vectors. We iterate the LIVE {@code Particle} objects (via accessor mixins)
-     * rather than the public packed render state, because only the live objects carry stable identity —
-     * needed to diff each particle's center against last frame for the MV. Each particle is extracted into
+     * rather than the public packed render state, because only the live objects carry stable identity …     * needed to diff each particle's center against last frame for the MV. Each particle is extracted into
      * {@link #particleScratch} (its billboard quad), funneled through {@link #particleCapture} into the
      * shared {@code capture}, and its quad center cached by identity in {@link #particlePrev}. Per-layer
      * texture slot comes from the layer's atlas (block/item/particle) via the bindless registry. One
@@ -1311,7 +1314,7 @@ public final class RtEntities {
                     particleCenter(vertBefore, vertAfter, particleCenterScratch);
                     // pointInFrustum wants the world position: rebased center + rebase origin.
                     if (!frustum.pointInFrustum(particleCenterScratch[0] + rbx, particleCenterScratch[1] + rby, particleCenterScratch[2] + rbz)) {
-                        capture.verts.size(vb); // off-screen → truncate this particle back out (clean quad boundary)
+                        capture.verts.size(vb); // off-screen →?truncate this particle back out (clean quad boundary)
                         capture.idx.size(ib);
                         capture.uvList.size(ub);
                         capture.prim.size(prb);
@@ -1439,7 +1442,7 @@ public final class RtEntities {
         return true;
     }
 
-    /** Average (rebase-space) position of a captured particle's verts — approximates the particle center. */
+    /** Average (rebase-space) position of a captured particle's verts …approximates the particle center. */
     private void particleCenter(int vertBefore, int vertAfter, float[] out) {
         float[] v = capture.verts.elements();
         float cx = 0f, cy = 0f, cz = 0f;
@@ -1462,7 +1465,7 @@ public final class RtEntities {
     private void appendParticleMv(Particle p, float[] center, int vertBefore, int vertAfter,
                                   int rbx, int rby, int rbz, IdentityHashMap<Particle, ParticlePrev> cur) {
         ParticlePrev prev = particlePrev.remove(p);
-        // World displacement = (curCenter − prevCenter) + (rebaseCur − rebasePrev). New particle ⇒ 0 (no MV).
+        // World displacement = (curCenter −prevCenter) + (rebaseCur −rebasePrev). New particle ???0 (no MV).
         float dx = prev == null ? 0f : (center[0] - prev.cx) + (rbx - prev.rbx);
         float dy = prev == null ? 0f : (center[1] - prev.cy) + (rby - prev.rby);
         float dz = prev == null ? 0f : (center[2] - prev.cz) + (rbz - prev.rbz);
@@ -1480,12 +1483,12 @@ public final class RtEntities {
     }
 
     /**
-     * Capture block entities (chests, signs, …). Each BE keeps a cached mesh + BLAS keyed by BlockPos.
+     * Capture block entities (chests, signs, …. Each BE keeps a cached mesh + BLAS keyed by BlockPos.
      * Every frame the BE is re-meshed (cheap) and its mesh hashed; the expensive BLAS is rebuilt only when
-     * the mesh actually changed — so static BEs cost no GPU work while animating ones (chest lid, spawner,
-     * …) rebuild every frame and stay smooth. New/changed rebuilds are capped at {@link
+     * the mesh actually changed …so static BEs cost no GPU work while animating ones (chest lid, spawner,
+     * … rebuild every frame and stay smooth. New/changed rebuilds are capped at {@link
      * #BE_BUILDS_PER_FRAME} per frame so a burst of newly loaded chunks can't stall; over-budget BEs keep
-     * their last geometry / pop in over later frames. Captured block-local → placed by a translate-only
+     * their last geometry / pop in over later frames. Captured block-local →?placed by a translate-only
      * instance transform; static, so the MV is 0.
      */
     private void captureBlockEntities(RtContext ctx, FrameBuild build, Minecraft mc, ClientLevel level, float partial, int rbx, int rby, int rbz) {
@@ -1544,7 +1547,7 @@ public final class RtEntities {
                 return; // off-screen-only (beacon/end-gateway), distance-culled, or no renderer
             }
             collector.begin(capture, false);
-            // Identity pose ⇒ block-local mesh; world placement is the per-frame instance transform in emitBe.
+            // Identity pose ???block-local mesh; world placement is the per-frame instance transform in emitBe.
             resetPoseStack(blockEntityPoseStack);
             beDispatcher.submit(state, blockEntityPoseStack, collector, cameraState);
         } catch (Throwable t) {
@@ -1564,7 +1567,7 @@ public final class RtEntities {
         long hash = meshHash();
         FloatArrayList disp = null; // static unless the mesh changed this frame (chest lid / spawner animation)
         if (entry == null || entry.meshHash != hash) {
-            // Geometry changed (or new BE) → rebuild, but only within this frame's budget. Over budget: keep
+            // Geometry changed (or new BE) →?rebuild, but only within this frame's budget. Over budget: keep
             // showing the previous geometry; a brand-new BE simply pops in over the next frames.
             if (beBuildsThisFrame >= beBuildsPerFrame()) {
                 if (entry != null) {
@@ -1572,7 +1575,7 @@ public final class RtEntities {
                 }
                 return;
             }
-            // Per-vertex MV from the previous build's block-local mesh (same vertex count ⇒ pairable).
+            // Per-vertex MV from the previous build's block-local mesh (same vertex count ???pairable).
             // The BE itself doesn't move, so the world displacement is the pure local delta.
             if (entry != null && entry.prevVerts != null && entry.prevVerts.length == capture.verts.size()) {
                 disp = VertexDisplacements.fill(capture.verts.elements(), capture.verts.size(), entry.prevVerts, beDispScratch);
@@ -1657,6 +1660,13 @@ public final class RtEntities {
         for (int i = 0; i < xn; i++) {
             h = (h ^ (x[i] & 0xffffffffL)) * 1099511628211L;
         }
+        // Scrolling textures animate even when the geometry remains completely stationary.
+        {
+            float[] uv = capture.uvList.elements();
+            for (int i = 0; i < capture.uvList.size(); i++) {
+                h = (h ^ (Float.floatToRawIntBits(uv[i]) & 0xffffffffL)) * 1099511628211L;
+            }
+        }
         float[] pr = capture.prim.elements();
         int pn = capture.prim.size();
         for (int i = 0; i < pn; i++) {
@@ -1676,11 +1686,11 @@ public final class RtEntities {
         }
         beginBuildIfNeeded(ctx, build);
         // disp is non-null only for a BE whose mesh changed this frame (chest lid / spawner); a static BE
-        // passes null ⇒ dispAddr 0 ⇒ no MV. The disp buffer is a per-frame transient, so a BE that stops
+        // passes null ???dispAddr 0 ???no MV. The disp buffer is a per-frame transient, so a BE that stops
         // animating reverts to MV 0 next frame.
         long dispAddr = uploadDisp(ctx, build, disp);
         writeTableEntry(build, e.primAddr, e.indexAddr, e.uvAddr, dispAddr, 0f, 0f, 0f, e.bucketTris, MASK_ALL);
-        // Block-local mesh placed by a translate-only instance transform (blockPos − rebase), like terrain.
+        // Block-local mesh placed by a translate-only instance transform (blockPos −rebase), like terrain.
         float[] xform = {1, 0, 0, e.bx - rbx, 0, 1, 0, e.by - rby, 0, 0, 1, e.bz - rbz};
         build.instances.add(new RtAccel.Instance(xform, e.accel.deviceAddress,
                 ENTITY_BIT | (build.count & 0x7FFFFF), 0xFF, RtAccel.SBT_ENTITY_OFFSET));
@@ -1702,7 +1712,7 @@ public final class RtEntities {
         RtFrameStats.FRAME.count("entityBlockEntityRetirements", 1);
     }
 
-    /** Drop cached block entities not seen (in window) within the last KEEP_FRAMES frames — unloaded/out of view. */
+    /** Drop cached block entities not seen (in window) within the last KEEP_FRAMES frames …unloaded/out of view. */
     private void evictStaleBes(RtContext ctx) {
         if (beCache.isEmpty()) {
             return;
@@ -1772,8 +1782,7 @@ public final class RtEntities {
     /**
      * Rigid-reuse fast path: if the current local-space {@link #capture} is identical to, or a rigid yaw
      * transform of, the mesh this entity's AS was last built from, emit a geometry-table entry pointing at
-     * the cached shading buffers and a TLAS instance carrying the fitted transform over the cached AS —
-     * skipping the 4 mesh uploads and the BLAS refit. Covers still mobs, item frames, armor stands, and
+     * the cached shading buffers and a TLAS instance carrying the fitted transform over the cached AS …     * skipping the 4 mesh uploads and the BLAS refit. Covers still mobs, item frames, armor stands, and
      * spinning/bobbing dropped items. The hit shader rotates prim normals / TBN by the instance transform,
      * so rotated instances shade correctly. Motion vectors are untouched: {@code motion} was already
      * computed against last frame's capture (a rotating pose gets its per-vertex disp buffer as usual).
@@ -1843,13 +1852,13 @@ public final class RtEntities {
     }
 
     /**
-     * Fit {@code cur ≈ R_yaw·ref + t} in entity-local space. Exact local equality is handled before this
+     * Fit {@code cur ???R_yaw·ref + t} in entity-local space. Exact local equality is handled before this
      * method; this slower centroid/yaw fit covers dropped-item spin and minecarts. Pitch/roll and skeletal
      * deformation take the full path.
      */
     private static float[] fitYawTransform(float[] ref, float[] cur, int vc) {
         // Centroid-align, then the least-squares rotation angle about Y for
-        // x' = x·cos + z·sin, z' = −x·sin + z·cos is atan2(Σ(cx·rz − cz·rx), Σ(cx·rx + cz·rz)).
+        // x' = x·cos + z·sin, z' = −x·sin + z·cos is atan2(Σ(cx·rz −cz·rx), Σ(cx·rx + cz·rz)).
         float crx = 0f, cry = 0f, crz = 0f, ccx = 0f, ccy = 0f, ccz = 0f;
         for (int i = 0; i < vc; i++) {
             crx += ref[i * 3];
@@ -1880,7 +1889,7 @@ public final class RtEntities {
                 return null;
             }
         }
-        // p_out = R·(p − cr) + cc  ⇒  t = cc − R·cr.
+        // p_out = R·(p −cr) + cc  ??? t = cc −R·cr.
         float rcx = crx * cos + crz * sin;
         float rcz = -crx * sin + crz * cos;
         return new float[] {
@@ -1911,7 +1920,7 @@ public final class RtEntities {
 
     /**
      * FNV-1a over the capture's shading data that must match for AS reuse: UVs plus each prim record's
-     * emission/tint/material lanes. Prim NORMALS are deliberately excluded — they rotate with the pose,
+     * emission/tint/material lanes. Prim NORMALS are deliberately excluded …they rotate with the pose,
      * and the hit shader re-rotates the cached ones via the instance transform.
      */
     private long shadeHash() {
@@ -1955,8 +1964,8 @@ public final class RtEntities {
 
     /**
      * Upload the current {@link #capture} as a per-object mesh + BLAS, add its instance + geom-table entry.
-     * {@code entityId} ≥ 0 → refit path (persistent updatable AS keyed by id); {@code < 0} (refit disabled)
-     * → transient one-shot full BUILD. Used by the animated-entity pass; block entities use {@link #buildBe}.
+     * {@code entityId} ???0 →?refit path (persistent updatable AS keyed by id); {@code < 0} (refit disabled)
+     * →?transient one-shot full BUILD. Used by the animated-entity pass; block entities use {@link #buildBe}.
      */
     private void appendCapture(RtContext ctx, FrameBuild build, float[] disp, int entityId, int instanceBit, int mask) {
         beginBuildIfNeeded(ctx, build);
@@ -2361,7 +2370,7 @@ public final class RtEntities {
         cameraState.viewRotationMatrix.set(viewRotation);
         // viewRotation is the world->view rotation (mvCurProjView = frameProjection * frameViewRotation);
         // vanilla's Camera.rotation() (what CameraRenderState.orientation actually holds, per Camera.java
-        // "cameraState.orientation.set(this.rotation())") is the INVERSE of that — view->world, i.e. the
+        // "cameraState.orientation.set(this.rotation())") is the INVERSE of that …view->world, i.e. the
         // camera's own facing direction, used to billboard world-space quads (name tags) to face the
         // camera. A pure rotation's inverse is its conjugate. Nothing consumed this field before
         // RtNameTagFeature; a plain setFromUnnormalized(viewRotation) here would billboard backwards.

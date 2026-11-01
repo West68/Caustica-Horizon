@@ -513,11 +513,18 @@ Payload makeRadiancePayload(uint flags, uint rayCone) {
 
 // After a diffuse vertex a cutout's holes average out of the image, and skipping any-hit there saves its texture fetch.
 static bool afterDiffuse=false;
+static bool preserveCharacterCutouts=false;
+// True while shading the vertex the camera ray landed on (bounce 0). The held emitter may light its own
+// first-person hand there, and a rain veil there belongs to the camera's own line of sight.
+static bool heldSelfVertex=false;
+// True while the current iteration is the camera's own straight line of sight (bounce 0, after a rain veil
+// or through clear static glass). Rain is a camera-space veil: it must never shade secondary paths.
+static bool primaryCamRay=true;
 HitObject traceRadianceReordered(uint cullMask, float3 ro, float tmin, float3 rd, float tmax) {
     uint traceFlags = payload.flags;
     uint traceCone = payload.rayCone;
     Payload tracePayload = makeRadiancePayload(traceFlags, traceCone);
-    HitObject hObj = HitObject::TraceRay(topLevelAS, afterDiffuse?RAY_FLAG_FORCE_OPAQUE:RAY_FLAG_NONE, cullMask,
+    HitObject hObj = HitObject::TraceRay(topLevelAS, afterDiffuse && !preserveCharacterCutouts ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE, cullMask,
             SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u, makeRay(ro, tmin, rd, tmax), tracePayload);
 #if !defined(CAUSTICA_DISABLE_REORDER)
     // Optional coherence hint (cacheFlags bit 2): also group by path stage (primary / indirect, specular
@@ -654,7 +661,11 @@ bool reflectedDirect(float3 origin, float3 dir, inout uint seed, out float3 radi
 
 float3 heldLighting(float3 hitPos,float3 n,float3 v,float3 diffAlb,float3 F0,float rough,
         bool pbr,float2 localVisibility,bool inWater,float3 extinction,inout uint seed) {
-    if((payload.flags & PAYLOAD_HELD_OWNER)!=0u)return float3(0,0,0);
+    // The hand/first-person item owns the held emitters, so shading it with them used to be skipped
+    // outright to avoid the torch blowing out the pixels two centimetres from it. That also left the hand
+    // and the held block unlit, which is the reported bug. Open it only for the camera ray's own hand
+    // (first person, bounce 0): the third-person body, reflections and shadows keep the exemption.
+    if((payload.flags & PAYLOAD_HELD_OWNER)!=0u && !(heldSelfVertex && firstPersonReceiver))return float3(0,0,0);
     float weight0=luminance(worldPush.mainLightColor.xyz)*heldFalloff(length(worldPush.mainLightPosition.xyz-hitPos),worldPush.mainLightPosition.w);
     float weight1=luminance(worldPush.offLightColor.xyz)*heldFalloff(length(worldPush.offLightPosition.xyz-hitPos),worldPush.offLightPosition.w);
     float total=weight0+weight1;
@@ -1335,7 +1346,13 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     bool pathDiffuse = false; // left a diffuse lobe; diffuseDepth also counts mirrors, whose reflections must stay exact
     bool risRanPrev = false; // the previous shaded vertex resampled emitters, so direct hits on them are gated
     for (int bounce = 0; bounce <= maxBounces; bounce++) {
+        // A character's indirect ray must alpha-test its own hat/clothing shell. Force-opaque
+        // made transparent head-layer texels absorb all skylight although albedo/normals were correct.
+        preserveCharacterCutouts = bounce > 0
+                && payloadMaterial() == MATERIAL_OPAQUE && (payload.flags & 8u) != 0u;
         afterDiffuse=pathDiffuse;
+        heldSelfVertex = bounce == 0;
+        primaryCamRay = bounce == 0 || cameraThroughRain || cameraThroughGlass;
         payload.hitT = -1.0;
         payloadSetTraceState(showCelestial, rayConeWidth, rayConeSpread);
         uint incomingCone=payload.rayCone;
@@ -1602,6 +1619,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             // saturate(mask * 0.15 * wetness * RAIN_VISIBILITY)), rainColor ~ (skylight + 0.1 sunlight)
             // * 0.01 - a faint dark veil, not a lit sprite. The ray continues to the surface behind,
             // which keeps the camera's guides and primary-surface quality.
+            if (!primaryCamRay) {
+                // Reflections, glass and water paths see straight through rain. Shading the veil there put
+                // bright rain streaks onto every smooth surface it was reflected in, and each one also
+                // spent a path vertex. Skip it: no light, no bounce, no guide, no depth.
+                ro = hitPos + rd * SURF_BIAS;
+                if (++veilCrossings > MAX_RAIN_VEIL_CROSSINGS) break;
+                continue;
+            }
             float a = saturate(payload.f0.y * 0.15 * saturate(worldPush.mediumParams.y));
             L += throughput * a * (worldPush.lightRadiance.xyz * 0.001 + 0.002);
             throughput *= 1.0 - a;
@@ -1952,7 +1977,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         bool skipSun = skipSunOnce;
         skipSunOnce = false;
         if (ndl > 0.0 && !skipSun) {
-            float3 vis = visibility(p, lightDir, 10000.0);
+            // Armour sits 1-2 texels off the body, so a body vertex's own armour is the first thing its sun
+            // ray meets (wearing only boots blacked out the whole upper body). With ARMOR_SKIN_LIT on, the
+            // ray starts just outside that shell. Armour keeps its PBR shading, reflections and its own
+            // shadows on the world; only this thin band is stepped over.
+            const bool armorSkinLit = (lookSwitches(worldPush.torchControl.w) & LOOK_SWITCH_ARMOR_SKIN_LIT) != 0u;
+            float3 vis = visibility(armorSkinLit ? p + n * 0.12 : p, lightDir, 10000.0);
             // Underwater receiver whose shadow ray crossed a water surface: scale the direct light by
             // the wave-refraction caustic at the exit point. Focusing scales the incident irradiance,
             // so it applies to the whole NEE term (diffuse + specular).

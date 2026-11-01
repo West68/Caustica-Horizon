@@ -542,6 +542,10 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         float entityLod = rayConeTextureLod(rayCone, texSizePx(entityAlbedoTex[NonUniformResourceIndex(texSlot)]),
                 ep0, ep1, ep2, euv[e0], euv[e1], euv[e2]);
         float4 entityTexel = entityAlbedoTex[NonUniformResourceIndex(texSlot)].SampleLevel(euvCoord, entityLod);
+        // Match any-hit's barycentric vertex alpha (beacon outer shell and fading geometry).
+        if ((pr.flags & 512u) != 0u)
+            entityTexel.a *= dot(ebary, float3(pr.aux0 & 255u, (pr.aux0 >> 8u) & 255u,
+                    (pr.aux0 >> 16u) & 255u) / 255.0);
         MaterialHeader header = ConstPtr<MaterialHeader>(pc.materialTableAddr)[pr.materialId];
         uint material = header.model;
         // Translucent mob texels (see world.rahit.slang): a clear tinted slab with eta=1 instead of a
@@ -610,8 +614,19 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
 
         // Continuous additive tint retains the base texture instead of stochastic purple replacement.
         if(bakedFoil) {
-            albedo+=foilGlow*.06;
-            surface.emission=max(surface.emission,.006*max(foilGlow.r,max(foilGlow.g,foilGlow.b)));
+            float foilStrength = (pr.flags & 8192u) != 0u ? float(pr.flags & 255u) / 255.0 : 1.0;
+            if ((pr.flags & 8192u) != 0u) {
+                // The moving enchantment tint must remain legible on saturated bright armour.
+                // Preserve the original surface between bands; tint the band without adding geometry.
+                float band = saturate(max(foilGlow.r, max(foilGlow.g, foilGlow.b)) * 3.0) * foilStrength;
+                float foilLuma = max(dot(foilGlow, float3(0.2126, 0.7152, 0.0722)), 0.01);
+                float baseLuma = max(dot(albedo, float3(0.2126, 0.7152, 0.0722)), 0.15);
+                albedo = lerp(albedo, foilGlow * (baseLuma / foilLuma), 0.45 * band);
+                surface.emission = max(surface.emission, 0.015 * band);
+            } else {
+                albedo += foilGlow * 0.06;
+                surface.emission = max(surface.emission, 0.006 * max(foilGlow.r, max(foilGlow.g, foilGlow.b)));
+            }
         }
         payload.albedo = material==MATERIAL_GLASS?albedo:albedo*surface.ao;
         payload.normal = n;
@@ -631,6 +646,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payloadSetPacked(payload, material, surface.roughness, surface.metalness,
                 emission, sss, entityVeil ? 1.0 : header.params.z, entityVeil ? 1.0 : header.params.w,
                 (header.features & 32u)!=0u?EMISSION_SOURCE_PORTAL:materialEmissionSource(header, emission));
+        // Bit 8 is the dielectric entering flag only for glass/water; opaque character hits reuse it.
+        if (material == MATERIAL_OPAQUE && (pr.flags & 4096u) != 0u) payload.flags |= 8u;
         if(g.reserved.x!=0u) payload.flags |= PAYLOAD_HELD_OWNER;
         if(g.reserved.y!=0u) payload.iorTransmission |= FIRST_PERSON_RECEIVER;
         payload.flags |= uint(round(saturate(1.0-surface.localVisibility)*255.0)) << 8u;

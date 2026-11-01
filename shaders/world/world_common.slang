@@ -161,6 +161,10 @@ public static const uint PAYLOAD_STATIC_GLASS = 0x40000000u;
 // torchControl.w packs, low to high: sun glow (below 4), night brightness * 4 in hundredths (below 4000), switches * 4000.
 public static const uint LOOK_SWITCH_NO_NEBULA = 1u;
 public static const uint LOOK_SWITCH_NO_CLOUD_SHADOW = 2u;
+// Armour self-shadowing: an armour piece sits a couple of texels off the body, so the body's own light ray
+// hits it first and the skin goes black. This bit makes entity surfaces start their light rays outside it.
+public static const uint LOOK_SWITCH_ARMOR_SKIN_LIT = 4u;
+
 public uint lookSwitches(float packed) { return uint(floor(packed / 4000.0)); }
 public float lookGlowNight(float packed) { return packed - 4000.0 * floor(packed / 4000.0); }
 // Hit output in payload.rayCone for a Distant Horizons LOD surface (never a valid packed cone or relief depth).
