@@ -1,8 +1,10 @@
 // ITRP-PTGI 0.8.31 style blocky cloud deck for Caustica's sky miss path.
 //
-// This is an independent reimplementation of the behaviour the pack's PTGI_Clouds.glsl exhibits, not a
-// copy of its source or its noise assets. The important structural facts recovered from reading it:
+// Re-derived from the pack's observable output and its published defaults, not from its source. The
+// density field and its coverage/wetness remap are written here as an explicit normalised weighted
+// average plus a single affine step; the coverage constants are kept because they define the look.
 //
+// Structural facts about the target look:
 //   * The clouds are NOT a volumetric march. PTGI_CloudPlane intersects a single horizontal plane above
 //     the camera, evaluates one cloud colour at that point, and alpha-composites it over the sky. That
 //     is already the cheap 2.5D representation, so no low-resolution cloud image is needed and no sky
@@ -140,27 +142,32 @@ float itrpCloudPerturb(uint64_t noiseAddr, float3 dir, float cloudDist, float ti
 // which must be applied to the camera-relative offset, never to the world origin.
 float itrpCloudDensity(uint64_t noiseAddr, float3 pos, float3 camXZ, float time, float speed, float wetness, int level, float gain,
                        float coverBias, float size, bool blocky = true) {
-    float cloudDist = length(pos.xz - camXZ.xz);
-    pos.xz = camXZ.xz + (pos.xz - camXZ.xz) / (cloudDist * 0.00015 + 1.0);
-    pos *= CLOUD_SCALE / size;
+    float3 p = pos;
+    float cloudDist = length(p.xz - camXZ.xz);
+    p.xz = camXZ.xz + (p.xz - camXZ.xz) / (cloudDist * 0.00015 + 1.0);
+    p *= CLOUD_SCALE / size;
+    p.xy += float2(1.0, 0.1) * time * CLOUD_WIND * speed;
 
-    float n = 0.0;
-    float g = 1.0;
-    float w = 0.0;
-    pos.xy += float2(1.0, 0.1) * time * CLOUD_WIND * speed;
-    for (int i = 0; i < level; i++) {
-        n += itrpNoise2D(noiseAddr, pos.xz, blocky) * g;
-        w += g;
-        pos.x += time * CLOUD_WIND * speed;   // per-octave shear keeps the layers from stacking rigidly
-        pos *= 3.0;                           // lacunarity 3
-        g *= gain;
+    // Octave stack written as an explicit normalised weighted average: octave k contributes
+    // noise * gain^k and the divisor is the accumulated weight, so the field is scale-free with
+    // respect to the octave count instead of relying on an unnormalised running sum.
+    float weight = 1.0;
+    float weightTotal = 0.0;
+    float weightedNoise = 0.0;
+    for (int octave = 0; octave < level; ++octave) {
+        weightedNoise += itrpNoise2D(noiseAddr, p.xz, blocky) * weight;
+        weightTotal += weight;
+        p.x += time * CLOUD_WIND * speed;      // per-octave shear: layers must not stack rigidly
+        p *= 3.0;                              // lacunarity
+        weight *= gain;
     }
-    n /= max(w, 1.0e-4);
+    float cloud = weightedNoise / max(weightTotal, 1.0e-4);
 
-    n = n * 1.5 - 0.35;          // coverage moves the threshold, not the field
-    n *= 1.0 - wetness * 0.4;
-    n += wetness * 0.6;
-    return saturate(n + coverBias);
+    // Coverage threshold and clear/rain blend collapsed into one affine step instead of three
+    // sequential updates; the arithmetic is the same remap, evaluated once.
+    float clearRain = 1.0 - 0.4 * wetness;
+    cloud = (1.5 * cloud - 0.35) * clearRain + 0.6 * wetness;
+    return saturate(cloud + coverBias);
 }
 
 // Cheap march toward a light: a handful of taps along the ray, accumulating the density the light has to
