@@ -392,6 +392,9 @@ Surface evaluateMaterial(MaterialHeader header, float2 atlasUv, float lod, float
         surface.f0=float3(0);surface.roughness=1;surface.metalness=0;
         surface.ao=1;surface.emission=max(surface.emission,.7)*control_surfaceControl.z;surface.sss=0;
     }
+    if ((header.features & MATERIAL_FEATURE_ORE_EMISSION) != 0u
+            && (controlPtr[0].flags & FRAME_FLAG_DISABLE_ORE_EMISSION) != 0u)
+        surface.emission = 0.0;
     return surface;
 }
 
@@ -650,6 +653,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         if (material == MATERIAL_OPAQUE && (pr.flags & 4096u) != 0u) payload.flags |= 8u;
         if(g.reserved.x!=0u) payload.flags |= PAYLOAD_HELD_OWNER;
         if(g.reserved.y!=0u) payload.iorTransmission |= FIRST_PERSON_RECEIVER;
+        // Block-item glass is the same flat slab as placed glass. Let RR follow the transmitted
+        // surface's depth, normal and motion instead of denoising the whole view as the front pane.
+        if (material == MATERIAL_GLASS && !entityVeil) payload.flags |= PAYLOAD_STATIC_GLASS;
         payload.flags |= uint(round(saturate(1.0-surface.localVisibility)*255.0)) << 8u;
         payload.flags |= uint(round(saturate(1.0-surface.heldVisibility.x)*255.0)) << 16u;
         payload.flags |= uint(round(saturate(1.0-surface.heldVisibility.y)*15.0)) << 24u;
@@ -840,7 +846,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         // Authored conductors retain their material F0; do not turn every wet block into a metal.
         surface.f0=lerp(surface.f0,lerp(float3(.02),surface.f0,surface.metalness),film);
         if((weather_flags & 512u)==0u)payload.albedo*=1.0-film*.15;
-        float2 ripple=rainRippleGradient(stable,weather_waterParams.w,weather_mediumParams.y*film*weather_dimensionControl.w);
+        float2 ripple=rainRippleGradient(stable,weather_waterParams.w,weather_mediumParams.y*film*weather_dimensionControl.w,
+                weather_waterAnchor.z,weather_waterAnchor.w);
         float3 rippleWorld=float3(-ripple.x,0,-ripple.y);
         rippleWorld-=n*dot(n,rippleWorld);
         n=normalize(n+rippleWorld); // Never erase the reconstructed POM normal under the wet lobe.

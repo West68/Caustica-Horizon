@@ -77,6 +77,19 @@ public final class VanillaRenderController {
 		return this.failureLatched;
 	}
 
+	/** RT skips the consumer of extracted section updates; rebuild the raster generation on exit. */
+	public void restoreRasterForSuspend(net.minecraft.client.Minecraft client) {
+		resetRuntimeState();
+		rtActive = false;
+		EntityCullingCompat.update(false);
+		SodiumAnimationCompat.update(false);
+		if (client.level != null) {
+			client.levelExtractor.allChanged();
+			client.levelRenderer.sectionOcclusionGraph().invalidate();
+			CausticaMod.LOGGER.info("RT suspended: invalidated raster terrain and visibility for reconstruction");
+		}
+	}
+
 	public boolean onVanillaFallback() {
 		return this.failureLatched || RtComposite.INSTANCE.hasFailed();
 	}

@@ -47,6 +47,7 @@ public final class RtMaterialRegistry {
     public static final int FEATURE_HEURISTIC_EMISSION = 4;
     public static final int FEATURE_OVERRIDE_EMISSION = 8;
     public static final int FEATURE_STOCHASTIC_ALPHA = 16;
+    public static final int FEATURE_ORE_EMISSION = 1 << 23;
     private static final int EMISSION_STRENGTH_SHIFT = 8;
     private static final int EMISSION_STRENGTH_MASK = 255;
     private static final float MAX_OVERRIDE_EMISSION_STRENGTH = 4.0f;
@@ -191,6 +192,7 @@ public final class RtMaterialRegistry {
                 for (boolean glass : new boolean[]{false, true}) {
                     for (boolean emitting : new boolean[]{false, true}) {
                         int features = emitting ? baseFeatures : baseFeatures & ~FEATURE_HEURISTIC_EMISSION;
+                        if (!emitting && RtMaterials.oreSprite(sprite.contents().name().toString())) features |= FEATURE_ORE_EMISSION;
                         RtMaterialDesc desc = compileDesc(glass ? MODEL_GLASS : MODEL_OPAQUE, features,
                                 profile, emitting, false,
                                 variantSummary(features, emitting, entry, stats.uniformSummary()));
@@ -232,6 +234,7 @@ public final class RtMaterialRegistry {
         for (Identifier name : entityResources) {
             RtBlockMaterials.Entry entry = entriesByResource.get(name);
             int features = (entry.features() & (FEATURE_SPEC | FEATURE_NORMAL)) | PortalMaterials.flags(name.toString());
+            if (RtMaterials.oreSprite(name.toString())) features |= FEATURE_ORE_EMISSION;
             RtMaterialDesc desc = compileEntityDesc(features, false, entry.emissionSummary());
             for (RtMaterialOverrides.Rule rule : overrides.rules()) {
                 if (!rule.matchesEntity(name)) continue;
@@ -526,6 +529,34 @@ public final class RtMaterialRegistry {
         table.flush(offset, MaterialHeaderData.BYTE_SIZE);
         entitySpriteIds.put(key, id);
         return stochasticAlpha ? withStochasticAlpha(id) : id;
+    }
+
+    /** Append an item-atlas dielectric variant without changing the shared opaque sprite header. */
+    public synchronized int resolveEntityGlassSprite(TextureAtlasSprite sprite) {
+        int parent = resolveEntitySprite(sprite, false);
+        long key = derivedMaterialKey(parent, Integer.MIN_VALUE);
+        int cached = derivedMaterialIds.getOrDefault(key, -1);
+        if (cached >= 0) return cached;
+        if (table == null || nextDynamicId >= tableCapacity)
+            throw new IllegalStateException("RT entity material header reserve exhausted");
+        int id = nextDynamicId++;
+        long offset = (long) id * MaterialHeaderData.BYTE_SIZE;
+        MemoryUtil.memCopy(table.mapped + (long) parent * MaterialHeaderData.BYTE_SIZE,
+                table.mapped + offset, MaterialHeaderData.BYTE_SIZE);
+        configureEntityGlassHeader(MemoryUtil.memByteBuffer(table.mapped + offset,
+                MaterialHeaderData.BYTE_SIZE).order(ByteOrder.nativeOrder()));
+        table.flush(offset, MaterialHeaderData.BYTE_SIZE);
+        derivedMaterialIds.put(key, id);
+        return id;
+    }
+
+    static void configureEntityGlassHeader(ByteBuffer header) {
+        header.putInt(0, MODEL_GLASS);
+        header.putInt(4, header.getInt(4) & ~FEATURE_STOCHASTIC_ALPHA);
+        header.putFloat(48, 0.05f);
+        header.putFloat(52, 0.0f);
+        header.putFloat(56, 1.52f);
+        header.putFloat(60, 1.0f);
     }
 
     /** Caller must ensure no in-flight trace references the current table. */

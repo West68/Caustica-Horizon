@@ -186,7 +186,8 @@ float2 waterWaveGrad(float2 p, float t,float localRain) {
                 + 0.3 * sin((q.x * 0.8 - q.y) * 9.7 + 2.1) + 0.2 * sin((q.x + q.y * 1.3) * 15.3 + 4.0));
         g *= saturate(bw * 2.0 - 0.7) * 0.7 + 0.3;
     }
-    return g * WATER_WAVE_STRENGTH + rainRippleGradient(p,t/WAVE_SPEED,localRain);
+    return g * WATER_WAVE_STRENGTH + rainRippleGradient(p,t/WAVE_SPEED,localRain*worldPush.dimensionControl.w,
+            worldPush.waterAnchor.z,worldPush.waterAnchor.w);
 }
 
 // Perturb a (near-)horizontal water surface normal by the wave field. Flowing side faces (|n.y| small)
@@ -479,6 +480,8 @@ static const uint CULL_HAND_WORLD = 0x08u;
 // Particles and rain (mask 0x12) seen through glass or water. They are camera-facing billboards, so a
 // reflection would show them edge-on and turning with the camera: mirrors, GI and shadows skip them.
 static const uint CULL_SPECULAR_PARTICLES = 0x10u;
+// Optional headless First Person Model pose; its full pose remains secondary-only.
+static const uint CULL_CAMERA_BODY = 0x20u;
 static bool throughTransmission = false; // the next ray continues straight through glass or water
 static uint secondaryReceiverMask = CULL_SECONDARY;
 static bool firstPersonReceiver = false;
@@ -889,7 +892,7 @@ float2 specularReflectionMotion(float3 surfacePos, float3 primaryDir, float2 cur
 // `refracted` is false on total internal reflection (no refracted hit exists); a sky miss returns a far
 // point along the refracted direction, which the self-delta MV handles uniformly.
 void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNormal, bool inWaterAtSurface,
-                       float materialIor,
+                       float materialIor, bool cameraView,
                        float rayConeWidth, float rayConeSpread,
                        out float3 hitCamRel, out float3 motionPrev, out bool refracted, out float3 diffuseAlbedo,
                        out float3 specAlbedo) {
@@ -911,7 +914,9 @@ void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNorm
     float3 ro = surfacePos - surfaceNormal * SURF_BIAS;
     payload.hitT = -1.0;
     payloadSetTraceState(false, rayConeWidth, rayConeSpread);
-    traceRadianceReordered(firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY, ro, RAY_TMIN, refractedDir, 10000.0);
+    // RR must describe the same visible scene as the camera transmission path, not the hidden body.
+    traceRadianceReordered(cameraView ? CULL_HAND_WORLD | CULL_CAMERA_BODY : (firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY),
+            ro, RAY_TMIN, refractedDir, 10000.0);
     if (payload.hitT < 0.0) {
         hitCamRel = (ro + refractedDir * 1.0e6) - worldPush.camOffset; // sky through the surface, at infinity
         motionPrev = float3(0.0, 0.0, 0.0);
@@ -1318,6 +1323,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     gv_skyTransmittance = 0.0;
     gv_glassSky = false;
     bool cameraThroughGlass = false;
+    // Refraction continues the camera view, even when RR cannot unfold its guides. Do not reveal
+    // the hidden camera owner's hollow body until this path actually reflects or scatters.
+    bool cameraVisibilityPath = true;
     float3 reflectedPathBase = float3(0.0, 0.0, 0.0);
     float reflectedPathCap = -1.0; // >=0: this path took a stochastic reflection of this weight
     throughTransmission = false;
@@ -1366,7 +1374,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         // Primary (bounce 0) is the camera ray (CULL_PRIMARY): sees particles but not the first-person
         // player. Bounce rays are secondary (CULL_SECONDARY): exclude particles, include the player.
         uint receiverMask = bounce == 0 ? CULL_PRIMARY
-                : (throughTransmission ? secondaryReceiverMask | CULL_SPECULAR_PARTICLES : secondaryReceiverMask);
+                : (cameraVisibilityPath ? CULL_HAND_WORLD | CULL_CAMERA_BODY | CULL_SPECULAR_PARTICLES
+                    : (throughTransmission ? secondaryReceiverMask | CULL_SPECULAR_PARTICLES : secondaryReceiverMask));
         throughTransmission = false;
         HitObject receiverHit=traceRadianceReordered(receiverMask, ro, 0.0, rd, 10000.0);
         // Only the hand receiver excludes its camera-owner body. Once the path lands on
@@ -1558,8 +1567,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             // RR denoised the pane as an opaque surface, which smeared everything behind clear and stained glass.
             bool clearGlass=staticGlass || payloadRoughness()<=0.15
                     || min(payload.albedo.x,min(payload.albedo.y,payload.albedo.z))>=0.995;
-            // Moving glass keeps its existing foreground motion guides. Static clear glass can supply
-            // the visible continuation's guides; no extra guide ray or larger path budget is introduced.
+            // Flat block-derived glass supplies the visible continuation's guides, including entity
+            // motion behind it. Use the existing bounded slab continuation; no extra guide ray is needed.
             // A mob veil (eta=1, see world.rchit.slang) does not bend the ray, so the surface behind it
             // keeps its own position and motion: hand RR those guides, as for static glass, instead of
             // the flat veil, which made the slime core a blurred texture.
@@ -1575,6 +1584,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 gv_motionUseRefracted=false;gv_motionObjDisp=payload.motionPrev;
             }
             if(reflected) {
+                cameraVisibilityPath=false;
                 if(unfold)mirrorGuideAppend(psrTransform,hitPos-worldPush.camOffset,n);
                 rd=glassHitSurface?glassMirror:reflect(rd,n);ro=hitPos+boundaryNormal*SURF_BIAS;
             } else {
@@ -1744,7 +1754,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 // own Fresnel reflectance is ignored here — a clear interface, not a demodulation target.
                 float3 refractedAlbedo;
                 float3 refractedSpecAlbedo;
-                refractedGuideHit(hitPos, rd, n, inWater, materialIor, rayConeWidth, rayConeSpread,
+                refractedGuideHit(hitPos, rd, n, inWater, materialIor, cameraVisibilityPath, rayConeWidth, rayConeSpread,
                         gv_motionHitCamRel, gv_motionObjDisp,
                         gv_motionUseRefracted, refractedAlbedo, refractedSpecAlbedo);
                 gv_albedo = refractedAlbedo;
@@ -1799,6 +1809,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 if (waterMirror) throughput *= F;
             }
             if (reflectNow) {
+                cameraVisibilityPath=false;
                 // Total internal reflection seen from below, and grazing water, are mirrors. Like a metal mirror the reflected
                 // vertex supplies the guides, so RR keeps that surface's texture instead of denoising it away where
                 // only soft indirect light reaches it. The flat plane keeps the guide motion steady under ripples.
@@ -1838,6 +1849,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             }
             continue;
         }
+
+        // An opaque receiver ends the camera-only transmission chain. Its reflection/GI must see
+        // the complete scene, including the camera owner's body and its normal shadows.
+        cameraVisibilityPath=false;
 
         // A far LOD reached by an indirect ray takes its emission and sun/moon light here and ends the path:
         // further bounces off simplified distant terrain cost full rays for detail nobody can see.

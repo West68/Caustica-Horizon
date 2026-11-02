@@ -91,9 +91,13 @@ public final class CausticaClient implements ClientModInitializer {
 			// Opt-in only (-Dcaustica.enhanced.continuityScenario=true).
 			if (devTools) ContinuityScenario.tick(client);
 			if (!VanillaRenderController.rtRuntimeWorkRequested()) {
+				boolean wasRequested = runtimeWasRequested;
 				runtimeWasRequested = false;
 				if (rtInitDone) {
 					shutdownRt();
+				}
+				if (wasRequested) {
+					VanillaRenderController.INSTANCE.restoreRasterForSuspend(client);
 				}
 				return;
 			}

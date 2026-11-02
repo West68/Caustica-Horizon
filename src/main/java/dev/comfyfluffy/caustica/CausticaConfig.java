@@ -640,6 +640,7 @@ public final class CausticaConfig {
             public static final BooleanSetting DH_LODS=bool("caustica.compat.dh","compat.distant-horizons",true);
             public static final FloatSetting TORCH_BRIGHTNESS=clampedFloat("caustica.rt.torchBrightness","visuals.torch-brightness",2f,0f,8f);
             public static final FloatSetting EMISSION=clampedFloat("caustica.rt.emissionBrightness","visuals.emission",4f,0f,16f);
+            public static final BooleanSetting ORE_EMISSION=bool("caustica.rt.oreEmission","visuals.ore-emission",true);
             public static final FloatSetting END_LIGHT=clampedFloat("caustica.rt.endLight","visuals.end-light",1.5f,0f,8f);
             public static final FloatSetting END_STARS=clampedFloat("caustica.rt.endStars","visuals.end-stars",3f,0f,10f);
             public static final FloatSetting END_SKY=clampedFloat("caustica.rt.endSky","visuals.end-sky",1f,0f,4f);
@@ -651,6 +652,9 @@ public final class CausticaConfig {
             public static final FloatSetting NETHER_BRIGHTNESS=clampedFloat("caustica.rt.netherBrightness","visuals.nether-brightness",1f,0f,8f);
             public static final FloatSetting PUDDLE=clampedFloat("caustica.rt.puddle","visuals.puddle",1f,0f,1f);
             public static final FloatSetting RIPPLES=clampedFloat("caustica.rt.ripples","visuals.ripples",1f,0f,2f);
+            public static final FloatSetting RIPPLE_SPEED=clampedFloat("caustica.rt.rippleSpeed","visuals.ripple-speed",1f,.1f,5f);
+            public static final FloatSetting RIPPLE_DENSITY=clampedFloat("caustica.rt.rippleDensity","visuals.ripple-density",1f,.25f,4f);
+            public static final FloatSetting RIPPLE_FREQUENCY=clampedFloat("caustica.rt.rippleFrequency","visuals.ripple-frequency",1f,.25f,4f);
             public static final BooleanSetting HELD_LIGHTS=bool("caustica.rt.heldLights","visuals.held-lights",true);
             public static final FloatSetting HELD_RADIUS=clampedFloat("caustica.rt.heldRadius","visuals.held-radius",15f,1f,32f);
             public static final FloatSetting HELD_BRIGHTNESS=clampedFloat("caustica.rt.heldBrightness","visuals.held-brightness",1f,0f,8f);

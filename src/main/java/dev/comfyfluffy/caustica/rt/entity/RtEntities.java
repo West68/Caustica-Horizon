@@ -718,6 +718,7 @@ public final class RtEntities {
     // One stable positive key reuses the original BLAS ring/refit; reject any real-entity collision.
     private final net.minecraft.client.renderer.state.level.WeatherRenderState weatherCapture=new net.minecraft.client.renderer.state.level.WeatherRenderState();
     private static final int HAND_ENTITY_KEY=Integer.MAX_VALUE;
+    private static final int CAMERA_BODY_KEY=Integer.MAX_VALUE-1;
     // Hand capture -> RT scene pipeline counters (RtFirstPerson.probe() only).
     public static long probeHandAttempts,probeHandDisabled,probeHandNull,probeHandEmpty,probeHandBuildFull,probeHandKeyCollide,probeHandTris,probeHandReused,probeHandFallback;
     /** Nanoseconds spent in the hand capture + upload path, and the frames it ran on. */
@@ -906,7 +907,8 @@ public final class RtEntities {
                 continue;
             }
             capture.reset(prev != null ? prev.size / 3 : 0);
-            try (var mobRenderScope=RtMobRenderScope.open(entity)) {
+            try (var mobRenderScope=RtMobRenderScope.open(entity);
+                 var fullBodyScope=FirstPersonModelCompat.fullBodyScope(firstPersonSelf)) {
                 EntityRenderState state;
                 long extractStart = RtFrameStats.FRAME.startStage();
                 try {
@@ -1010,9 +1012,43 @@ public final class RtEntities {
             RtFrameStats.FRAME.count("entitiesCaptured", 1);
             capturedThisFrame++;
         }
+        if (firstPerson && cameraEntity == mc.player && FirstPersonModelCompat.active() && !build.full()
+                && level.getEntity(CAMERA_BODY_KEY) == null) {
+            captureCameraBody(ctx, build, mc, dispatcher, partial, rbx, rby, rbz);
+        }
         Int2ObjectOpenHashMap<EntityPrev> oldPrev = prevVerts;
         prevVerts = curVerts;
         curVerts = oldPrev;
+    }
+
+    private void captureCameraBody(RtContext ctx, FrameBuild build, Minecraft mc,
+                                   EntityRenderDispatcher dispatcher, float partial, int rbx, int rby, int rbz) {
+        EntityPrev previous = prevVerts.get(CAMERA_BODY_KEY);
+        capture.reset(previous == null ? 0 : previous.size / 3);
+        var offset = FirstPersonModelCompat.cameraOffset(mc.player, partial);
+        EntityRenderState state = dispatcher.extractEntity(mc.player, partial);
+        double x = state.x + offset.x, y = state.y + offset.y, z = state.z + offset.z;
+        collector.begin(capture, true);
+        dev.comfyfluffy.caustica.rt.RtHeldLights.beginPlayerCapture(true);
+        resetPoseStack(entityPoseStack);
+        FirstPersonModelCompat.cameraCapture(true);
+        try {
+            // Keep the mod's camera pose; the collector hides head/helmet only for this camera mesh.
+            dispatcher.submit(state, cameraState, 0.0, 0.0, 0.0, entityPoseStack, collector);
+        } finally {
+            FirstPersonModelCompat.cameraCapture(false);
+            collector.begin(null, false);
+            dev.comfyfluffy.caustica.rt.RtHeldLights.beginPlayerCapture(false);
+        }
+        if (capture.idx.isEmpty()) return;
+        Motion motion = uploadVertexMotion(ctx, build, capture.verts, previous, x, y, z);
+        curVerts.put(CAMERA_BODY_KEY, storeEntityPrev(previous, capture.verts, x, y, z));
+        int mask = MASK_PRIMARY | 0x20; // camera transmission only; full reflection/shadow pose stays separate
+        if (!appendRigidReuse(ctx, build, motion, CAMERA_BODY_KEY, mask,
+                (float)(x-rbx), (float)(y-rby), (float)(z-rbz)))
+            appendCapture(ctx, build, motion, CAMERA_BODY_KEY, ENTITY_BIT, mask,
+                    translationTransform((float)(x-rbx), (float)(y-rby), (float)(z-rbz)));
+        build.logicalCount++;
     }
 
     private static void resetPoseStack(PoseStack poseStack) {
@@ -1842,7 +1878,7 @@ public final class RtEntities {
         build.lists.usedEntitySlots.add(ea.refSlot);
         writeTableEntry(build, ea.refPrimAddr, ea.refIndexAddr, ea.refUvAddr,
                 motion.dispAddr, motion.rigidX, motion.rigidY, motion.rigidZ, ea.refBucketTris, mask);
-        if(entityId==HAND_ENTITY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
+        if(entityId==HAND_ENTITY_KEY || entityId==CAMERA_BODY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
         build.instances.add(new RtAccel.Instance(placeTransform(localTransform, placeX, placeY, placeZ),
                 ea.refAccel.deviceAddress,
                 ENTITY_BIT | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
@@ -2012,7 +2048,7 @@ public final class RtEntities {
 
         writeTableEntry(build, primAddr, indexAddr, uvAddr, motion.dispAddr,
                 motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris(), mask);
-        if(entityId==HAND_ENTITY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
+        if(entityId==HAND_ENTITY_KEY || entityId==CAMERA_BODY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
 
         build.instances.add(new RtAccel.Instance(instanceTransform, blas.accel.deviceAddress,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
@@ -2091,7 +2127,7 @@ public final class RtEntities {
 
         writeTableEntry(build, primAddr, indexAddr, uvAddr, motion.dispAddr,
                 motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris(), mask);
-        if(entityId==HAND_ENTITY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
+        if(entityId==HAND_ENTITY_KEY || entityId==CAMERA_BODY_KEY)MemoryUtil.memPutInt(build.tableBase+(long)build.count*TABLE_ENTRY_BYTES+60,1);
         build.instances.add(new RtAccel.Instance(instanceTransform, accel.deviceAddress,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
 

@@ -262,9 +262,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // A player whose body a mod replaced (EMF/ETF variants) has its cape and armour attached to that body's pose by
         // the real render path. On the cuboid shortcut those layers separate from it; plain players keep the shortcut.
         boolean playerModel = state instanceof net.minecraft.client.renderer.entity.state.AvatarRenderState;
-        RtCuboidEmitter.ModelTemplate directTemplate = (playerModel && playerOnRealPath) || glintPass ? null : cuboidEmitter.prepare(model);
+        RtCuboidEmitter.ModelTemplate directTemplate = (playerModel && (playerOnRealPath
+                || FirstPersonModelCompat.rendering() || FirstPersonModelCompat.cameraCapture())) || glintPass ? null : cuboidEmitter.prepare(model);
         if (playerModel && directTemplate == null) playerOnRealPath = true;
-        boolean replayModel = directTemplate == null && RtModelCompat.enabled();
+        boolean replayModel = directTemplate == null && RtModelCompat.enabled() && !FirstPersonModelCompat.cameraCapture();
         long setupStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {
             if (!replayModel) model.setupAnim(state);
@@ -285,6 +286,9 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         int uvStart = capture.uvList.size();
         int primStart = capture.prim.size();
         long directCubeCounts = 0L;
+        java.util.List<HiddenCameraPart> hiddenCameraParts = FirstPersonModelCompat.cameraCapture()
+                && state instanceof net.minecraft.client.renderer.entity.state.HumanoidRenderState
+                ? hideCameraHeads(model.root()) : java.util.List.of();
         long drawStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {
             if (directTemplate != null) {
@@ -295,13 +299,14 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                 model.renderToBuffer(poseStack, capture, lightCoords, overlayCoords, color);
             }
         } finally {
+            for (var hidden : hiddenCameraParts) hidden.part().visible = hidden.visible();
             RtFrameStats.FRAME.endStage(directTemplate != null
                     ? "entity.capture.submit.modelDraw.direct"
                     : "entity.capture.submit.modelDraw.fallback", drawStart);
             RtFrameStats.FRAME.endStage("entity.capture.submit.modelDraw", drawStart);
         }
         // Character-only indirect rays must alpha-test their own clothing/hat layers.
-        if (state instanceof net.minecraft.client.renderer.entity.state.AvatarRenderState
+        if (state instanceof net.minecraft.client.renderer.entity.state.HumanoidRenderState
                 || state instanceof net.minecraft.client.renderer.entity.state.VillagerRenderState) {
             for (int p = primStart; p < capture.prim.size(); p += 12) {
                 capture.prim.set(p + 9, Float.intBitsToFloat(Float.floatToRawIntBits(capture.prim.getFloat(p + 9)) | 4096));
@@ -402,9 +407,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // authoritative semantic available here; glass-model roughness/IOR are profile-independent.
         String spriteName = sprite==null?null:sprite.contents().name().toString();
         // Clear glass items bake in the cutout layer; like terrain, they are still a glass slab.
-        boolean transmissive = RtMaterials.refractiveSprite(spriteName,q.materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT
-                || (q.materialInfo().layer() != ChunkSectionLayer.SOLID && RtMaterials.clearGlassSprite(spriteName)));
-        capture.currentAlphaBucket = alphaBucket(q.materialInfo().layer(), false);
+        boolean transmissive = RtMaterials.refractiveItemSprite(spriteName,
+                q.materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT);
+        capture.currentAlphaBucket = transmissive ? RtAccel.ENTITY_BUCKET_ANY_HIT
+                : alphaBucket(q.materialInfo().layer(), false);
         setSpriteMaterial(sprite, transmissive ? RtMaterials.Profile.GLASS : RtMaterials.Profile.DEFAULT,
                 transmissive, false);
         capture.currentOrder = 0; // coplanar baked layers are resolved together after emission
@@ -436,6 +442,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                     .resolve(sprite, profile, transmissive, false);
             capture.currentMaterialId = stochasticAlpha
                     ? RtMaterialRegistry.INSTANCE.withStochasticAlpha(materialId) : materialId;
+        } else if (sprite != null && transmissive) {
+            // 26.2 item sprites live in a separate atlas. Keep its actual UV rectangle and PBR
+            // maps, but select the same dielectric model/parameters as placed glass.
+            capture.currentMaterialId = RtMaterialRegistry.INSTANCE.resolveEntityGlassSprite(sprite);
         } else if (sprite != null && RtEntityTextures.entityPbr()) {
             capture.currentMaterialId = RtMaterialRegistry.INSTANCE.resolveEntitySprite(sprite, stochasticAlpha);
         } else {
@@ -485,6 +495,23 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         RenderPipeline pipeline = ((RenderSetupAccessor) setup).caustica$pipeline();
         ColorTargetState cts = pipeline.getColorTargetState();
         return cts != null && cts.blendFunction().isPresent();
+    }
+
+    private record HiddenCameraPart(ModelPart part, boolean visible) {}
+
+    private static java.util.List<HiddenCameraPart> hideCameraHeads(ModelPart root) {
+        var hidden = new java.util.ArrayList<HiddenCameraPart>(2);
+        hideCameraHeads(root, hidden);
+        return hidden;
+    }
+
+    private static void hideCameraHeads(ModelPart root, java.util.List<HiddenCameraPart> hidden) {
+        for (var entry : ((dev.comfyfluffy.caustica.mixin.ModelPartAccessor)(Object)root).caustica$children().entrySet()) {
+            if (entry.getKey().equals("head") || entry.getKey().equals("hat")) {
+                hidden.add(new HiddenCameraPart(entry.getValue(), entry.getValue().visible));
+                entry.getValue().visible = false;
+            } else hideCameraHeads(entry.getValue(), hidden);
+        }
     }
 
     /** Classify one vanilla submission for the entity BLAS geometry split. */
@@ -972,10 +999,13 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         capture.currentTexSlot = RtEntityTextures.INSTANCE.slotForAtlas(quad.atlas().getTextureLocation());
         // Chunk-layer translucency denotes a block-derived dielectric; a blended item render type denotes
         // ordinary stochastic alpha when the quad did not come from such a layer.
-        boolean transmissive = quad.chunkLayer() == ChunkSectionLayer.TRANSLUCENT;
+        boolean translucent = quad.chunkLayer() == ChunkSectionLayer.TRANSLUCENT;
+        boolean transmissive = state != null ? translucent : RtMaterials.refractiveItemSprite(
+                sprite == null ? null : sprite.contents().name().toString(), translucent);
         boolean stochasticAlpha = itemMesh && !transmissive && quad.itemRenderType() != null
                 && quad.itemRenderType().hasBlending();
-        capture.currentAlphaBucket = alphaBucket(quad.chunkLayer(), stochasticAlpha);
+        capture.currentAlphaBucket = transmissive ? RtAccel.ENTITY_BUCKET_ANY_HIT
+                : alphaBucket(quad.chunkLayer(), stochasticAlpha);
         if (state != null) {
             setBlockSpriteMaterial(sprite, state, transmissive, stochasticAlpha);
         } else {

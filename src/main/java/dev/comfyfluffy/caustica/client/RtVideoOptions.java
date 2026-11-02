@@ -123,10 +123,14 @@ public final class RtVideoOptions {
                     row(scalar("fogDensity", CausticaConfig.Rt.Visuals.FOG, 0f, 4f), CausticaConfig.Rt.Visuals.FOG),
                     row(scalar("wetness", CausticaConfig.Rt.Visuals.WETNESS, 0f, 1f), CausticaConfig.Rt.Visuals.WETNESS),
                     row(scalar("puddle", CausticaConfig.Rt.Visuals.PUDDLE, 0f, 1f), CausticaConfig.Rt.Visuals.PUDDLE),
-                    row(scalar("ripples", CausticaConfig.Rt.Visuals.RIPPLES, 0f, 2f), CausticaConfig.Rt.Visuals.RIPPLES)));
+                    row(scalar("ripples", CausticaConfig.Rt.Visuals.RIPPLES, 0f, 2f), CausticaConfig.Rt.Visuals.RIPPLES),
+                    row(scalar("rippleSpeed", CausticaConfig.Rt.Visuals.RIPPLE_SPEED, .1f, 5f), CausticaConfig.Rt.Visuals.RIPPLE_SPEED),
+                    row(scalar("rippleDensity", CausticaConfig.Rt.Visuals.RIPPLE_DENSITY, .25f, 4f), CausticaConfig.Rt.Visuals.RIPPLE_DENSITY),
+                    row(scalar("rippleFrequency", CausticaConfig.Rt.Visuals.RIPPLE_FREQUENCY, .25f, 4f), CausticaConfig.Rt.Visuals.RIPPLE_FREQUENCY)));
             case "lighting" -> List.of(
                 section("blockLights",
                     row(scalar("emission", CausticaConfig.Rt.Visuals.EMISSION, 0f, 16f), CausticaConfig.Rt.Visuals.EMISSION),
+                    row(toggle("caustica.enhanced.oreEmission", CausticaConfig.Rt.Visuals.ORE_EMISSION), CausticaConfig.Rt.Visuals.ORE_EMISSION),
                     row(scalar("torchBrightness", CausticaConfig.Rt.Visuals.TORCH_BRIGHTNESS, 0f, 8f), CausticaConfig.Rt.Visuals.TORCH_BRIGHTNESS),
                     row(scalar("torchKelvin", CausticaConfig.Rt.Look.TORCH_KELVIN, 1000f, 12000f), CausticaConfig.Rt.Look.TORCH_KELVIN),
                     row(toggle("caustica.enhanced.itrpLightColors", CausticaConfig.Rt.Visuals.ITRP_LIGHT_COLORS), CausticaConfig.Rt.Visuals.ITRP_LIGHT_COLORS),

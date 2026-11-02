@@ -19,7 +19,9 @@ public abstract class LevelExtractorEntitiesMixin {
     @Inject(method = "extractVisibleEntities", at = @At("HEAD"), cancellable = true, require = 0)
     private void caustica$rtExtractsEntities(CallbackInfo ci) {
         // While RT is on but has fallen back to the vanilla path, vanilla is the only one drawing entities.
-        if (VanillaRenderController.rtRuntimeWorkRequested() && !VanillaRenderController.INSTANCE.onVanillaFallback()
+        if (VanillaRenderController.rtRuntimeWorkRequested()
+                && VanillaRenderController.INSTANCE.shouldCancelLevelRenderer()
+                && !VanillaRenderController.INSTANCE.onVanillaFallback()
                 && !Boolean.getBoolean("caustica.test.vanillaEntityExtract")) ci.cancel();
     }
 }

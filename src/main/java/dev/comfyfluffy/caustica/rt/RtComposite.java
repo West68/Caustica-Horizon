@@ -978,6 +978,7 @@ public final class RtComposite {
             // flags: PBR BRDF (bit 1, always on) + camera-in-water (so the path tracer starts in the water
             // medium when the eye is submerged, fixing the air→water first-segment orientation).
             int flags = 0b10;
+            if (!CausticaConfig.Rt.Visuals.ORE_EMISSION.value()) flags |= 65536;
             if(CausticaConfig.Rt.Visuals.DH_LODS.value() && CausticaConfig.Rt.Visuals.DH_SECONDARY.value())flags|=4096;
             if(Boolean.getBoolean("caustica.test.dhHitMarker"))flags|=8192;
             // Test-only A/B keeps identical rays/quality and toggles only unused hit shading.
@@ -1023,7 +1024,10 @@ public final class RtComposite {
             // float precision). hitPos.xz (rebased) + anchor reconstructs a world-pinned coordinate, so the
             // ripple pattern stays fixed in the world as the player moves and the rebase origin shifts.
             Float4 waterAnchor = new Float4(terrain.blockX & WATER_ANCHOR_MASK,
-                    terrain.blockZ & WATER_ANCHOR_MASK, 0f, 0f);
+                    terrain.blockZ & WATER_ANCHOR_MASK,
+                    Float.intBitsToFloat((Float.floatToFloat16(CausticaConfig.Rt.Visuals.RIPPLE_SPEED.value()) & 0xffff)
+                            | ((Float.floatToFloat16(CausticaConfig.Rt.Visuals.RIPPLE_FREQUENCY.value()) & 0xffff) << 16)),
+                    CausticaConfig.Rt.Visuals.RIPPLE_DENSITY.value());
 
             // Rebuild the TLAS this frame from static section instances merged with dynamic entity
             // instances, bind it into the pipeline's descriptor ring, record the build, then barrier so

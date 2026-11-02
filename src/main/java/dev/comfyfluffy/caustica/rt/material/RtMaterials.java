@@ -12,6 +12,8 @@ import java.util.Set;
  * copied into immutable {@link RtMaterialDesc} records at resource load; terrain primitives carry IDs.
  */
 public final class RtMaterials {
+    private static final String[] ORE_SPRITES = {"coal_ore", "iron_ore", "copper_ore", "gold_ore", "redstone_ore",
+            "emerald_ore", "lapis_ore", "diamond_ore", "nether_gold_ore", "nether_quartz_ore"};
     private RtMaterials() {}
 
     public enum Profile {
@@ -62,6 +64,20 @@ public final class RtMaterials {
         if(name==null)return false;
         String p=name.toLowerCase(java.util.Locale.ROOT);
         return p.endsWith("glass") || p.endsWith("glass_pane_top");
+    }
+    /** Item atlases can report clear glass as solid/cutout; its sprite still identifies the dielectric. */
+    public static boolean refractiveItemSprite(String name, boolean translucent) {
+        return refractiveSprite(name, translucent || clearGlassSprite(name));
+    }
+    /** Canonical ore sprites and pack-specific variants, without matching unrelated names such as spores. */
+    public static boolean oreSprite(String name) {
+        if (name == null) return false;
+        String path = name.substring(name.lastIndexOf('/') + 1).toLowerCase(java.util.Locale.ROOT);
+        if (path.endsWith(".png")) path = path.substring(0, path.length() - 4);
+        if (path.startsWith("deepslate_")) path = path.substring(10);
+        for (String ore : ORE_SPRITES)
+            if (path.equals(ore) || path.startsWith(ore + "_")) return true;
+        return false;
     }
     public static boolean refractive(BlockState state,boolean translucent) {
         return translucent && state!=null && (state.getSoundType()==SoundType.GLASS

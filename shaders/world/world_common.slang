@@ -55,7 +55,7 @@ public struct WorldPush {
     public float4   sunUv;            // vanilla sun sprite atlas rect (u0,v0,u1,v1)
     public float4   moonUv;           // vanilla current-moon-phase sprite atlas rect
     public float4   waterParams;      // xyz camera-biome water tint, w wave time (s)
-    public float4   waterAnchor;      // xy world-stable wave-domain anchor
+    public float4   waterAnchor;      // xy world-stable wave anchor; z packed half2 ripple speed/frequency, w density
     public float4x4 curViewProj;      // forward camera-relative view-projection
     public uint     breakCount;
     public uint64_t cloudNoiseAddr;    // optional user-owned 64x64 RGBA8 data
@@ -100,6 +100,9 @@ public struct WorldPush {
     public uint     lightCount;       // packed Light records in pc.lightBufAddr
     public uint     risCandidates;    // RIS candidate count M per diffuse vertex (0 = emitter NEE off)
 };
+
+public static const uint FRAME_FLAG_DISABLE_ORE_EMISSION = 65536u;
+public static const uint MATERIAL_FEATURE_ORE_EMISSION = 8388608u;
 
 // 32-byte area-light record. Radiance is packed R11G11B10 (albedo * mask * state light, before this fork's
 // EMISSIVE_STRENGTH/visual gains, which world.rgen applies exactly as for a direct hit). section packs a
@@ -156,7 +159,8 @@ public struct Payload {
 // Query-only alias: invoke its retained hit object without another traversal or a larger payload.
 public static const uint PAYLOAD_HAS_RELIEF = 0x10000000u;
 public static const uint PAYLOAD_RELIEF_QUERY = 0x20000000u;
-// Static glass may supply RR guides from its actual optical continuation, rather than the front pane.
+// Flat block glass (including block-item geometry) supplies RR guides from the optical continuation.
+// The legacy name describes the slab model, not whether its entity has a motion vector.
 public static const uint PAYLOAD_STATIC_GLASS = 0x40000000u;
 // torchControl.w packs, low to high: sun glow (below 4), night brightness * 4 in hundredths (below 4000), switches * 4000.
 public static const uint LOOK_SWITCH_NO_NEBULA = 1u;

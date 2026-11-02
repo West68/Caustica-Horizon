@@ -19,6 +19,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(LevelRenderer.class)
 public abstract class LevelRendererMixin {
+    @org.spongepowered.asm.mixin.Unique
+    private final dev.comfyfluffy.caustica.client.RasterChunkUpdates caustica$deferredChunkUpdates =
+            new dev.comfyfluffy.caustica.client.RasterChunkUpdates();
 	@Shadow
 	@Final
 	private LevelRenderState levelRenderState;
@@ -49,8 +52,14 @@ public abstract class LevelRendererMixin {
 		}
 
 		if (!VanillaRenderController.INSTANCE.shouldCancelLevelRenderer(waitingForRtPlayerSection)) {
+            if (caustica$deferredChunkUpdates.replay(net.minecraft.client.Minecraft.getInstance().level,
+                    levelRenderState.chunkLoadingRenderState))
+                dev.comfyfluffy.caustica.CausticaMod.LOGGER.info("RT suspended: replayed deferred raster chunk visibility notifications");
 			return;
 		}
+
+        caustica$deferredChunkUpdates.defer(net.minecraft.client.Minecraft.getInstance().level,
+                levelRenderState.chunkLoadingRenderState);
 
 		// Cancellation may bypass Xaero's own HEAD notification depending on mixin order.
 		dev.comfyfluffy.caustica.client.XaeroRenderCompat.beforeCancelWorld(modelViewMatrix);

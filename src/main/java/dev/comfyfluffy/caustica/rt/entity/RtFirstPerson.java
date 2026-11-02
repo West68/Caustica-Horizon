@@ -1,14 +1,11 @@
 package dev.comfyfluffy.caustica.rt.entity;
 import dev.comfyfluffy.caustica.client.VanillaRenderController;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import org.slf4j.LoggerFactory;
 /** Captures final animated hand/item submissions once, including EMF player extensions. */
 public final class RtFirstPerson {
     private static final org.slf4j.Logger LOGGER=LoggerFactory.getLogger("Caustica");
-    private static final boolean INSTALLED=FabricLoader.getInstance().isModLoaded("punchy")
-        || FabricLoader.getInstance().isModLoaded("entity_model_features");
     /**
      * Opt-in diagnosis of the whole first-person chain (-Dcaustica.enhanced.punchyProbe=true). When off every
      * counter below is skipped entirely, so normal play pays nothing for it.
@@ -18,7 +15,7 @@ public final class RtFirstPerson {
     private static final org.joml.Matrix4f handProjection = new org.joml.Matrix4f();
     private static boolean projectionCaptured;
     public static void captureProjection(net.minecraft.client.renderer.Projection projection) {
-        if (INSTALLED) { projection.getMatrix(handProjection); projectionCaptured = true; }
+        projection.getMatrix(handProjection); projectionCaptured = true;
     }
     static org.joml.Matrix4fc projection() { return projectionCaptured ? handProjection : null; }
     public static long capturedFrames;
@@ -28,20 +25,19 @@ public final class RtFirstPerson {
         static final RtEntityCapture CAPTURE=new RtEntityCapture();
         static final RtEntityCollector COLLECTOR=new RtEntityCollector();
     }
-    public static boolean enabled(){return INSTALLED && !Boolean.getBoolean("caustica.enhanced.disablePunchyCapture")
+    public static boolean enabled(){return !Boolean.getBoolean("caustica.enhanced.disablePunchyCapture")
         && RtEntities.enabled() && VanillaRenderController.INSTANCE.shouldCaptureRtFirstPerson()
         && dev.comfyfluffy.caustica.client.BetterPlayerModelCompat.realFirstPerson();}
     /** True while the opt-in first-person probe is active; gates all diagnostic counters on the hot paths. */
     public static boolean probe(){return PROBE;}
     public static void beginFrame(){
-        if(!INSTALLED)return;
         State.CAPTURE.reset();collecting=false;triangles=0;projectionCaptured=false;
         if(PROBE){probeFrames++;if(enabled())probeEnabledFrames++;}
     }
     public static void begin(){collecting=true;State.COLLECTOR.begin(State.CAPTURE,false);State.COLLECTOR.probeHand(PROBE);if(PROBE)probeCollectingFrames++;}
     public static SubmitNodeCollector collector(SubmitNodeCollector fallback){return collecting?State.COLLECTOR:fallback;}
     public static boolean collecting(){return collecting;}
-    static RtEntityCapture capture(){return INSTALLED?State.CAPTURE:null;}
+    static RtEntityCapture capture(){return State.CAPTURE;}
     public static void end(){
         State.COLLECTOR.probeHand(false);
         State.COLLECTOR.begin(null,false);
@@ -79,6 +75,6 @@ public final class RtFirstPerson {
         RtEntityCollector.resetProbeCounters();
         RtEntities.resetHandProbeCounters();
     }
-    public static void onReload(){if(INSTALLED){State.COLLECTOR.clearCaches();State.CAPTURE.reset();}}
+    public static void onReload(){State.COLLECTOR.clearCaches();State.CAPTURE.reset();}
     private RtFirstPerson(){}
 }

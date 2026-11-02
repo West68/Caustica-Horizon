@@ -1,4 +1,12 @@
 {
+  "caustica.enhanced.oreEmission": "礦物材質自發光",
+  "caustica.enhanced.oreEmission.tooltip": "關閉非發光礦石的材質額外自發光；火把和點亮的紅石礦等正常光源保持原樣。",
+  "caustica.enhanced.param.rippleSpeed": "雨滴漣漪速度",
+  "caustica.enhanced.param.rippleSpeed.tooltip": "調節地面和水面上漣漪向外傳播的速度。預設 1 倍；不改變原有海浪動畫。",
+  "caustica.enhanced.param.rippleDensity": "雨滴漣漪密度",
+  "caustica.enhanced.param.rippleDensity.tooltip": "調節單位面積的雨滴落點數量，取樣數量保持不變。",
+  "caustica.enhanced.param.rippleFrequency": "雨滴漣漪頻率",
+  "caustica.enhanced.param.rippleFrequency.tooltip": "調節波紋環的細密程度：值越高，環間距越小。雨滴落點數量由漣漪密度單獨控制。",
 	"caustica.options.rt.header": "光線追蹤",
 
 	"caustica.options.rt.exposureMode": "曝光",
