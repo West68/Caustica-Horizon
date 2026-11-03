@@ -18,25 +18,29 @@ import net.minecraft.world.phys.Vec3;
  *   <li>beacon beams, which are a custom-geometry column submitted far above the block and are dropped
  *       by that same gate, leaving an activated beacon with no visible beam in the RT scene.</li>
  * </ul>
- * Both keep the renderer's own validity/distance checks and its extraction, but skip the occlusion
- * verdict.
+ * Both keep renderer validity checks. Portal surfaces use the RT chunk range instead of the
+ * renderer's distance gate. Beacons retain their renderer distance check.
  */
 final class RtPortalCapture {
     private RtPortalCapture() {}
 
     static BlockEntityRenderState extract(BlockEntityRenderDispatcher dispatcher, BlockEntity entity,
             float partialTick, Vec3 camera) {
-        if (entity.getClass() == TheEndPortalBlockEntity.class)
-            return extractUngated(dispatcher.getRenderer(entity), entity, partialTick, camera);
+        if (isPortal(entity))
+            return extractUngated(dispatcher.getRenderer(entity), entity, partialTick, camera, false);
         if (entity instanceof BeaconBlockEntity)
-            return extractUngated(dispatcher.getRenderer(entity), entity, partialTick, camera);
+            return extractUngated(dispatcher.getRenderer(entity), entity, partialTick, camera, true);
         return dispatcher.tryExtractRenderState(entity, partialTick, null, false);
     }
 
+    static boolean isPortal(BlockEntity entity) {
+        return entity instanceof TheEndPortalBlockEntity;
+    }
+
     private static <E extends BlockEntity, S extends BlockEntityRenderState> S extractUngated(
-            BlockEntityRenderer<E, S> renderer, E entity, float partialTick, Vec3 camera) {
+            BlockEntityRenderer<E, S> renderer, E entity, float partialTick, Vec3 camera, boolean checkDistance) {
         if (renderer == null || !entity.hasLevel() || !entity.getType().isValid(entity.getBlockState())
-                || !renderer.shouldRender(entity, camera)) return null;
+                || (checkDistance && !renderer.shouldRender(entity, camera))) return null;
         S state = renderer.createRenderState();
         renderer.extractRenderState(entity, state, partialTick, camera, null);
         return state;

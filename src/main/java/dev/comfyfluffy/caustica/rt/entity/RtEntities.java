@@ -1542,12 +1542,15 @@ public final class RtEntities {
         }
         candidates.clear();
         int viewChunks = beViewChunks();
-        for (int cx = pcx - viewChunks; cx <= pcx + viewChunks; cx++) {
-            for (int cz = pcz - viewChunks; cz <= pcz + viewChunks; cz++) {
+        int portalViewChunks = Math.max(viewChunks, mc.options.getEffectiveRenderDistance());
+        for (int cx = pcx - portalViewChunks; cx <= pcx + portalViewChunks; cx++) {
+            for (int cz = pcz - portalViewChunks; cz <= pcz + portalViewChunks; cz++) {
+                boolean outsideBlockEntityRange = Math.abs(cx - pcx) > viewChunks || Math.abs(cz - pcz) > viewChunks;
                 if (!level.getChunkSource().hasChunk(cx, cz) || !(level.getChunk(cx, cz) instanceof LevelChunk chunk)) {
                     continue;
                 }
                 for (BlockEntity be : chunk.getBlockEntities().values()) {
+                    if (outsideBlockEntityRange && !RtPortalCapture.isPortal(be)) continue;
                     BlockPos p = be.getBlockPos();
                     double dx = p.getX() + 0.5 - cam.x;
                     double dy = p.getY() + 0.5 - cam.y;

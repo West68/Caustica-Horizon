@@ -1744,7 +1744,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             bool waterGuidePrefix = bounce == gvBounce && !rc_update && !firstPersonReceiver
                     && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u && waterPlaneSin2 < 1.0;
             float waterPlaneF = waterGuidePrefix ? fresnelDielectric(waterPlaneCos, etaI, etaT) : 1.0;
-            bool waterUnfold = bounce < maxBounces && waterPlaneF < 0.5;
+            bool extendWaterTransport = bounce < maxBounces && waterPlaneF < 0.08;
             float F = fresnelDielectric(cosI, etaI, etaT);
             // In transmission-dominant views, add escaping sky exactly and sample geometry
             // reflections with compensated Fresnel weights. Reflection-dominant views keep
@@ -1778,19 +1778,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 reflectNow = waterMirror || rndf(seed) < F;
                 if (waterMirror) throughput *= F;
             }
-            // Reuse the actual transmitted path. Only a sampled reflection needs a
-            // separate transmission probe; that path continues in another direction.
-            waterUnfold = waterUnfold && !reflectNow;
-            if (waterUnfold) {
-                gv_normal = n;
-                gv_rough = clamp(payloadRoughness(), 0.12, 1.0);
-                gv_hitCamRel = hitPos - worldPush.camOffset;
-                gv_motionHitCamRel = gv_hitCamRel;
-                gv_motionUseRefracted = false;
-                gv_motionObjDisp = float3(0.0, 0.0, 0.0);
-                gv_albedo = float3(0.0, 0.0, 0.0);
-                gv_specAlb = float3(0.02, 0.02, 0.02);
-            } else if (bounce == gvBounce) { // primary water hit: feed RR a smooth dielectric specular surface
+            // RR guides follow a deterministic ray, independent of the sampled Fresnel branch.
+            if (bounce == gvBounce && !rc_update) {
                 gv_normal = n;
                 // RR guide only: a perfect mirror tells RR to keep every high-frequency sample, grain included.
                 gv_rough = clamp(payloadRoughness(), 0.12, 1.0);
@@ -1802,7 +1791,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 float3 refractedSpecAlbedo;
                 float3 refractedNormal;
                 float refractedRoughness;
-                refractedGuideHit(hitPos, rd, n, inWater, materialIor, cameraVisibilityPath, rayConeWidth, rayConeSpread,
+                refractedGuideHit(hitPos, rd, waterGuidePrefix ? waterPlaneNormal : n, inWater, materialIor, cameraVisibilityPath, rayConeWidth, rayConeSpread,
                         gv_motionHitCamRel, gv_motionObjDisp,
                         gv_motionUseRefracted, refractedAlbedo, refractedSpecAlbedo, refractedNormal, refractedRoughness);
                 gv_albedo = refractedAlbedo;
@@ -1820,7 +1809,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 // virtual image, just as the reused continuation does for near water. Mixing floor
                 // albedo with interface depth/normal/roughness created a circular denoising boundary.
                 // This reuses the existing probe; it adds no ray, sample, or transport bounce.
-                if (gv_motionUseRefracted && waterPlaneF < 0.5 && F < 0.9
+                if (gv_motionUseRefracted && waterPlaneF < 0.5
                         && mirrorGuideAppendTransmission(psrTransform, hitPos - worldPush.camOffset,
                                 waterPlaneNormal, waterEtaRatio, waterPlaneCos, sqrt(1.0 - waterPlaneSin2))) {
                     gv_hitCamRel = gv_motionHitCamRel;
@@ -1828,7 +1817,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                     gv_rough = refractedRoughness;
                     gv_specAlb = refractedSpecAlbedo;
                     gv_motionUseRefracted = false;
-                    psrPrimarySpec = max(psrPrimarySpec, F);
+                    psrPrimarySpec = max(psrPrimarySpec, waterPlaneF);
                     gv_psr = true;
                 }
             }
@@ -1837,7 +1826,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 // Total internal reflection seen from below, and grazing water, are mirrors. Like a metal mirror the reflected
                 // vertex supplies the guides, so RR keeps that surface's texture instead of denoising it away where
                 // only soft indirect light reaches it. The flat plane keeps the guide motion steady under ripples.
-                if (F >= 0.9 && bounce == gvBounce && !rc_update && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u) {
+                if (F >= 0.9 && waterPlaneF >= 0.9 && bounce == gvBounce && !rc_update
+                        && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u) {
                     mirrorGuideAppend(psrTransform, hitPos - worldPush.camOffset, waterPlaneNormal);
                     gvBounce = bounce + 1;
                     if (!gv_psr) { maxBounces += 1; rrStart += 1; }
@@ -1847,13 +1837,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 ro = hitPos + n * SURF_BIAS; // reflected ray stays on the incidence side
             } else {
                 rd = refract(rd, n, etaI / etaT); // F < 1 here, so this is never total internal reflection
-                if (waterUnfold && mirrorGuideAppendTransmission(psrTransform, hitPos - worldPush.camOffset, waterPlaneNormal,
-                        waterEtaRatio, waterPlaneCos, sqrt(1.0 - waterPlaneSin2))) {
-                    psrPrimarySpec = max(psrPrimarySpec, F);
-                    // Keep the old transport budget; far-water guide reuse adds no bounce.
-                    if (waterPlaneF < 0.08 && clearInterfaces < 4) { clearInterfaces++; maxBounces += 1; rrStart += 1; }
-                    gv_psr = true;
-                    gvBounce = bounce + 1;
+                if (extendWaterTransport && clearInterfaces < 4) {
+                    clearInterfaces++;
+                    maxBounces++;
+                    rrStart++;
                 }
                 throughput *= transmission;
                 throughTransmission = true;
