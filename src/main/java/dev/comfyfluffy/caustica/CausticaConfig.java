@@ -698,6 +698,8 @@ public final class CausticaConfig {
                     bool("caustica.rt.particles", "particles.enabled", true);
             public static final BooleanSetting GLOW_ENABLED =
                     bool("caustica.rt.glow", "entities.glow.enabled", true);
+            public static final BooleanSetting NAME_TAG_SHADOWS =
+                    bool("caustica.rt.nameTagShadows", "entities.name-tags.cast-shadows", false);
             public static final BooleanSetting NAME_TAGS_ENABLED =
                     bool("caustica.rt.nameTags", "entities.name-tags.enabled", true);
             /**

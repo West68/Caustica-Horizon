@@ -141,6 +141,8 @@ public final class RtEntityCollector implements SubmitNodeCollector {
      * outline colour for the entity about to be captured. The end-of-entity {@code begin(null)} detach
      * call must NOT reset it — {@link RtEntities} reads {@link #outlineColor()} after that detach.
      */
+    boolean suppressTextShadows;
+
     public void begin(RtEntityCapture capture, boolean profileDynamicEntity) {
         playerOnRealPath = false;
         // Submissions that arrive before the RT material snapshot exists cannot be consumed later; their
@@ -652,7 +654,15 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             capture.currentMaterialId = RtMaterialRegistry.INSTANCE.entityFallbackId(stochasticAlpha);
             capture.currentOrder = 0;
             capture.clearUvRemap(); // glyph U/V are already atlas-space
+            int firstPrim = capture.prim.size();
             renderable.render(pose, textVertexConsumer, lightCoords, false);
+            if (suppressTextShadows) {
+                for (int p = firstPrim; p < capture.prim.size(); p += 12) {
+                    int flags = Float.floatToRawIntBits(capture.prim.getFloat(p + 9));
+                    capture.prim.set(p + 9, Float.intBitsToFloat(flags | 256));
+                    capture.alphaBuckets.set(p / 12, RtAccel.ENTITY_BUCKET_ANY_HIT);
+                }
+            }
         }
     }
 

@@ -72,6 +72,13 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             return;
         }
 
+        // Floating text stays visible to radiance rays without occluding light.
+        if (instanceKind == ENTITY_BIT && (epr.flags & 256u) != 0u
+                && (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u) {
+            IgnoreHit();
+            return;
+        }
+
         int texSlot = int(epr.tint.w + 0.5);
         bool bakedFoil=instanceKind==ENTITY_BIT && (epr.flags&16384u)!=0u;
         if(bakedFoil && entityAlbedoTex[NonUniformResourceIndex(epr.flags>>16u)].SampleLevel(uv,0).a<ENTITY_ALPHA_CUTOFF) {

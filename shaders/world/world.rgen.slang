@@ -2008,7 +2008,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             // ray meets (wearing only boots blacked out the whole upper body). With ARMOR_SKIN_LIT on, the
             // ray starts just outside that shell. Armour keeps its PBR shading, reflections and its own
             // shadows on the world; only this thin band is stepped over.
-            const bool armorSkinLit = (lookSwitches(worldPush.torchControl.w) & LOOK_SWITCH_ARMOR_SKIN_LIT) != 0u;
+            const bool armorSkinLit = (payload.flags & 8u) != 0u && (lookSwitches(worldPush.torchControl.w) & LOOK_SWITCH_ARMOR_SKIN_LIT) != 0u;
             float3 vis = visibility(armorSkinLit ? p + n * 0.12 : p, lightDir, 10000.0);
             // Underwater receiver whose shadow ray crossed a water surface: scale the direct light by
             // the wave-refraction caustic at the exit point. Focusing scales the incident irradiance,

@@ -286,6 +286,7 @@
   "caustica.enhanced.mirrorPsr": "Mirror primary surface replacement",
   "caustica.enhanced.moonSize": "Moon size",
   "caustica.enhanced.nameTags": "Name tags",
+  "caustica.enhanced.nameTagShadows": "Floating Text Casts Shadows",
   "caustica.enhanced.nebula": "Nebula",
   "caustica.enhanced.netherBrightness": "Nether brightness",
   "caustica.enhanced.netherBrightness.tooltip": "Nether brightness",

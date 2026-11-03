@@ -944,8 +944,11 @@ public final class RtEntities {
                 // so ordinary world translation no longer changes the mesh or its float precision.
                 long submitStart = RtFrameStats.FRAME.startStage();
                 try {
+                    collector.suppressTextShadows = entity instanceof net.minecraft.world.entity.Display.TextDisplay
+                            && !CausticaConfig.Rt.Entities.NAME_TAG_SHADOWS.value();
                     dispatcher.submit(state, cameraState, 0.0, 0.0, 0.0, entityPoseStack, collector);
                 } finally {
+                    collector.suppressTextShadows = false;
                     RtFrameStats.FRAME.endStage("entity.capture.submit", submitStart);
                 }
             } catch (Throwable t) {

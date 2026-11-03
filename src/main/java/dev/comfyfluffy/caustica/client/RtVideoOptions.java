@@ -163,6 +163,7 @@ public final class RtVideoOptions {
                     row(particles(), CausticaConfig.Rt.Entities.PARTICLES_ENABLED),
                     row(toggle("caustica.options.rt.glow", CausticaConfig.Rt.Entities.GLOW_ENABLED), CausticaConfig.Rt.Entities.GLOW_ENABLED),
                     row(toggle("caustica.enhanced.nameTags", CausticaConfig.Rt.Entities.NAME_TAGS_ENABLED), CausticaConfig.Rt.Entities.NAME_TAGS_ENABLED),
+                    row(toggle("caustica.enhanced.nameTagShadows", CausticaConfig.Rt.Entities.NAME_TAG_SHADOWS), CausticaConfig.Rt.Entities.NAME_TAG_SHADOWS),
                     row(toggle("caustica.enhanced.blockOutline", CausticaConfig.Rt.Overlay.BLOCK_OUTLINE_ENABLED), CausticaConfig.Rt.Overlay.BLOCK_OUTLINE_ENABLED),
                     row(toggle("caustica.enhanced.dhLods", CausticaConfig.Rt.Visuals.DH_LODS), CausticaConfig.Rt.Visuals.DH_LODS),
                     row(toggle("caustica.enhanced.dhSecondary", CausticaConfig.Rt.Visuals.DH_SECONDARY), CausticaConfig.Rt.Visuals.DH_SECONDARY)),
