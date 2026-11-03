@@ -6,11 +6,8 @@ class VisualEffectsContractTest {
  @Test void additiveBackgroundAndParticleAlphaAreNotOpaque() throws Exception {
   String shader=Files.readString(Path.of("shaders/world/world.rahit.slang"));
   assertTrue(shader.contains("stochasticAlpha = instanceKind == PARTICLE_BIT"));
-  assertTrue(shader.contains("texel.a*=saturate(max(texel.r,max(texel.g,texel.b))*.5)"));
-  for(double intensity:new double[]{0,.1,.5,1}) {
-   double p=intensity*.5;assertTrue(p>=0 && p<=.5);
-   if(intensity==0)assertEquals(0,p); // black additive background contributes zero coverage
-  }
+  assertTrue(shader.contains("if(max(texel.r,max(texel.g,texel.b))<.3) {IgnoreHit();return;}"));
+  assertTrue(shader.contains("if (texel.a < 0.1 || (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u) IgnoreHit();"));
  }
  @Test void crystalCoreMaskDoesNotMarkGlassHalfOfTheTexture() {
   // Verified EndCrystalModel cube texOffs(32,0), glass texOffs(0,0), 64x32 texture.

@@ -391,6 +391,37 @@ tasks.named("jar", Jar).configure {
 	}
 }
 
+// Package the current Gradle artifact, including its declared nested libraries and native bundles.
+// Release builds must never depend on overlaying classes onto an older published Jar.
+def releaseMetadata = tasks.register("generateReleaseMetadata") {
+    dependsOn tasks.named("jar")
+    inputs.file(tasks.named("jar", Jar).flatMap { it.archiveFile })
+    outputs.dir(layout.buildDirectory.dir("generated/release-metadata"))
+    doLast {
+        def output = layout.buildDirectory.dir("generated/release-metadata").get().asFile
+        output.mkdirs()
+        new java.util.zip.ZipFile(tasks.named("jar", Jar).get().archiveFile.get().asFile).withCloseable { zip ->
+            def metadata = new groovy.json.JsonSlurper().parse(zip.getInputStream(zip.getEntry("fabric.mod.json")))
+            metadata.mixins = metadata.mixins.findAll { it != "caustica.dev.mixins.json" }
+            new File(output, "fabric.mod.json").setText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(metadata)), "UTF-8")
+        }
+        new File(output, "caustica-release.marker").setText(project.version.toString() + "\n", "UTF-8")
+    }
+}
+tasks.register("releaseJar", Jar) {
+    dependsOn releaseMetadata
+    destinationDirectory = layout.buildDirectory.dir("release")
+    archiveClassifier = ""
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+    from({ zipTree(tasks.named("jar", Jar).get().archiveFile.get().asFile) }) {
+        exclude "fabric.mod.json", "caustica.dev.mixins.json"
+        exclude { entry -> entry.path ==~ /dev\/comfyfluffy\/caustica\/(client\/(CinematicDirector|TestMapShots|PunchyScenario|ContinuityScenario|DhLodProgress|PerfSweep|PerfAutoBench)|mixin\/(CinematicInputMixin|CinematicMouseMixin|DhGenerationQueueMixin))(\$.*)?\.class/ }
+    }
+    from(layout.buildDirectory.dir("generated/release-metadata"))
+}
+tasks.named("assemble").configure { dependsOn tasks.named("releaseJar") }
+
 publishing {
 	publications {
 		create("mavenJava", MavenPublication) {
@@ -422,7 +453,9 @@ tasks.register("exportInstalledClientTest") {
     }
 }
 // A source artifact must not contain proprietary native runtime binaries.
-tasks.named("sourcesJar", Jar).configure { exclude "caustica/natives/**"; exclude "caustica/rt/*.spv" }
+tasks.named("sourcesJar", Jar).configure {
+    exclude "caustica/natives/**", "caustica/streamline-natives/**", "caustica/bootstrap/**", "caustica/rt/*.spv"
+}
 
 // The Streamline natives ship unconditionally. They were built from the official Streamline 2.14.16 SDK and
 // are kept under native/prebuilt so a normal build never depends on the SDK being present. Leaving them out

@@ -22,7 +22,7 @@ class EnvironmentFrameLayoutTest {
   }
   var frame=WorldPushData.class.getDeclaredConstructor(types).newInstance(values);
   ByteBuffer bytes=ByteBuffer.allocateDirect(WorldPushData.BYTE_SIZE).order(ByteOrder.nativeOrder());frame.write(bytes);
-  assertEquals(1056,WorldPushData.BYTE_SIZE);assertEquals(40,WorldPushConstantsData.BYTE_SIZE);
+  assertEquals(1136,WorldPushData.BYTE_SIZE);assertEquals(80,WorldPushConstantsData.BYTE_SIZE);
   String[] fields={"mainLightPosition","mainLightColor","offLightPosition","offLightColor","environment","mediumParams","dimensionFog","visualLight","surfaceControl","dimensionControl"};
   for(int i=0;i<fields.length;i++) {
    var v=(WorldPushData.Float4)WorldPushData.class.getMethod(fields[i]).invoke(frame);

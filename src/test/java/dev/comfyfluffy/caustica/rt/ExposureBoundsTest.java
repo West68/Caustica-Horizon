@@ -5,8 +5,9 @@ import java.nio.file.*;
 class ExposureBoundsTest {
  @Test void underwaterFillTracksDaylightInsteadOfOnlySkyAccess() throws Exception {
   String s=Files.readString(Path.of("shaders/world/world.rgen.slang"));
-  assertTrue(s.contains("lerp(.002,1.0,saturate(worldPush.sunDir.w))*worldPush.environment.w"));
-  double access=1;double day=.025*access,night=.025*.002*access;
+  assertTrue(s.contains("cameraSky=saturate(worldPush.environment.w)"));
+  assertTrue(s.contains("lerp(.002,1.0,saturate(worldPush.sunDir.w))*cameraSky*cameraSky*cameraSky"));
+  double access=.5;double day=.025*access*access*access,night=day*.002;
   assertEquals(.002,night/day,1e-12);
  }
  @Test void nightAdaptationDoesNotEraseSourceDynamicRange() throws Exception {

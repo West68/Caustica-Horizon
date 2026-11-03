@@ -41,9 +41,12 @@ import itrp_atmosphere;
 [[vk::binding(7, 0)]] [format("rgba16f")] RWTexture2D<float4> gSpecAlbedo; // specular albedo (0 — diffuse-only)
 [[vk::binding(8, 0)]] [format("rg16f")]   RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
 
-// Per-frame push data loaded once from the BDA buffer at the top of main() (same pattern as the GLSL
-// `worldPush` global). Layout constants generated from this module's SPIR-V — see world_common.WorldPush.
-static WorldPush worldPush;
+// Immutable frame fields are read from their existing std430 BDA buffer at their use sites.
+// Avoid keeping the entire frame structure live across hit-object invocation boundaries.
+// The End light adjustment remains invocation-local, exactly as in the original path.
+static ConstPtr<WorldPush> framePtr;
+#define worldPush framePtr[0]
+static float3 activeLightRadiance;
 
 // Ray payloads. Module-level statics so the helper functions (visibility / refractedGuideHit /
 // specularReflectionMotion / tracePath) can share them, mirroring the GLSL rayPayloadEXT globals.
@@ -592,11 +595,11 @@ float3 visibilityMasked(float3 origin, float3 dir, float tmax,uint mask) {
     return hObj.IsMiss() ? shadowVis.rgb : float3(0.0, 0.0, 0.0);
 }
 
-// Short opaque probe for the sunlight rims: cutouts count as solid (no any-hit), no DH fallback.
+// Short silhouette probe for sunlight rims. Respect cutout alpha, like the lit surface itself.
 bool probeHit(float3 origin, float3 dir, float tmax) {
     Payload shadowPayload = makeShadowPayload();
     HitObject hObj = HitObject::TraceRay(topLevelAS,
-            RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
             secondaryReceiverMask, SBT_SHADOW, SBT_STRIDE_BUCKET, 0u, makeRay(origin, RAY_TMIN, dir, tmax), shadowPayload);
     return !hObj.IsMiss();
 }
@@ -656,7 +659,7 @@ bool reflectedDirect(float3 origin, float3 dir, inout uint seed, out float3 radi
         float3 lightDir = worldPush.lightDir.xyz;
         if (worldPush.lightDir.w > 0.0) lightDir = sampleSquare(lightDir, worldPush.lightDir.w, seed);
         float ndl = dot(hitNormal, lightDir);
-        if (ndl > 0.0) radiance = albedo * INV_PI * worldPush.lightRadiance.xyz * ndl * visibility(hitPos, lightDir, 10000.0);
+        if (ndl > 0.0) radiance = albedo * INV_PI * activeLightRadiance * ndl * visibility(hitPos, lightDir, 10000.0);
     }
     payload = saved;
     return miss;
@@ -706,7 +709,7 @@ float3 heldLighting(float3 hitPos,float3 n,float3 v,float3 diffAlb,float3 F0,flo
 // One point-light/celestial sample of single scattering, with categorical PDF compensation.
 // This is a bounded visual approximation, not the reference's multiple-scattering volume integrator.
 float3 volumeLighting(float3 position,float3 viewRay,float g,float3 extinction,bool water,inout uint seed) {
-    float a=luminance(worldPush.lightRadiance.xyz)*hgPhase(dot(viewRay,worldPush.lightDir.xyz),g);
+    float a=luminance(activeLightRadiance)*hgPhase(dot(viewRay,worldPush.lightDir.xyz),g);
     float3 toMain=worldPush.mainLightPosition.xyz-position,toOff=worldPush.offLightPosition.xyz-position;
     float b=luminance(worldPush.mainLightColor.xyz)*heldFalloff(length(toMain),worldPush.mainLightPosition.w)
             *hgPhase(dot(viewRay,toMain/max(length(toMain),1e-5)),g);
@@ -714,7 +717,7 @@ float3 volumeLighting(float3 position,float3 viewRay,float g,float3 extinction,b
             *hgPhase(dot(viewRay,toOff/max(length(toOff),1e-5)),g);
     float total=a+b+c;if(total<=0)return float3(0,0,0);
     float choose=rndf(seed)*total;
-    float3 ld=worldPush.lightDir.xyz,intensity=worldPush.lightRadiance.xyz;
+    float3 ld=worldPush.lightDir.xyz,intensity=activeLightRadiance;
     float probability=a/total,distance=10000.0,attenuation=1.0;
     if(choose>=a) {
         bool main=choose<a+b;
@@ -789,7 +792,7 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
         float3 mediumLight=exp(-extinction*t)*source*(sigma/max(pdf,1e-20));
         if(!water) {
             float mediumAmount=luminance(mediumLight);
-            float mediumLimit=luminance(worldPush.lightRadiance.xyz)*0.015;
+            float mediumLimit=luminance(activeLightRadiance)*0.015;
             if(mediumAmount>mediumLimit)mediumLight*=mediumLimit/mediumAmount;
         }
         radiance+=throughput*(mediumLight
@@ -885,22 +888,23 @@ float2 specularReflectionMotion(float3 surfacePos, float3 primaryDir, float2 cur
     return checkedMotion(previousClip, currentNdc, size, surfaceMotion);
 }
 
-// One-interface refraction for the water guide buffers: trace the refracted ray from the surface into
-// (or out of) the water and report the content it lands on. Diffuse AND specular albedo, plus MV, then
-// track that hit as its own feature (the water surface itself has no true diffuse/specular response of
-// its own worth demodulating by — it's a clear interface), while depth stays on the water surface.
+// One-interface transmission probe for guides when the color path reflects instead. Return the
+// complete hit; the caller can unfold its position, normal, roughness and motion consistently.
+// Ordinary transmission reuses its continuation and does not need this independent probe.
 // `refracted` is false on total internal reflection (no refracted hit exists); a sky miss returns a far
 // point along the refracted direction, which the self-delta MV handles uniformly.
 void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNormal, bool inWaterAtSurface,
                        float materialIor, bool cameraView,
                        float rayConeWidth, float rayConeSpread,
                        out float3 hitCamRel, out float3 motionPrev, out bool refracted, out float3 diffuseAlbedo,
-                       out float3 specAlbedo) {
+                       out float3 specAlbedo, out float3 guideNormal, out float guideRoughness) {
     hitCamRel = surfacePos - worldPush.camOffset;
     motionPrev = float3(0.0, 0.0, 0.0);
     refracted = false;
     diffuseAlbedo = float3(0.0, 0.0, 0.0);
     specAlbedo = float3(0.0, 0.0, 0.0);
+    guideNormal = surfaceNormal;
+    guideRoughness = 0.12;
 
     float etaI = inWaterAtSurface ? materialIor : 1.0;
     float etaT = inWaterAtSurface ? 1.0 : materialIor;
@@ -922,6 +926,8 @@ void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNorm
         motionPrev = float3(0.0, 0.0, 0.0);
         diffuseAlbedo = SKY_DIFF_ALBEDO; // sky guide: keep radiance out of the demodulation albedo
         specAlbedo = SKY_SPEC_ALBEDO;
+        guideNormal = float3(0.0);
+        guideRoughness = 1.0;
         return;
     }
 
@@ -931,12 +937,13 @@ void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNorm
     motionPrev = material != MATERIAL_WATER ? payload.motionPrev : float3(0.0, 0.0, 0.0);
     if (material == MATERIAL_OPAQUE) {
         bool pbr = (worldPush.flags & 2u) != 0u;
+        guideNormal = payload.normal;
+        guideRoughness = pbr ? clamp(payloadRoughness(), MIN_ROUGH, 1.0) : 1.0;
         diffuseAlbedo = pbr ? payload.albedo * (1.0 - clamp(payloadMetalness(), 0.0, 1.0)) : payload.albedo;
         if (pbr) {
             float3 f0 = payload.f0;
-            float rough = clamp(payloadRoughness(), MIN_ROUGH, 1.0);
             float NoV = clamp(dot(payload.normal, -refractedDir), 0.0, 1.0);
-            specAlbedo = rrSpecularAlbedo(f0, rough * rough, NoV);
+            specAlbedo = rrSpecularAlbedo(f0, guideRoughness * guideRoughness, NoV);
         }
     }
 }
@@ -959,7 +966,7 @@ float3 dhUnproject(float2 uv,float depth) {
 float3 dhScreenRadiance(float3 color,float3 normal) {
     if(worldPush.environment.x!=2.0)return color;
     float ndl=saturate(dot(normal,worldPush.lightDir.xyz));
-    return color*worldPush.lightRadiance.xyz*(ndl+.15)*INV_PI;
+    return color*activeLightRadiance*(ndl+.15)*INV_PI;
 }
 
 bool dhPrimarySurface(float3 ro,float3 rd,out float3 position,out float3 color,out float3 normal,out float alpha) {
@@ -1638,7 +1645,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 continue;
             }
             float a = saturate(payload.f0.y * 0.15 * saturate(worldPush.mediumParams.y));
-            L += throughput * a * (worldPush.lightRadiance.xyz * 0.001 + 0.002);
+            L += throughput * a * (activeLightRadiance * 0.001 + 0.002);
             throughput *= 1.0 - a;
             ro = hitPos + rd * SURF_BIAS;
             cameraThroughRain = bounce == 0;
@@ -1686,7 +1693,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 float3 shadowOrigin = hitPos + (signedNdl >= 0.0 ? n : -n) * SURF_BIAS;
                 float3 vis = visibility(shadowOrigin, lightDir, 10000.0);
                 if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
-                    L += throughput * albedo * INV_PI * worldPush.lightRadiance.xyz * ndl * vis;
+                    L += throughput * albedo * INV_PI * activeLightRadiance * ndl * vis;
                 }
             }
 
@@ -1729,12 +1736,51 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             // Seen steeply, water shows mainly what lies under it, and that moves differently from the surface when the
             // camera moves. Surface guides made RR reproject the floor with the surface and smear it. As for clear glass,
             // the floor's virtual image supplies the guides. Decided on the flat plane so ripples cannot make it flicker.
-            float waterEtaRatio = (inWater ? materialIor : 1.0) / (inWater ? 1.0 : materialIor);
+            float etaI = inWater ? materialIor : 1.0;
+            float etaT = inWater ? 1.0 : materialIor;
+            float waterEtaRatio = etaI / etaT;
             float waterPlaneCos = abs(dot(-rd, waterPlaneNormal));
             float waterPlaneSin2 = waterEtaRatio * waterEtaRatio * (1.0 - waterPlaneCos * waterPlaneCos);
-            bool waterUnfold = bounce == gvBounce && bounce < maxBounces && !rc_update && !firstPersonReceiver
-                    && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u && waterPlaneSin2 < 1.0
-                    && fresnelDielectric(waterPlaneCos, inWater ? materialIor : 1.0, inWater ? 1.0 : materialIor) < 0.08;
+            bool waterGuidePrefix = bounce == gvBounce && !rc_update && !firstPersonReceiver
+                    && (worldPush.flags & FRAME_FLAG_MIRROR_PSR) != 0u && waterPlaneSin2 < 1.0;
+            float waterPlaneF = waterGuidePrefix ? fresnelDielectric(waterPlaneCos, etaI, etaT) : 1.0;
+            bool waterUnfold = bounce < maxBounces && waterPlaneF < 0.5;
+            float F = fresnelDielectric(cosI, etaI, etaT);
+            // In transmission-dominant views, add escaping sky exactly and sample geometry
+            // reflections with compensated Fresnel weights. Reflection-dominant views keep
+            // the ordinary dielectric path. Guide selection is independent of that random choice.
+            bool waterSplit = bounce == gvBounce && !rc_update && F < 0.5;
+            bool reflectNow;
+            if (waterSplit) {
+                // Escaping reflections add the sky exactly; ones that hit geometry follow a real path.
+                float3 waterSky;
+                // Sky is analytic; geometry uses its complete sampled path. An angular cutoff
+                // on direct light and fading geometry below F=0.25 drew rings across cave pools.
+                // The visibility-only probe also avoids shading a hit that would be traced again.
+                bool waterMiss = reflectedSky(hitPos + n * SURF_BIAS, reflect(rd, n), waterSky);
+                if (waterMiss) {
+                    L += throughput * F * waterSky;
+                    throughput *= 1.0 - F;
+                    reflectNow = false;
+                } else {
+                    // A low sampling floor bounds variance without dropping faint reflections.
+                    // Both branches retain their Fresnel/probability compensation.
+                    float reflectWeight = F;
+                    float reflectChance = reflectWeight > 0.0 ? max(reflectWeight, 0.10) : 0.0;
+                    reflectNow = reflectChance > 0.0 && glassFresnelSample(DispatchRaysIndex().xy + uint2(0u, 0x85EBCA6Bu), glassSampleOrdinal) < reflectChance;
+                    throughput *= reflectNow ? reflectWeight / reflectChance : (1.0 - F) / (1.0 - reflectChance);
+                    if (reflectNow) { reflectedPathBase = L; reflectedPathCap = reflectWeight / reflectChance; skipSunOnce = false; }
+                }
+            } else {
+                // Nearly all reflection (far grazing water, close to total reflection): always follow it, so the pixel
+                // keeps one set of guides instead of alternating with the little light that refracts.
+                bool waterMirror = F >= 0.9 && bounce == gvBounce && !rc_update;
+                reflectNow = waterMirror || rndf(seed) < F;
+                if (waterMirror) throughput *= F;
+            }
+            // Reuse the actual transmitted path. Only a sampled reflection needs a
+            // separate transmission probe; that path continues in another direction.
+            waterUnfold = waterUnfold && !reflectNow;
             if (waterUnfold) {
                 gv_normal = n;
                 gv_rough = clamp(payloadRoughness(), 0.12, 1.0);
@@ -1754,9 +1800,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 // own Fresnel reflectance is ignored here — a clear interface, not a demodulation target.
                 float3 refractedAlbedo;
                 float3 refractedSpecAlbedo;
+                float3 refractedNormal;
+                float refractedRoughness;
                 refractedGuideHit(hitPos, rd, n, inWater, materialIor, cameraVisibilityPath, rayConeWidth, rayConeSpread,
                         gv_motionHitCamRel, gv_motionObjDisp,
-                        gv_motionUseRefracted, refractedAlbedo, refractedSpecAlbedo);
+                        gv_motionUseRefracted, refractedAlbedo, refractedSpecAlbedo, refractedNormal, refractedRoughness);
                 gv_albedo = refractedAlbedo;
                 // RR guide only (no radiance change): the interface's own Fresnel reflection is real
                 // specular signal. With a zero/seabed specular albedo RR denoised mirror reflections on
@@ -1768,45 +1816,21 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                         ? rrSpecularAlbedo(float3(waterF0, waterF0, waterF0), gv_rough * gv_rough, cosI)
                         : float3(1.0, 1.0, 1.0);
                 gv_specAlb = saturate(waterSpec + (1.0 - waterSpec) * refractedSpecAlbedo);
-            }
-            float etaI = inWater ? materialIor : 1.0;
-            float etaT = inWater ? 1.0 : materialIor;
-            float F = fresnelDielectric(cosI, etaI, etaT);
-            // Visible water used the same reflect/refract coin flip as glass did, which RR could only
-            // remove by blurring the surface. Where transmission dominates, follow it weighted by (1-F)
-            // and add the shaded reflection along the mirror direction once (glassReflection). Grazing
-            // views, where reflection dominates, keep the full path-traced reflection.
-            bool waterSplit = bounce == gvBounce && !rc_update && F < 0.5;
-            bool reflectNow;
-            if (waterSplit) {
-                // Escaping reflections add the sky exactly; ones that hit geometry follow a real path.
-                float3 waterSky;
-                bool waterShaded = false;
-                bool waterMiss;
-                if (F >= 0.06 && !afterDiffuse && !inWater) {
-                    waterMiss = reflectedDirect(hitPos + n * SURF_BIAS, reflect(rd, n), seed, waterSky, waterShaded);
-                    if (waterShaded) L += throughput * F * waterSky;
-                } else {
-                    waterMiss = reflectedSky(hitPos + n * SURF_BIAS, reflect(rd, n), waterSky);
+                // The far-water probe already found the transmitted surface. Give RR its complete
+                // virtual image, just as the reused continuation does for near water. Mixing floor
+                // albedo with interface depth/normal/roughness created a circular denoising boundary.
+                // This reuses the existing probe; it adds no ray, sample, or transport bounce.
+                if (gv_motionUseRefracted && waterPlaneF < 0.5 && F < 0.9
+                        && mirrorGuideAppendTransmission(psrTransform, hitPos - worldPush.camOffset,
+                                waterPlaneNormal, waterEtaRatio, waterPlaneCos, sqrt(1.0 - waterPlaneSin2))) {
+                    gv_hitCamRel = gv_motionHitCamRel;
+                    gv_normal = refractedNormal;
+                    gv_rough = refractedRoughness;
+                    gv_specAlb = refractedSpecAlbedo;
+                    gv_motionUseRefracted = false;
+                    psrPrimarySpec = max(psrPrimarySpec, F);
+                    gv_psr = true;
                 }
-                if (waterMiss) {
-                    L += throughput * F * waterSky;
-                    throughput *= 1.0 - F;
-                    reflectNow = false;
-                } else {
-                    // As for glass: faint reflected geometry fades out, a low floor on the chance above that.
-                    float reflectWeight = F * smoothstep(0.10, 0.25, F);
-                    float reflectChance = reflectWeight > 0.0 ? max(reflectWeight, 0.10) : 0.0;
-                    reflectNow = reflectChance > 0.0 && glassFresnelSample(DispatchRaysIndex().xy + uint2(0u, 0x85EBCA6Bu), glassSampleOrdinal) < reflectChance;
-                    throughput *= reflectNow ? reflectWeight / reflectChance : (1.0 - F) / (1.0 - reflectChance);
-                    if (reflectNow) { reflectedPathBase = L; reflectedPathCap = reflectWeight / reflectChance; skipSunOnce = waterShaded; }
-                }
-            } else {
-                // Nearly all reflection (far grazing water, close to total reflection): always follow it, so the pixel
-                // keeps one set of guides instead of alternating with the little light that refracts.
-                bool waterMirror = F >= 0.9 && bounce == gvBounce && !rc_update;
-                reflectNow = waterMirror || rndf(seed) < F;
-                if (waterMirror) throughput *= F;
             }
             if (reflectNow) {
                 cameraVisibilityPath=false;
@@ -1826,7 +1850,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 if (waterUnfold && mirrorGuideAppendTransmission(psrTransform, hitPos - worldPush.camOffset, waterPlaneNormal,
                         waterEtaRatio, waterPlaneCos, sqrt(1.0 - waterPlaneSin2))) {
                     psrPrimarySpec = max(psrPrimarySpec, F);
-                    if (clearInterfaces < 4) { clearInterfaces++; maxBounces += 1; rrStart += 1; }
+                    // Keep the old transport budget; far-water guide reuse adds no bounce.
+                    if (waterPlaneF < 0.08 && clearInterfaces < 4) { clearInterfaces++; maxBounces += 1; rrStart += 1; }
                     gv_psr = true;
                     gvBounce = bounce + 1;
                 }
@@ -2018,28 +2043,33 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 }
                 // Debug view 12: indirect only, the first visible surface gets no direct sun/moon.
                 if (pc.debugView != 12u || bounce != gvBounce)
-                    L += throughput * brdf * worldPush.lightRadiance.xyz * ndl * vis * localHeightVisibility;
+                    L += throughput * brdf * activeLightRadiance * ndl * vis * localHeightVisibility;
             }
         }
 
         // ITRP sunlight rims (torchControl.y = strength, 0 off; ITRP overworld only). A visible surface that
         // faces away from the sun gets a thin band of sunlight where it ends in a convex edge whose far side
         // is lit: probe a short way along the sun direction projected onto the surface (ITRP: 0.05 block,
-        // kept between 1 and 15 pixels), require that the face has ended there and nothing blocks the way,
+        // capped at one pixel), require that the face has ended there and nothing blocks the way,
         // then light the band from the edge point with the reference's 1.5x plant rim weight.
-        float rimStrength = worldPush.torchControl.y;
+        // An overcast sky is an extended source, not a backlight that traces each voxel's outline.
+        // Keep the optional rim restricted to actual directional backlighting, including cloud visibility.
+        float rimClear = 1.0 - saturate(worldPush.mediumParams.y);
+        float rimBacklight = smoothstep(0.5, 0.95, dot(rd, worldPush.lightDir.xyz));
+        float rimStrength = worldPush.torchControl.y * rimBacklight * rimClear * rimClear;
         float rimNdl = dot(n, worldPush.lightDir.xyz);
         // Plants only (the reference's 0.1x terrain rim is not visible) and within 40 blocks, where a rim is
         // wider than a pixel; this keeps the probe rays to a small share of the backlit pixels.
         float rimFade = 1.0 - smoothstep(32.0, 40.0, payload.hitT);
         if (rimStrength > 0.0 && sss > 0.0 && rimFade > 0.0 && bounce == gvBounce && !firstPersonReceiver && rimNdl < 0.0
-                && max(worldPush.lightRadiance.x, max(worldPush.lightRadiance.y, worldPush.lightRadiance.z)) > 0.0) {
+                && max(activeLightRadiance.x, max(activeLightRadiance.y, activeLightRadiance.z)) > 0.0) {
             float3 along = worldPush.lightDir.xyz - n * rimNdl;
             float alongLen = length(along);
             if (alongLen > 1.0e-3) {
                 along /= alongLen;
                 float pixel = max(rayConeWidth, 1.0e-4);
-                float width = clamp(0.05, pixel, pixel * 15.0);
+                // Do not enlarge a subpixel physical band to a guaranteed full pixel at a distance.
+                float width = min(0.05, pixel);
                 float stepFrac = lerp(1.0 / 3.0, 1.0, rndf(seed)); // stochastic step: soft band edge over frames
                 // Faces are block aligned (rebased space keeps integer block boundaries): a face can only end
                 // where the step crosses a block boundary, so every other pixel skips the probe rays.
@@ -2061,10 +2091,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                     float wgt = 3.0 / (stepFrac * stepFrac + 0.01);
                     float t = saturate(back * 5.0) * saturate(wgt - back * wgt) - 1.0;
                     float rimY = rimX * (1.0 - t * t);
-                    float gain = rimY * 1.5 * rimStrength * rimFade;
+                    float gain = rimY * 1.5 * rimStrength * rimFade * saturate(sss);
                     if (gain > 0.0) {
-                        float3 rimVis = visibilityMasked(probe, lightDir, 10000.0, secondaryReceiverMask); // no cloud march for a thin band
-                        L += throughput * diffAlb * INV_PI * worldPush.lightRadiance.xyz * gain * rimVis;
+                        float3 rimVis = visibility(probe, lightDir, 10000.0);
+                        L += throughput * diffAlb * INV_PI * activeLightRadiance * gain * rimVis;
                     }
                 }
             }
@@ -2101,7 +2131,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 }
                 if (max(visB.r, max(visB.g, visB.b)) > 0.0) {
                     float cosT = dot(lightDir, rd);
-                    L += throughput * diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G) * backNdl * worldPush.lightRadiance.xyz * visB;
+                    L += throughput * diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G) * backNdl * activeLightRadiance * visB;
                 }
             }
         }
@@ -2181,7 +2211,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     // One reflected sample is a lone pixel among its neighbours: a bright one is a sparkle the denoiser keeps while moving.
     if (reflectedPathCap >= 0.0) {
         float3 reflectedPart = max(L - reflectedPathBase, float3(0.0, 0.0, 0.0));
-        float limit = reflectedPathCap * luminance(worldPush.lightRadiance.xyz) * 0.2;
+        float limit = reflectedPathCap * luminance(activeLightRadiance) * 0.2;
         float amount = luminance(reflectedPart);
         if (amount > limit) L = reflectedPathBase + reflectedPart * (limit / amount);
     }
@@ -2211,10 +2241,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
 
 [shader("raygeneration")]
 void main() {
-    worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
+    framePtr = ConstPtr<WorldPush>(pc.worldPushAddr);
+    activeLightRadiance = framePtr[0].lightRadiance.xyz;
     if(worldPush.environment.x==2.0) {
         float visible=endPlanetVisibility(worldPush.waterParams.w*15.0/max(worldPush.dimensionControl.x,1.0));
-        worldPush.lightRadiance.xyz*=visible*visible;
+        activeLightRadiance*=visible*visible;
     }
     // load the per-frame push data from the BDA buffer
     int2 pix = int2(DispatchRaysIndex().xy);

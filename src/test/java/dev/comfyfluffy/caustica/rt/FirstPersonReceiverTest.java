@@ -35,7 +35,8 @@ class FirstPersonReceiverTest {
         assertTrue(hit.contains("g.reserved.y!=0u"));
         assertTrue(ray.contains("secondaryReceiverMask=handHit ? CULL_HAND_WORLD : CULL_SECONDARY"));
         assertTrue(ray.contains("firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY, surfacePos"));
-        assertTrue(ray.contains("firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY, ro, RAY_TMIN, refractedDir"));
+        assertTrue(ray.contains("traceRadianceReordered(cameraView ? CULL_HAND_WORLD | CULL_CAMERA_BODY : (firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY),"));
+        assertTrue(ray.contains("ro, RAY_TMIN, refractedDir, 10000.0)"));
         assertTrue(ray.contains("payload.iorTransmission & ~FIRST_PERSON_RECEIVER"));
     }
 }

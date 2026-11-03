@@ -8,7 +8,9 @@ class EndLightingControlsTest {
   String s=read("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
   assertTrue(s.contains("dimension==2?new Float4(.85649968f,.27635565f,.43593102f,.12f)"));
   assertTrue(s.contains(".60928f*CausticaConfig.Rt.Visuals.END_LIGHT.value()"));
-  assertTrue(read("shaders/world/world.rgen.slang").contains("visibility(p, lightDir, 10000.0)"));
+  String raygen=read("shaders/world/world.rgen.slang");
+  assertTrue(raygen.contains("visibility(armorSkinLit ? p + n * 0.12 : p, lightDir, 10000.0)"));
+  assertTrue(raygen.contains("brdf * activeLightRadiance * ndl * vis"));
  }
  @Test void portalSamplesStarLayerAndHasIndependentTerminalEmission()throws Exception {
   assertTrue(read("src/main/java/dev/comfyfluffy/caustica/rt/entity/RtEntityTextures.java").contains("portal ? \"Sampler1\" : \"Sampler0\""));

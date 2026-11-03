@@ -95,7 +95,7 @@ public final class RtVideoOptions {
                 section("clouds",
                     row(clouds(), CausticaConfig.Rt.Clouds.MODE),
                     row(scalar("cloudCoverage", CausticaConfig.Rt.Clouds.COVERAGE, -0.3f, 0.3f), CausticaConfig.Rt.Clouds.COVERAGE),
-                    row(scalar("cloudDensity", CausticaConfig.Rt.Clouds.DENSITY, 0.25f, 2f), CausticaConfig.Rt.Clouds.DENSITY),
+                    row(scalar("cloudDensity", CausticaConfig.Rt.Clouds.DENSITY, 0f, 2f), CausticaConfig.Rt.Clouds.DENSITY),
                     row(scalar("cloudSize", CausticaConfig.Rt.Clouds.SIZE, 0.5f, 2f), CausticaConfig.Rt.Clouds.SIZE),
                     row(scalar("cloudHeight", CausticaConfig.Rt.Clouds.HEIGHT, 500f, 1500f), CausticaConfig.Rt.Clouds.HEIGHT),
                     row(scalar("cloudBrightness", CausticaConfig.Rt.Clouds.BRIGHTNESS, 0.25f, 2f), CausticaConfig.Rt.Clouds.BRIGHTNESS),

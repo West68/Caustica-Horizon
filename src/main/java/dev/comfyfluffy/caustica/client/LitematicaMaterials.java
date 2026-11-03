@@ -125,8 +125,12 @@ final class LitematicaMaterials {
         var worldDepth=RtComposite.INSTANCE.schematicDepth();
         if(worldDepth==null)return;
         if(depthImage!=worldDepth.image) {
-            // Old depth bindings are released at the renderer's idle resize/epoch boundary.
-            if(depth!=null)throw new IllegalStateException("Schematic depth epoch was not retired");
+            // The RT depth image changes on every epoch boundary (RT toggle, resize, resource reload).
+            // The previous wrapper borrowed a texture from the retired epoch; that epoch's teardown already
+            // destroyed the texture underneath it, so the wrapper must be dropped rather than released
+            // through the live device. Throwing here used to abort the whole fallback draw and latch
+            // depthFailed for the rest of the session (overlays then drew unoccluded).
+            depth=null;
             depth=BorrowedView.borrow(ctx.device(),worldDepth.image,GpuFormat.RGBA16_FLOAT,1);depthImage=worldDepth.image;
         }
         if(index==null)createIndex(ctx);

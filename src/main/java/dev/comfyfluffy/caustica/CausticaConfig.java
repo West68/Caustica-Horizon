@@ -818,7 +818,7 @@ public final class CausticaConfig {
                     intValue("caustica.rt.clouds", "clouds.mode", ITRP_FIDELITY);
 
             public static final FloatSetting COVERAGE = clampedFloat("caustica.rt.clouds.coverage", "clouds.coverage", 0f, -0.3f, 0.3f);
-            public static final FloatSetting DENSITY = clampedFloat("caustica.rt.clouds.density", "clouds.density", 1f, 0.25f, 2f);
+            public static final FloatSetting DENSITY = clampedFloat("caustica.rt.clouds.density", "clouds.density", 1f, 0f, 2f);
             public static final FloatSetting SIZE = clampedFloat("caustica.rt.clouds.size", "clouds.size", 1f, 0.5f, 2f);
             public static final FloatSetting HEIGHT = clampedFloat("caustica.rt.clouds.height", "clouds.height", 940f, 500f, 1500f);
             public static final FloatSetting BRIGHTNESS = clampedFloat("caustica.rt.clouds.brightness", "clouds.brightness", 1f, 0.25f, 2f);

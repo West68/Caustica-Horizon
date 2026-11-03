@@ -10,7 +10,7 @@ class LightOwnerMaskTest {
   assertTrue(source.contains("entity == mc.player"));
   assertTrue(source.contains("entry + 56, (mask & LightOwnerMask.HELD_SHADOW) == 0 ? 1 : 0"));
   assertTrue(hit.contains("if(g.reserved.x!=0u) payload.flags |= PAYLOAD_HELD_OWNER"));
-  assertTrue(ray.contains("if((payload.flags & PAYLOAD_HELD_OWNER)!=0u)return"));
+  assertTrue(ray.contains("if((payload.flags & PAYLOAD_HELD_OWNER)!=0u && !(heldSelfVertex && firstPersonReceiver))return"));
  }
  @Test void ownerRetainsCameraAndGeneralShadowsButNotOwnLampShadow(){
   int mask=LightOwnerMask.receiver(255,true);

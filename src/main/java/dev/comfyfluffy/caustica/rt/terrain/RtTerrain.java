@@ -409,6 +409,13 @@ public final class RtTerrain {
         INSTANCE.fullClearRequested = true;
     }
 
+    /** Stop old terrain builds before Minecraft replaces the model and atlas resources. */
+    public static void drainForResourceReload(RtContext ctx) {
+        INSTANCE.terrainEpoch++;
+        INSTANCE.lightGrid.cancelPending();
+        INSTANCE.drainTasksForClear(ctx);
+    }
+
     private void tick(RtContext ctx) {
 
         Minecraft mc = Minecraft.getInstance();

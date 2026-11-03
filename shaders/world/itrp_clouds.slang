@@ -84,7 +84,11 @@ float itrpNoise2D(uint64_t noiseAddr, float2 pos, bool blocky = true) {
     float b = itrpHash12(p + float2(1.0, 0.0));
     float c = itrpHash12(p + float2(0.0, 1.0));
     float d = itrpHash12(p + float2(1.0, 1.0));
-    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+    // Hash values are uniform; the optional authored alpha texture is sparse. Feeding uniform
+    // values into its coverage remap made the standalone renderer almost permanently overcast.
+    // Shape only the procedural distribution, before octave averaging; leave user data untouched.
+    float value = lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+    return value * value * value;
 }
 
 float itrpHash13(float3 p) {
@@ -183,6 +187,12 @@ float itrpTraceDensity(uint64_t noiseAddr, float3 pos, float3 dir, float cloudDi
 }
 
 // ---- single-point cloud colour ---------------------------------------------------------------------
+// Below 1, density controls fractional column coverage as well as optical thickness. Otherwise
+// opaque cores saturate even at the minimum slider value. Shared by sky and ground visibility.
+float itrpCloudOpacity(float opticalDepth, float density) {
+    return (1.0 - exp(-opticalDepth * max(density, 1.0))) * saturate(density);
+}
+
 // Returns rgb = radiance, a = coverage. Mirrors the original's flux decomposition: a sunlight term that
 // survives only where the cloud is thin toward the sun, and a skylight term dominated by the ambient sky
 // colour, plus a bottom-brightness lift so cloud undersides are not black.
@@ -232,8 +242,8 @@ float4 itrpCloudColor(uint64_t noiseAddr, float3 pos, float3 dir, float3 sunDir,
 
     // Coverage -> alpha. Thin edges stay see-through; dense cores go opaque. The distance term lets the
     // far field stay soft instead of turning into a hard wall.
-    float nd = d * densityScale / (cloudDist * 0.0001 + 0.25);
-    float alpha = 1.0 - exp(-nd * nd * 45.0);
+    float nd = d / (cloudDist * 0.0001 + 0.25);
+    float alpha = itrpCloudOpacity(nd * nd * 45.0, densityScale);
     return float4(col, saturate(alpha));
 }
 
@@ -251,11 +261,11 @@ float3 itrpCloudTransmission(float elevation,float distance,float rain) {
     float column=0.14*distance*itrpExprel(-k*distance);
     return exp(-(float3(0.17,0.40,0.99)+0.05+rain*0.5)*max(column,0.0));
 }
-float itrpCirrusDensity(uint64_t noiseAddr,float3 pos,float3 camera,float time) {
+float itrpCirrusDensity(uint64_t noiseAddr,float3 pos,float3 camera,float time,float size) {
     float2 anchor=camera.xz*float2(1.0,0.5);
     float2 delta=pos.xz*float2(1.0,0.5)-anchor;
     float distance=length(delta);
-    float2 uv=(anchor+delta/(1.0+distance*0.00005))*0.001;
+    float2 uv=(anchor+delta/(1.0+distance*0.00005))*(0.001/size);
     float sum=0.0,weight=1.0,norm=0.0;
     for(int octave=0;octave<3;octave++) {
         sum+=itrpNoise2D(noiseAddr,uv+float2(1.0,0.1)*time*0.04)*weight;
@@ -267,10 +277,10 @@ float itrpCirrusDensity(uint64_t noiseAddr,float3 pos,float3 camera,float time) 
     return saturate((sum/norm+distance*0.00004)*1.5-0.25);
 }
 float4 itrpCirrusColor(uint64_t noiseAddr,float3 pos,float3 camera,float3 view,float3 light,
-        float3 beam,float3 skyUp,float3 atmosphereColor,float time,bool cameraDetail) {
+        float3 beam,float3 skyUp,float3 atmosphereColor,float time,bool cameraDetail,float4 shape) {
     float distance=length(pos.xz-camera.xz);
     float cosine=clamp(dot(view,light),-1.0,1.0);
-    float density=itrpCirrusDensity(noiseAddr,pos,camera,time);
+    float density=saturate(itrpCirrusDensity(noiseAddr,pos,camera,time,shape.z)+shape.x);
     density=saturate(density-pow(saturate(0.5+0.5*cosine),35.0)*0.35);
     float erosion=3.5;
     if(cameraDetail) {
@@ -287,7 +297,7 @@ float4 itrpCirrusColor(uint64_t noiseAddr,float3 pos,float3 camera,float3 view,f
     density=max(0.0,density-erosion*(sqrt(distance)*0.08+1.0)*0.02);
     float3 radiance=beam*(6.0*(itrpPhase(exp(-density),cosine)+0.5))
         +lerp(skyUp,atmosphereColor,exp2(-12.0*density));
-    return float4(radiance,1.0-exp(-4.0*density*density));
+    return float4(radiance,itrpCloudOpacity(4.0*density*density,shape.y));
 }
 float3 itrpCloudNightAdapt(float3 color,float nightFactor) {
     // Rod adaptation expects reference ENV-scaled units, not the native 21-unit scene source.
@@ -312,7 +322,7 @@ public float3 itrpCloudPlane(uint64_t noiseAddr,float3 background,float3 dir,flo
         camera,time,lighting.w,rain,1.0,1.0,quality>=2,detail,shape,lighting,details);
     float4 high=float4(0.0);
     if(details.y>0.0) {
-        high=itrpCirrusColor(noiseAddr,pos,camera,dir,light,highBeam*lighting.z,skyUp,atmosphereColor,time*lighting.w,detail);
+        high=itrpCirrusColor(noiseAddr,pos,camera,dir,light,highBeam*lighting.z,skyUp,atmosphereColor,time*lighting.w,detail,shape);
         high.a=saturate(high.a*details.y);
     }
     float3 transmission=itrpCloudTransmission(dir.y,distance*0.0015,rain);
@@ -351,13 +361,14 @@ public float itrpCloudShadow(WorldPush w,float3 receiver,float3 light) {
     float erosion=2.0*(distance*.0015+1.0)*1.2*w.cloudDetail.x;
     density=max(0.0,density-erosion*.005);
     density=max(0.0,density-erosion*.005+.01);
-    float optical=density*w.cloudShape.y/(distance*.0001+.25);
-    float transmission=exp(-optical*optical*45.0);
+    float optical=density/(distance*.0001+.25);
+    float transmission=1.0-itrpCloudOpacity(optical*optical*45.0,w.cloudShape.y);
     // Finite disk / unresolved cloud structure approximation; sky fill still comes from actual GI.
     transmission=lerp(.08,1.0,transmission);
     if(w.cloudDetail.y>0) {
-        float cirrus=itrpCirrusDensity(w.cloudNoiseAddr,pos,w.cloudWorld.xyz,w.waterParams.w*w.cloudLight.w);
-        transmission*=exp(-.5*cirrus*cirrus*w.cloudDetail.y);
+        float cirrus=saturate(itrpCirrusDensity(w.cloudNoiseAddr,pos,w.cloudWorld.xyz,
+            w.waterParams.w*w.cloudLight.w,w.cloudShape.z)+w.cloudShape.x);
+        transmission*=1.0-itrpCloudOpacity(.5*cirrus*cirrus*w.cloudDetail.y,w.cloudShape.y);
     }
     return saturate(transmission);
 }

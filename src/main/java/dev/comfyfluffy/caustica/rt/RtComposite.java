@@ -748,7 +748,18 @@ public final class RtComposite {
         RtEntities.INSTANCE.onResourceReload();
         RtContext ctx = RtContext.currentOrNull();
         if (ctx != null) {
+            // The old atlas, descriptors and BDA tables can still be referenced by work
+            // recorded in Minecraft's encoder. Device-idle only covers submitted work.
+            RenderSystem.getDevice().createCommandEncoder().submit();
+            RtTerrain.drainForResourceReload(ctx);
             ctx.waitIdle();
+            // Geometry and cached lighting belong to the same material epoch as the atlas.
+            tlasRing.destroy();
+            RtEntities.INSTANCE.shutdown();
+            if (radianceCache != null) {
+                radianceCache.destroy();
+                radianceCache = null;
+            }
             if (worldPipeline != null) {
                 worldPipeline.destroy();
                 worldPipeline = null;
@@ -756,7 +767,7 @@ public final class RtComposite {
             }
             cloudNoise.destroy();
             torchGuidance.destroy();
-        RtMaterialRegistry.INSTANCE.destroy();
+            RtMaterialRegistry.INSTANCE.destroy();
         }
     }
 
@@ -985,7 +996,9 @@ public final class RtComposite {
             if (!Boolean.getBoolean("caustica.test.fullReflectionGuides")) flags |= 16384;
             if (rrPath && !RtDlssRr.srOnly()) flags |= 2048; // Reflection-motion guide tracing is RR-only.
             if (CausticaConfig.Rt.Look.ITRP.value()) flags |= 512;
-            if (CausticaConfig.Rt.Composite.MIRROR_PSR.value() && rrPath && !RtDlssRr.srOnly()) flags |= 32768; // mirror PSR guides
+            // Guide visualization must show the guides supplied to RR, including PSR replacement.
+            // rrPath excludes debug views to bypass evaluation, not to change guide generation.
+            if (CausticaConfig.Rt.Composite.MIRROR_PSR.value() && RtDlssRr.enabled() && !RtDlssRr.srOnly()) flags |= 32768;
             if(CausticaConfig.Rt.Look.ITRP.value() && CausticaConfig.Rt.Visuals.ITRP_LIGHT_COLORS.value())flags|=1024;
             boolean cameraInLava=false;
             var level = Minecraft.getInstance().level;

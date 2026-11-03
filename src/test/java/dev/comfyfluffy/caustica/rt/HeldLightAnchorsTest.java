@@ -62,8 +62,8 @@ final class HeldLightAnchorsTest {
         assertTrue(a.position(0,10,p));assertEquals(new Vector3f(1,2,3),p);
     }
 
-    @Test void creativeFlightOnlyLimitsNearbyInfluenceAndPreservesWalkingSettings() {
-        assertEquals(3,HeldLightAnchors.influenceRadius(8.31f,true));
+    @Test void creativeFlightPreservesConfiguredLightReach() {
+        assertEquals(8.31f,HeldLightAnchors.influenceRadius(8.31f,true));
         assertEquals(8.31f,HeldLightAnchors.influenceRadius(8.31f,false));
         assertEquals(1,HeldLightAnchors.influenceRadius(1,true));
     }
