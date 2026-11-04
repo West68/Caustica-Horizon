@@ -176,6 +176,8 @@ public final class RtComposite {
 
     private RtPipeline worldPipeline;
     private RadianceCache radianceCache;
+    private net.minecraft.client.multiplayer.ClientLevel previousSkyLevel;
+    private Float4 previousSunDirection;
     private dev.comfyfluffy.caustica.rt.accel.RtBuffer skyLut;
     private static final int SKY_LUT_W = 128, SKY_LUT_H = 64;
     private static final int SKY_LUT_MARKER = 0x5C7A1000;
@@ -1059,7 +1061,7 @@ public final class RtComposite {
             BreakEntry[] breaking = breakingEntries(terrain);
             SkyPush sky = skyPush();
             // Full-resolution night sky in the display pass (display.comp): same wheel, night and rain.
-            nightCelestial = sky.celestial(); CELESTIAL = new float[]{nightCelestial.x(), nightCelestial.y(), nightCelestial.z(), nightCelestial.w()};
+            nightCelestial = sky.celestial(); CELESTIAL = new float[]{0f, nightCelestial.y(), nightCelestial.z(), nightCelestial.w()};
             nightStrength = Math.abs(sky.lightRadiance().w()); // the display pass keeps it to the Overworld
             nightRain = level == null ? 0f : level.getRainLevel(Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false));
             nightTime = (float) animationSeconds();
@@ -1068,6 +1070,20 @@ public final class RtComposite {
             var held=RtHeldLights.frame(Minecraft.getInstance(),camX,camY,camZ,terrain.blockX,terrain.blockY,terrain.blockZ);
             int dimension=level==null?0:level.dimension().equals(net.minecraft.world.level.Level.NETHER)?1:
                     level.dimension().equals(net.minecraft.world.level.Level.END)?2:level.dimension().equals(net.minecraft.world.level.Level.OVERWORLD)?0:3;
+            // Celestial direction is world-space, so looking around never triggers a reset.
+            // An 18-degree jump between frames exceeds normal daylight progression.
+            Float4 sunDirection = sky.sunDir();
+            boolean skyJump = dimension == 0 && level != null && level == previousSkyLevel
+                    && previousSunDirection != null
+                    && sunDirection.x() * previousSunDirection.x()
+                       + sunDirection.y() * previousSunDirection.y()
+                       + sunDirection.z() * previousSunDirection.z() < 0.95f;
+            previousSkyLevel = dimension == 0 ? level : null;
+            previousSunDirection = previousSkyLevel != null ? sunDirection : null;
+            if (skyJump) {
+                RtDlssRr.INSTANCE.requestHistoryReset();
+                if (radianceCache != null) radianceCache.requestClear();
+            }
             if(dimension==2) {
                 schematicLight.set(.85649968f,.27635565f,.43593102f);
                 schematicRadiance.set(.60928f,.54824f,.51688f).mul(CausticaConfig.Rt.Visuals.END_LIGHT.value());
@@ -1130,7 +1146,8 @@ public final class RtComposite {
                             CausticaConfig.Rt.Look.SUN_DISC_SIZE.value() * (CausticaConfig.Rt.Look.SUN_SHAPE.value() == 1 ? -1f : 1f),
                             CausticaConfig.Rt.Look.SUN_GLOW.value() + 4f * Math.round(CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS.value() * 100f)
                                     + 4000f * ((CausticaConfig.Rt.Look.NEBULA.value() ? 0 : 1) + (CausticaConfig.Rt.Look.CLOUD_SHADOW.value() ? 0 : 2)
-                                    + (CausticaConfig.Rt.Entities.ARMOR_SKIN_LIT.value() ? 4 : 0))), // see lookSwitches
+                                    + (CausticaConfig.Rt.Entities.ARMOR_SKIN_LIT.value() ? 4 : 0)
+                                    + (CausticaConfig.Rt.Entities.WATER_SELF_REFLECTION.value() ? 0 : 8))), // see lookSwitches
                     torchGuideAddress,
                     new Float4(torchGuidance.originX() - terrain.blockX, torchGuidance.originY() - terrain.blockY,
                             torchGuidance.originZ() - terrain.blockZ, TorchGuidanceGrid.CELL_SIZE),
@@ -1157,7 +1174,8 @@ public final class RtComposite {
                     new Float4(terrain.lightRebaseOffsetX(), terrain.lightRebaseOffsetY(),
                             terrain.lightRebaseOffsetZ(), terrain.lightInvGlobalPowerSum()),
                     new Float4(terrain.lightGridOriginX(), terrain.lightGridOriginY(), terrain.lightGridOriginZ(), 16f),
-                    new Int4(terrain.lightGridDimX(), terrain.lightGridDimY(), terrain.lightGridDimZ(), 0),
+                    new Int4(terrain.lightGridDimX(), terrain.lightGridDimY(), terrain.lightGridDimZ(),
+                            Float.floatToRawIntBits(CausticaConfig.Rt.Look.SNOW_REFLECTANCE.value())),
                     terrain.lightCount(),
                     risPush()
             ).write(push);
@@ -1442,7 +1460,9 @@ public final class RtComposite {
             lx=moon?moonX:sunX;ly=moon?moonY:sunY;lz=moon?moonZ:sunZ;
             float rain=mc.level==null?0f:mc.level.getRainLevel(partial);
             float[] reference=ItrpDirectLight.evaluate(ly,rain,moon);
-            rr=reference[0];rg=reference[1];rb=reference[2];
+            // Fade both sources to zero at their shared handoff even when their arcs differ.
+            float handoff = smoothstep(0f, 0.05f, Math.abs(sunY));
+            rr=reference[0]*handoff;rg=reference[1]*handoff;rb=reference[2]*handoff;
             if(moon) { float night=CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS.value(); rr*=night;rg*=night;rb*=night; }
             lightRadius=moon?CausticaConfig.Rt.Composite.MOON_ANGULAR_RADIUS.value():CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.value();
         }
@@ -1452,7 +1472,9 @@ public final class RtComposite {
                 new Float4(lx, ly, lz, lightRadius),
                 new Float4(rr, rg, rb, starBrightness),
                 new Float4(moonX, moonY, moonZ, moonPhase),
-                new Float4(0f, celestialAxisY(), celestialAxisZ(), starAngle),
+                new Float4(CausticaConfig.Rt.Look.STAR_DENSITY.value()
+                        * (0.2f + 0.8f * (1f - Math.abs(moonPhase - 4f) / 4f)),
+                        celestialAxisY(), celestialAxisZ(), starAngle),
                 uv.sun(),
                 uv.moon());
     }
@@ -1542,6 +1564,8 @@ public final class RtComposite {
     }
 
     public void destroy() {
+        previousSkyLevel = null;
+        previousSunDirection = null;
         dev.comfyfluffy.caustica.client.LitematicaCompat.destroy();
         EnhancedGpuTimings.shutdown();
         if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized())dev.comfyfluffy.caustica.rt.pipeline.RtStreamlineFg.INSTANCE.beforeInputResourcesDestroyed();

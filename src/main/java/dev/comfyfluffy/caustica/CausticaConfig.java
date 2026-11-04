@@ -698,6 +698,8 @@ public final class CausticaConfig {
                     bool("caustica.rt.particles", "particles.enabled", true);
             public static final BooleanSetting GLOW_ENABLED =
                     bool("caustica.rt.glow", "entities.glow.enabled", true);
+            public static final BooleanSetting WATER_SELF_REFLECTION =
+                    bool("caustica.rt.waterSelfReflection", "entities.water-self-reflection", true);
             public static final BooleanSetting NAME_TAG_SHADOWS =
                     bool("caustica.rt.nameTagShadows", "entities.name-tags.cast-shadows", false);
             public static final BooleanSetting NAME_TAGS_ENABLED =
@@ -837,10 +839,14 @@ public final class CausticaConfig {
 
         public static final class Look {
             public static final FloatSetting BLOOM=clampedFloat("caustica.rt.look.bloom","look.bloom",1f,0f,3f);
+            public static final FloatSetting STAR_DENSITY =
+                    clampedFloat("caustica.rt.look.starDensity", "look.star-density", 1f, 0f, 1f);
             public static final BooleanSetting STARS=bool("caustica.rt.look.stars","look.stars",false);
             /** ITRP DETAIL_SHARPEN_AMOUNT: post-tonemap micro-contrast on the overworld ITRP look; 0 disables. */
             public static final FloatSetting DETAIL_SHARPEN=clampedFloat("caustica.rt.look.detailSharpen","look.detail-sharpen",1f,0f,3f);
             /** ITRP SUNLIGHT_RIMS strength: sun rim light on silhouettes facing away from the sun; 0 disables. */
+            public static final FloatSetting SNOW_REFLECTANCE =
+                    clampedFloat("caustica.rt.look.snowReflectance", "look.snow-reflectance", 1f, .1f, 1f);
             public static final FloatSetting SUN_RIMS=clampedFloat("caustica.rt.look.sunRims","look.sun-rims",1f,0f,3f);
             public static final FloatSetting SUN_DISC_SIZE=clampedFloat("caustica.rt.look.sunDiscSize","look.sun-disc-size",1f,.2f,3f);
             public static final FloatSetting NIGHT_BRIGHTNESS=clampedFloat("caustica.rt.look.nightBrightness","look.night-brightness",.6f,.1f,2f);

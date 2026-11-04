@@ -117,6 +117,10 @@ static const float3 SKY_DIFF_ALBEDO = float3(0.5, 0.5, 0.5);
 // restart the ray past that neighbour and see through it; this lands the ray inside the gap so the
 // neighbour is still hit, while still clearing the glass surface to avoid self-intersection.
 static const float GLASS_TRANSMIT_BIAS = 1.0e-4;
+// The fluid mesher separates partial-block boundaries by 1/4096 block.
+// Stay inside that gap so a secondary ray still intersects the adjacent model.
+static const float WATER_BOUNDARY_BIAS = 1.0e-4;
+static const float WATER_BOUNDARY_TMIN = 1.0e-5;
 
 // Ray-cone texture LOD: raygen tracks a one-pixel footprint along the path, and closest-hit converts it
 // to texture mip levels from the local UV/world-space scale. Diffuse/glossy bounces widen the cone so
@@ -437,7 +441,7 @@ float3 torchGuidedDiffuse(float3 p, float3 n, inout uint seed, out float weight)
 // direction, from worldPush.celestial.xyz). Averaged over frames by DLSS-RR this yields soft penumbrae that
 // widen with occluder distance (contact-hardening) for free. halfAngle <= 0 ⇒ exact direction (hard).
 float3 sampleSquare(float3 axis, float halfAngle, inout uint s) {
-    float3 right = normalize(cross(axis, worldPush.celestial.xyz));
+    float3 right = normalize(cross(axis, float3(0.0, worldPush.celestial.yz)));
     float3 up = cross(right, axis);
     float t = tan(halfAngle);
     float u = (rndf(s) * 2.0 - 1.0) * t;
@@ -485,6 +489,7 @@ static const uint CULL_HAND_WORLD = 0x08u;
 static const uint CULL_SPECULAR_PARTICLES = 0x10u;
 // Optional headless First Person Model pose; its full pose remains secondary-only.
 static const uint CULL_CAMERA_BODY = 0x20u;
+static const uint CULL_WATER_BODY = 0x40u;
 static bool throughTransmission = false; // the next ray continues straight through glass or water
 static uint secondaryReceiverMask = CULL_SECONDARY;
 static bool firstPersonReceiver = false;
@@ -619,15 +624,15 @@ float3 visibility(float3 origin,float3 dir,float tmax) {
 // exactly and without noise (true). A ray that hits something returns false, and the caller follows that surface as an
 // ordinary path with some probability, so its shadows and indirect light are path traced like everything else.
 // Traversal only, no hit shading; the path payload is preserved.
-bool reflectedSky(float3 origin, float3 dir, out float3 sky) {
+bool reflectedSky(float3 origin, float3 dir, uint reflectionMask, float tmin, out float3 sky) {
     sky = float3(0.0, 0.0, 0.0);
     Payload saved = payload;
     payload.hitT = -1.0;
     payloadSetTraceState(!afterDiffuse, RAY_CONE_MIN_WIDTH, RAY_CONE_MIN_SPREAD);
     HitObject hObj = HitObject::TraceRay(topLevelAS,
             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-            secondaryReceiverMask, SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u,
-            makeRay(origin, RAY_TMIN, dir, 10000.0), payload);
+            reflectionMask, SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u,
+            makeRay(origin, tmin, dir, 10000.0), payload);
     bool miss = hObj.IsMiss();
     if (miss) {
         HitObject::Invoke(topLevelAS, hObj, payload);
@@ -893,8 +898,8 @@ float2 specularReflectionMotion(float3 surfacePos, float3 primaryDir, float2 cur
 // Ordinary transmission reuses its continuation and does not need this independent probe.
 // `refracted` is false on total internal reflection (no refracted hit exists); a sky miss returns a far
 // point along the refracted direction, which the self-delta MV handles uniformly.
-void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNormal, bool inWaterAtSurface,
-                       float materialIor, bool cameraView,
+void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNormal, float3 boundaryNormal, bool inWaterAtSurface,
+                       float materialIor, bool cameraView, bool showWaterBody,
                        float rayConeWidth, float rayConeSpread,
                        out float3 hitCamRel, out float3 motionPrev, out bool refracted, out float3 diffuseAlbedo,
                        out float3 specAlbedo, out float3 guideNormal, out float guideRoughness) {
@@ -915,12 +920,13 @@ void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNorm
     refractedDir = normalize(refractedDir);
     refracted = true;
 
-    float3 ro = surfacePos - surfaceNormal * SURF_BIAS;
+    float3 ro = surfacePos - boundaryNormal * WATER_BOUNDARY_BIAS;
     payload.hitT = -1.0;
     payloadSetTraceState(false, rayConeWidth, rayConeSpread);
     // RR must describe the same visible scene as the camera transmission path, not the hidden body.
-    traceRadianceReordered(cameraView ? CULL_HAND_WORLD | CULL_CAMERA_BODY : (firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY),
-            ro, RAY_TMIN, refractedDir, 10000.0);
+    traceRadianceReordered(cameraView ? CULL_HAND_WORLD | (showWaterBody ? CULL_WATER_BODY : CULL_CAMERA_BODY)
+                    : (firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY),
+            ro, WATER_BOUNDARY_TMIN, refractedDir, 10000.0);
     if (payload.hitT < 0.0) {
         hitCamRel = (ro + refractedDir * 1.0e6) - worldPush.camOffset; // sky through the surface, at infinity
         motionPrev = float3(0.0, 0.0, 0.0);
@@ -1333,6 +1339,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     // Refraction continues the camera view, even when RR cannot unfold its guides. Do not reveal
     // the hidden camera owner's hollow body until this path actually reflects or scatters.
     bool cameraVisibilityPath = true;
+    uint waterContinuationMask = 0u;
+    bool waterBoundaryContinuation = false;
     float3 reflectedPathBase = float3(0.0, 0.0, 0.0);
     float reflectedPathCap = -1.0; // >=0: this path took a stochastic reflection of this weight
     throughTransmission = false;
@@ -1383,8 +1391,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         uint receiverMask = bounce == 0 ? CULL_PRIMARY
                 : (cameraVisibilityPath ? CULL_HAND_WORLD | CULL_CAMERA_BODY | CULL_SPECULAR_PARTICLES
                     : (throughTransmission ? secondaryReceiverMask | CULL_SPECULAR_PARTICLES : secondaryReceiverMask));
+        if (waterContinuationMask != 0u) receiverMask = waterContinuationMask;
+        waterContinuationMask = 0u;
         throughTransmission = false;
-        HitObject receiverHit=traceRadianceReordered(receiverMask, ro, 0.0, rd, 10000.0);
+        HitObject receiverHit=traceRadianceReordered(receiverMask, ro,
+                waterBoundaryContinuation ? WATER_BOUNDARY_TMIN : 0.0, rd, 10000.0);
+        waterBoundaryContinuation = false;
         // Only the hand receiver excludes its camera-owner body. Once the path lands on
         // the world again, ordinary body shadows/GI are restored for that receiver.
         bool handHit = bounce==0 && payload.hitT>=0.0 && (payload.iorTransmission&FIRST_PERSON_RECEIVER)!=0u;
@@ -1540,7 +1552,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                     glassHitSurface=!reflectedDirect(hitPos+n*SURF_BIAS,glassMirror,seed,glassDirect,glassShaded);
                     if(!glassHitSurface)glassSky=glassDirect;
                     else if(glassShaded)L+=throughput*F*glassDirect;
-                } else glassHitSurface=!reflectedSky(hitPos+n*SURF_BIAS,glassMirror,glassSky);
+                } else glassHitSurface=!reflectedSky(hitPos+n*SURF_BIAS,glassMirror,secondaryReceiverMask,RAY_TMIN,glassSky);
                 if(glassHitSurface) {
                     // Reflected geometry at a steep view is too faint to see but its samples read as grain, so it fades
                     // out. Above that a low floor on the chance: each reflected pixel loses the view through the pane.
@@ -1750,6 +1762,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             // reflections with compensated Fresnel weights. Reflection-dominant views keep
             // the ordinary dielectric path. Guide selection is independent of that random choice.
             bool waterSplit = bounce == gvBounce && !rc_update && F < 0.5;
+            bool hideWaterSelf = cameraVisibilityPath && (lookSwitches(worldPush.torchControl.w) & 8u) != 0u;
+            bool showWaterBody = cameraVisibilityPath && !hideWaterSelf && !firstPersonReceiver;
+            uint reflectionMask = showWaterBody ? CULL_HAND_WORLD | CULL_WATER_BODY
+                    : (hideWaterSelf ? CULL_HAND_WORLD : secondaryReceiverMask);
             bool reflectNow;
             if (waterSplit) {
                 // Escaping reflections add the sky exactly; ones that hit geometry follow a real path.
@@ -1757,7 +1773,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 // Sky is analytic; geometry uses its complete sampled path. An angular cutoff
                 // on direct light and fading geometry below F=0.25 drew rings across cave pools.
                 // The visibility-only probe also avoids shading a hit that would be traced again.
-                bool waterMiss = reflectedSky(hitPos + n * SURF_BIAS, reflect(rd, n), waterSky);
+                bool waterMiss = reflectedSky(hitPos + waterPlaneNormal * WATER_BOUNDARY_BIAS, reflect(rd, n),
+                        reflectionMask, WATER_BOUNDARY_TMIN, waterSky);
                 if (waterMiss) {
                     L += throughput * F * waterSky;
                     throughput *= 1.0 - F;
@@ -1791,7 +1808,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 float3 refractedSpecAlbedo;
                 float3 refractedNormal;
                 float refractedRoughness;
-                refractedGuideHit(hitPos, rd, waterGuidePrefix ? waterPlaneNormal : n, inWater, materialIor, cameraVisibilityPath, rayConeWidth, rayConeSpread,
+                refractedGuideHit(hitPos, rd, waterGuidePrefix ? waterPlaneNormal : n, waterPlaneNormal, inWater, materialIor, cameraVisibilityPath, showWaterBody && materialEntering, rayConeWidth, rayConeSpread,
                         gv_motionHitCamRel, gv_motionObjDisp,
                         gv_motionUseRefracted, refractedAlbedo, refractedSpecAlbedo, refractedNormal, refractedRoughness);
                 gv_albedo = refractedAlbedo;
@@ -1823,6 +1840,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             }
             if (reflectNow) {
                 cameraVisibilityPath=false;
+                waterContinuationMask = reflectionMask;
                 // Total internal reflection seen from below, and grazing water, are mirrors. Like a metal mirror the reflected
                 // vertex supplies the guides, so RR keeps that surface's texture instead of denoising it away where
                 // only soft indirect light reaches it. The flat plane keeps the guide motion steady under ripples.
@@ -1834,7 +1852,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                     gv_psr = true;
                 }
                 rd = reflect(rd, n);
-                ro = hitPos + n * SURF_BIAS; // reflected ray stays on the incidence side
+                ro = hitPos + waterPlaneNormal * WATER_BOUNDARY_BIAS;
             } else {
                 rd = refract(rd, n, etaI / etaT); // F < 1 here, so this is never total internal reflection
                 if (extendWaterTransport && clearInterfaces < 4) {
@@ -1844,11 +1862,16 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 }
                 throughput *= transmission;
                 throughTransmission = true;
-                ro = hitPos - n * SURF_BIAS;       // transmitted ray crosses to the far side
+                if (showWaterBody && materialEntering) {
+                    // Looking through the surface can reveal the submerged part of the local model.
+                    waterContinuationMask = CULL_HAND_WORLD | CULL_WATER_BODY | CULL_SPECULAR_PARTICLES;
+                }
+                ro = hitPos - waterPlaneNormal * WATER_BOUNDARY_BIAS;
                 // Derived from this hit's face orientation, not toggled — self-corrects instead of a
                 // stray/missing face corrupting the medium for the rest of the path (see PAYLOAD_WATER_ENTERING).
                 inWater = materialEntering;
             }
+            waterBoundaryContinuation = true;
             // Specular interface (mirror reflect / clear refract): the continuation ray should see the
             // sun/moon disc directly — no NEE happened here to double-count it. Behind a diffuse vertex one did.
             showCelestial = !pathDiffuse;

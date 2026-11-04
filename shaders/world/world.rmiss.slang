@@ -198,11 +198,11 @@ static const float STAR_CELLS     = 21.0;  // cube-face grid resolution; with th
 static const float STAR_THRESHOLD = 0.86;  // cell occupancy cutoff (higher = fewer stars)
 static const float STAR_HALF      = 0.045; // star half-size as a fraction of a cell (≈ vanilla 0.11° at center)
 float3 stars(float3 dir, float starBrightness, float VdotS, float4 celestial) {
-    if (starBrightness <= 0.0 || dir.y <= 0.0) return float3(0.0, 0.0, 0.0);
+    if (starBrightness <= 0.0 || dir.y <= 0.0 || celestial.x <= 0.0) return float3(0.0, 0.0, 0.0);
     // Negative angle: rotating the LOOKUP direction is the inverse of rotating star geometry, so
     // -starAngle makes the field wheel the SAME way as the sun/moon (whose world dirs are
     // forward-rotated on the CPU).
-    float3 sdir = rotateAxis(dir, normalize(celestial.xyz), -celestial.w);
+    float3 sdir = rotateAxis(dir, normalize(float3(0.0, celestial.yz)), -celestial.w);
     // Cube-map face + 2D gnomonic uv → uniform square cells, no pole/equator distortion.
     float3 a = abs(sdir);
     float2 uv;
@@ -212,7 +212,7 @@ float3 stars(float3 dir, float starBrightness, float VdotS, float4 celestial) {
     else                               { uv = sdir.xy / a.z; face = sdir.z > 0.0 ? 4.0 : 5.0; }
     float2 g = uv * STAR_CELLS;
     float3 id = float3(floor(g), face);
-    if (hash13(id) < STAR_THRESHOLD) return float3(0.0, 0.0, 0.0); // no star in this cell
+    if (hash13(id) < lerp(1.0, STAR_THRESHOLD, celestial.x)) return float3(0.0, 0.0, 0.0); // no star in this cell
     // Per-star randoms: size, centre (inset so the rotated square stays inside the cell), rotation.
     float sz = STAR_HALF * (0.6 + 0.8 * hash13(id + 53.0));
     float inset = sz * 1.5; // keeps the rotated square clear of the cell edge
@@ -378,7 +378,7 @@ void main(inout Payload payload) {
     // refractions (glass, water, mirrors) draw this render-resolution copy.
     bool cameraSky = (payload.flags & PAYLOAD_CAMERA_MISS) != 0u;
     if (nightStrength > 0.0 && dir.y > 0.0 && showCelestial && !cameraSky) {
-        float3 skyDir = rotateAxis(dir, normalize(worldPush.celestial.xyz), -worldPush.celestial.w);
+        float3 skyDir = rotateAxis(dir, normalize(float3(0.0, worldPush.celestial.yz)), -worldPush.celestial.w);
         float clear = 1.0 - saturate(worldPush.cloudWorld.w);
         // Same dark-sky treatment and the same baked Milky Way as the direct view (display.comp), so
         // water and glass reflect what the player sees overhead.
@@ -406,7 +406,7 @@ void main(inout Payload payload) {
     if (showCelestial) {
         bool skyReady = skyTextureReady();
         float2 local;
-        squareBody(dir, sd, SUN_DISC_HALF_ANGLE, worldPush.celestial.xyz, local);
+        squareBody(dir, sd, SUN_DISC_HALF_ANGLE, float3(0.0, worldPush.celestial.yz), local);
         // torchControl.z: visible size multiplier, negative for the square shape; .w: glow strength.
         float sunScale = abs(worldPush.torchControl.z);
         local /= max(sunScale, 0.01);
@@ -431,7 +431,7 @@ void main(inout Payload payload) {
         if (moonUp > 0.0) {
             float night = pow2(1.0 - day) * moonUp;
             float3 moonT = transmittanceToSpace(dir);
-            squareBody(dir, worldPush.moonDir.xyz, MOON_DISC_HALF_ANGLE, worldPush.celestial.xyz, local);
+            squareBody(dir, worldPush.moonDir.xyz, MOON_DISC_HALF_ANGLE, float3(0.0, worldPush.celestial.yz), local);
             float3 moonA;
             if (worldPush.torchControl.z < 0.0) {
                 float moonEdge = max(abs(local.x), abs(local.y));

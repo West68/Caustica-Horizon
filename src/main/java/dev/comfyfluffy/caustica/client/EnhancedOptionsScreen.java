@@ -23,6 +23,7 @@ public final class EnhancedOptionsScreen extends OptionsSubScreen {
 
     private final String category;
     private boolean confirmResetAll;
+    private final java.util.Map<Button, RtVideoOptions.Row> resetButtons = new java.util.HashMap<>();
 
     public EnhancedOptionsScreen(Screen parent) { this(parent, "home"); }
 
@@ -31,7 +32,13 @@ public final class EnhancedOptionsScreen extends OptionsSubScreen {
         this.category = category;
     }
 
+    @Override public void tick() {
+        super.tick();
+        resetButtons.forEach((button, row) -> button.active = !row.isDefault());
+    }
+
     @Override protected void addOptions() {
+        resetButtons.clear();
         if (category.equals("home")) {
             list.addHeader(Component.translatable("caustica.enhanced.current",
                 Component.translatable("caustica.enhanced.current." + RtVideoOptions.visualPresetName())));
@@ -88,7 +95,10 @@ public final class EnhancedOptionsScreen extends OptionsSubScreen {
         boolean resettable = !row.settings().isEmpty();
         button.active = resettable && !row.isDefault();
         button.visible = resettable;
-        if (resettable) button.setTooltip(Tooltip.create(Component.translatable("caustica.enhanced.reset.tooltip")));
+        if (resettable) {
+            resetButtons.put(button, row);
+            button.setTooltip(Tooltip.create(Component.translatable("caustica.enhanced.reset.tooltip")));
+        }
         return button;
     }
 

@@ -102,6 +102,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     private BlockPos emittedBlockPos;
     private float emittedBlockOffsetX, emittedBlockOffsetY, emittedBlockOffsetZ;
     private final RandomSource emittedBlockRandom = RandomSource.create();
+    private static final boolean CATHARSIS_LOADED = net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("catharsis");
     private boolean playerOnRealPath; // per entity capture; see submitModel
     // Set by order(int) for the very next submitModel call (banner/shield pattern-layer stacking), then
     // consumed. Baked-quad paths (addQuad) don't use ordering and always reset the capture's order to 0.
@@ -264,7 +265,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // A player whose body a mod replaced (EMF/ETF variants) has its cape and armour attached to that body's pose by
         // the real render path. On the cuboid shortcut those layers separate from it; plain players keep the shortcut.
         boolean playerModel = state instanceof net.minecraft.client.renderer.entity.state.AvatarRenderState;
-        RtCuboidEmitter.ModelTemplate directTemplate = (playerModel && (playerOnRealPath
+        // Catharsis applies per-equipment visibility during humanoid pose setup.
+        boolean catharsisHumanoid = CATHARSIS_LOADED
+                && state instanceof net.minecraft.client.renderer.entity.state.HumanoidRenderState;
+        RtCuboidEmitter.ModelTemplate directTemplate = catharsisHumanoid || (playerModel && (playerOnRealPath
                 || FirstPersonModelCompat.rendering() || FirstPersonModelCompat.cameraCapture())) || glintPass ? null : cuboidEmitter.prepare(model);
         if (playerModel && directTemplate == null) playerOnRealPath = true;
         boolean replayModel = directTemplate == null && RtModelCompat.enabled() && !FirstPersonModelCompat.cameraCapture();

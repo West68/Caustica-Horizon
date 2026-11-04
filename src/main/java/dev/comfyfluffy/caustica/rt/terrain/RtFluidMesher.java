@@ -48,8 +48,8 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *       no camera can be above an opaque ceiling to see the front). Here, a cell occluded from above
  *       (by real shape, so glass ceilings count too) reports height 1.0, matching the same-fluid-above
  *       rule and removing both the phantom face and the sliver.
- *   <li><b>Exact coordinates.</b> No 0.001 raster anti-z-fight insets/lifts — ray tracing doesn't
- *       z-fight, and the occlusion fixes above already remove every case that needed them.
+ *   <li><b>Shared-plane priority.</b> Beside partial models, place the water plane slightly inside
+ *       the neighboring cell so the opaque exterior wins overlapping ray hits.
  * </ul>
  *
  * Per-vertex cardinal lighting and the leaves/glass overlay sprite are also dropped: {@link RtTerrain}'s
@@ -58,6 +58,14 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * averaging the raw per-vertex colour), so there is nothing downstream to feed them for.
  */
 final class RtFluidMesher {
+    // Put shared planes just behind a partial block's exterior so opaque quads win a ray hit.
+    private static final float MODEL_BOUNDARY_OFFSET = 1f / 4096f;
+
+    private static float modelBoundaryOffset(BlockState state) {
+        return state.getRenderShape() == net.minecraft.world.level.block.RenderShape.MODEL
+                ? MODEL_BOUNDARY_OFFSET : 0f;
+    }
+
     private RtFluidMesher() {
     }
 
@@ -191,11 +199,12 @@ final class RtFluidMesher {
                 v11 = flowingSprite.getV(0.5F + (-c - s));
             }
 
+            float top = y + modelBoundaryOffset(blockStateUp);
             addFace(builder,
-                    x + 0.0F, y + heightNorthWest, z + 0.0F, u00, v00,
-                    x + 0.0F, y + heightSouthWest, z + 1.0F, u01, v01,
-                    x + 1.0F, y + heightSouthEast, z + 1.0F, u10, v10,
-                    x + 1.0F, y + heightNorthEast, z + 0.0F, u11, v11,
+                    x + 0.0F, top + heightNorthWest, z + 0.0F, u00, v00,
+                    x + 0.0F, top + heightSouthWest, z + 1.0F, u01, v01,
+                    x + 1.0F, top + heightSouthEast, z + 1.0F, u10, v10,
+                    x + 1.0F, top + heightNorthEast, z + 0.0F, u11, v11,
                     tintColor);
         }
 
@@ -205,11 +214,12 @@ final class RtFluidMesher {
             float u1 = stillSprite.getU1();
             float v0 = stillSprite.getV0();
             float v1 = stillSprite.getV1();
+            float bottom = y - modelBoundaryOffset(blockStateDown);
             addFace(builder,
-                    x, y, z, u0, v0,
-                    x + 1.0F, y, z, u1, v0,
-                    x + 1.0F, y, z + 1.0F, u1, v1,
-                    x, y, z + 1.0F, u0, v1,
+                    x, bottom, z, u0, v0,
+                    x + 1.0F, bottom, z, u1, v0,
+                    x + 1.0F, bottom, z + 1.0F, u1, v1,
+                    x, bottom, z + 1.0F, u0, v1,
                     tintColor);
         }
 
@@ -278,11 +288,14 @@ final class RtFluidMesher {
                 float v01 = sprite.getV((1.0F - hh0) * 0.5F);
                 float v02 = sprite.getV((1.0F - hh1) * 0.5F);
                 float v1 = sprite.getV(0.5F);
+                float offset = modelBoundaryOffset(neighborState);
+                float dx = offset * faceDir.getStepX();
+                float dz = offset * faceDir.getStepZ();
                 addFace(builder,
-                        x0, y + hh0, z0, u0, v01,
-                        x1, y + hh1, z1, u1, v02,
-                        x1, y, z1, u1, v1,
-                        x0, y, z0, u0, v1,
+                        x0 + dx, y + hh0, z0 + dz, u0, v01,
+                        x1 + dx, y + hh1, z1 + dz, u1, v02,
+                        x1 + dx, y, z1 + dz, u1, v1,
+                        x0 + dx, y, z0 + dz, u0, v1,
                         tintColor);
             }
         }

@@ -810,6 +810,11 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payload.albedo = applyBreaking(payload.albedo, rayCone, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), n);
     }
     ConstPtr<WorldPush> weatherPtr=ConstPtr<WorldPush>(pc.worldPushAddr); // only the fields used below, not the whole struct
+    if ((materialHeader.features & MATERIAL_FEATURE_SNOW) != 0u) {
+        float snowReflectance = asfloat(weatherPtr[0].lightGridDims.w);
+        payload.albedo *= snowReflectance;
+        surface.f0 *= snowReflectance;
+    }
     let weather_dimensionControl=weatherPtr[0].dimensionControl;
     let weather_environment=weatherPtr[0].environment;
     let weather_flags=weatherPtr[0].flags;

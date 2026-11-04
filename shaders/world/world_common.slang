@@ -96,12 +96,13 @@ public struct WorldPush {
     public float4 netherLighting;
     public float4   lightRebase;      // xyz hierarchy-to-current rebase, w inverse total light power
     public float4   lightGridOrigin;  // xyz minimum cell origin in rebased blocks, w cell size
-    public int4     lightGridDims;    // xyz dense grid dimensions, w reserved
+    public int4     lightGridDims;    // xyz dense grid dimensions, w snow reflectance (float bits)
     public uint     lightCount;       // packed Light records in pc.lightBufAddr
     public uint     risCandidates;    // RIS candidate count M per diffuse vertex (0 = emitter NEE off)
 };
 
 public static const uint FRAME_FLAG_DISABLE_ORE_EMISSION = 65536u;
+public static const uint MATERIAL_FEATURE_SNOW = 32768u;
 public static const uint MATERIAL_FEATURE_ORE_EMISSION = 8388608u;
 
 // 32-byte area-light record. Radiance is packed R11G11B10 (albedo * mask * state light, before this fork's

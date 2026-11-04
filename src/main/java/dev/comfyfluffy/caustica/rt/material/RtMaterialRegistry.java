@@ -47,6 +47,7 @@ public final class RtMaterialRegistry {
     public static final int FEATURE_HEURISTIC_EMISSION = 4;
     public static final int FEATURE_OVERRIDE_EMISSION = 8;
     public static final int FEATURE_STOCHASTIC_ALPHA = 16;
+    public static final int FEATURE_SNOW = 1 << 15;
     public static final int FEATURE_ORE_EMISSION = 1 << 23;
     private static final int EMISSION_STRENGTH_SHIFT = 8;
     private static final int EMISSION_STRENGTH_MASK = 255;
@@ -168,6 +169,9 @@ public final class RtMaterialRegistry {
                     & (FEATURE_SPEC | FEATURE_NORMAL | FEATURE_HEURISTIC_EMISSION);
             baseFeatures |= PortalMaterials.flags(sprite.contents().name().toString());
             String lightName=sprite.contents().name().toString();
+            if (lightName.equals("minecraft:block/snow") || lightName.equals("minecraft:block/powder_snow")) {
+                baseFeatures |= FEATURE_SNOW;
+            }
             if(lightName.equals("minecraft:block/torch") || lightName.equals("minecraft:block/soul_torch")
                     || lightName.equals("minecraft:block/redstone_torch") || lightName.equals("minecraft:block/redstone_torch_off"))baseFeatures|=1048576;
             if(lightName.equals("minecraft:block/torch") || lightName.equals("minecraft:block/lantern")

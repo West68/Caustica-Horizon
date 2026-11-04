@@ -85,6 +85,7 @@ public final class RtEntities {
     // TLAS visibility-mask bits, ANDed against the per-ray cull mask in world.rgen. Bit 0 = secondary rays
     // (shadows / GI / reflections, CULL_SECONDARY); bit 1 = the primary camera ray (CULL_PRIMARY).
     private static final int MASK_SECONDARY = 0x01;
+    private static final int MASK_WATER_BODY = 0x40;
     private static final int MASK_PRIMARY = 0x02;
     /** Default mask: visible to every ray (terrain and ordinary entities use this). */
     private static final int MASK_ALL = 0xFF;
@@ -892,8 +893,10 @@ public final class RtEntities {
             if (entity == cameraEntity && entity.isSpectator()) {
                 continue;
             }
+            // Server holograms are separate entities and bypass the ordinary name tag overlay.
+            if (!nameTags && entity instanceof net.minecraft.world.entity.Display.TextDisplay) continue;
             boolean firstPersonSelf = entity == cameraEntity && firstPerson;
-            int mask = LightOwnerMask.receiver(firstPersonSelf ? MASK_SECONDARY : MASK_ALL, entity == mc.player);
+            int mask = LightOwnerMask.receiver(firstPersonSelf ? MASK_SECONDARY | MASK_WATER_BODY : MASK_ALL, entity == mc.player);
             double ix;
             double iy;
             double iz;

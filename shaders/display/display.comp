@@ -20,7 +20,7 @@ layout(push_constant) uniform Push {
     vec4 grade1; // display gamma, shadow lift, highlight softness, ITRP scene-linear bloom mix
     float detailSharpen; // ITRP DETAIL_SHARPEN_AMOUNT (0 = off; overworld ITRP look only)
     mat4 invViewProj;    // jitter-free camera-relative inverse view-projection (same as world.rgen)
-    vec4 skyAxis;        // xyz celestial rotation axis, w rotation angle (the star field's wheel)
+    vec4 skyAxis;        // x star density, yz celestial rotation axis (x axis component is zero), w rotation angle (the star field's wheel)
     vec4 night;          // x night strength (0 = off), y time (s), z rain, w Milky Way texture ready
     mat4 prevViewProj;   // previous frame's camera-relative view-projection, for sky-mask reprojection
 } pc;
@@ -83,7 +83,7 @@ float stableSkyCoverage(ivec2 pix, ivec2 size, vec2 uv) {
 }
 
 vec3 rotateSky(vec3 v) { // inverse of the star wheel, as world.rmiss stars()
-    vec3 k = normalize(pc.skyAxis.xyz);
+    vec3 k = normalize(vec3(0.0, pc.skyAxis.yz));
     float c = cos(-pc.skyAxis.w), s = sin(-pc.skyAxis.w);
     return v * c + cross(k, v) * s + k * dot(k, v) * (1.0 - c);
 }
@@ -101,6 +101,7 @@ vec3 blackbody(float t) { // compact fit, 3000..12000 K, normalised to unit max
 // Crisp point stars: cube-face cells, power-law brightness, colour temperature, denser in the band,
 // a gaussian sized to the output pixel so stars stay round and stable at any resolution.
 vec3 pointStars(vec3 s, float pixelAngle, float band, float time, float elevation) {
+    if (pc.skyAxis.x <= 0.0) return vec3(0.0);
     vec3 a = abs(s); vec2 uv; float face;
     if (a.x >= a.y && a.x >= a.z) { uv = s.yz / a.x; face = s.x > 0.0 ? 0.0 : 1.0; }
     else if (a.y >= a.z)          { uv = s.xz / a.y; face = s.y > 0.0 ? 2.0 : 3.0; }
@@ -112,7 +113,7 @@ vec3 pointStars(vec3 s, float pixelAngle, float band, float time, float elevatio
     for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) {
         vec3 id = vec3(base + vec2(i, j), face);
         float pick = nightHash(id);
-        float density = 0.08 + 0.25 * band;
+        float density = (0.08 + 0.25 * band) * pc.skyAxis.x;
         if (pick > density) continue;
         vec2 centre = id.xy + 0.15 + 0.7 * vec2(nightHash(id + 11.0), nightHash(id + 23.0));
         float d = length(g - centre) / CELLS * 2.0;             // ~ angular distance (radians)
