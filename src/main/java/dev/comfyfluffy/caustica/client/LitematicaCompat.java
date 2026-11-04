@@ -23,6 +23,8 @@ public final class LitematicaCompat {
     private static final Map<String,Method> METHODS=new HashMap<>();
     private static boolean failed,prepared,drawing,logged;
     private static RenderTarget target;
+    private static float partialTick;
+    private static boolean drawingBlockEntities;
     private static final Matrix4f VIEW=new Matrix4f(),PROJECTION=new Matrix4f();
     private static final Set<RenderPipeline> FAILED_PIPELINES=Collections.newSetFromMap(new IdentityHashMap<>());
     private static Object call(String name,Object... args) throws ReflectiveOperationException {
@@ -42,6 +44,7 @@ public final class LitematicaCompat {
             Object world=call("getWorldRenderer");
             if(!(boolean)world.getClass().getMethod("hasWorld").invoke(world))return;
             var mc=Minecraft.getInstance();var camera=mc.gameRenderer.mainCamera();var profiler=Profiler.get();
+            partialTick = delta.getGameTimeDeltaPartialTick(false);
             VIEW.set(view);PROJECTION.set(RtComposite.INSTANCE.capturedWorldProjection());
             var frustum=new Frustum(VIEW,PROJECTION);frustum.prepare(state.pos.x,state.pos.y,state.pos.z);
             call("updateCameraState",camera,delta.getGameTimeDeltaPartialTick(false),state);
@@ -71,6 +74,7 @@ public final class LitematicaCompat {
             RenderSystem.setProjectionMatrix(LitematicaMaterials.projection().slice(),ProjectionType.PERSPECTIVE);
             call("piecewiseDrawBlockLayerGroup",ChunkSectionLayerGroup.OPAQUE,null);
             call("piecewiseDrawBlockLayerGroup",ChunkSectionLayerGroup.TRANSLUCENT,null);
+            drawBlockEntities(main);
             call("piecewiseRenderOverlay",Profiler.get());
             drawBoxes();
             if(!logged) {logged=true;CausticaMod.LOGGER.info("Litematica independent Vulkan PBR/parallax bridge active; schematic geometry excluded from TLAS");}
@@ -82,6 +86,29 @@ public final class LitematicaCompat {
             RenderSystem.setProjectionMatrix(oldProjection,oldType);
         }
     }
+    private static void drawBlockEntities(RenderTarget main) throws ReflectiveOperationException {
+        var mc = Minecraft.getInstance();
+        var state = new net.minecraft.client.renderer.state.level.LevelRenderState();
+        var nodes = new net.minecraft.client.renderer.SubmitNodeStorage();
+        call("piecewisePrepareBlockEntities", mc.gameRenderer.mainCamera(), state, partialTick, Profiler.get());
+        call("piecewiseRenderBlockEntities", new com.mojang.blaze3d.vertex.PoseStack(), state, nodes, Profiler.get());
+        if (nodes.getSubmitsPerOrder().isEmpty()) return;
+        drawingBlockEntities = true;
+        RtUiOverlay.beginOutputRedirect(main);
+        try (var frame = mc.gameRenderer.featureRenderDispatcher().prepareFrame(nodes)) {
+            frame.executeSolid();
+            frame.executeTranslucent();
+            frame.executeTranslucentAfterTerrain();
+        } finally {
+            RtUiOverlay.endOutputRedirect();
+            drawingBlockEntities = false;
+        }
+    }
+
+    public static RenderTarget blockEntityTarget(RenderTarget original) {
+        return drawingBlockEntities && target != null ? target : original;
+    }
+
     private static Object overlay;
     private static Method[] boxMethods;
     private static boolean boxesFailed,overlayDepthFailed;

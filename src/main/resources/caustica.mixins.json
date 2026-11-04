@@ -54,6 +54,7 @@
     "DhLodRenderSectionMixin",
     "LitematicaDrawMixin",
     "LitematicaOverlayMixin",
+    "LitematicaBlockEntityTargetMixin",
     "MalilibRenderContextMixin",
     "YsmNetworkHandlerMixin",
     "YsmLazyModelSessionMixin",

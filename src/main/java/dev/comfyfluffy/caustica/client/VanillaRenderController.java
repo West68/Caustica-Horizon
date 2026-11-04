@@ -154,7 +154,9 @@ public final class VanillaRenderController {
 			Class<?> type = Class.forName("net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer");
 			Object renderer = type.getMethod("instanceNullable").invoke(null);
 			if (renderer != null) {
-				type.getMethod("reload").invoke(renderer);
+                // Flush pending uploads before Sodium waits on staging-buffer fences in reload.
+                com.mojang.blaze3d.systems.RenderSystem.getDevice().createCommandEncoder().submit();
+                type.getMethod("reload").invoke(renderer);
 				CausticaMod.LOGGER.info("RT resumed: released Sodium raster terrain buffers");
 			}
 		} catch (ClassNotFoundException ignored) {

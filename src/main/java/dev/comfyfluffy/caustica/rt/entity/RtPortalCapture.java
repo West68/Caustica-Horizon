@@ -28,6 +28,9 @@ final class RtPortalCapture {
             float partialTick, Vec3 camera) {
         if (isPortal(entity))
             return extractUngated(dispatcher.getRenderer(entity), entity, partialTick, camera, false);
+        // RT captures real chests independently of the raster/schematic occlusion graph.
+        if (entity instanceof net.minecraft.world.level.block.entity.ChestBlockEntity)
+            return extractUngated(dispatcher.getRenderer(entity), entity, partialTick, camera, true);
         if (entity instanceof BeaconBlockEntity)
             return extractUngated(dispatcher.getRenderer(entity), entity, partialTick, camera, true);
         return dispatcher.tryExtractRenderState(entity, partialTick, null, false);
