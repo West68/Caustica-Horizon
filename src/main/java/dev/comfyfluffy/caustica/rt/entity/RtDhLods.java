@@ -113,7 +113,13 @@ public final class RtDhLods {
                 int count=mesh.quads().size();long required=DhPackedQuads.bytes(count);
                 long buildBytes=RtAccel.dhBuildBytes(ctx,count);
                 // Admission accounts actual driver sizes including in-flight scratch, never a lossy proxy.
-                if(bytes+required+buildBytes>budget){budgetRejects++;retryAfter.put(s.pos(),frame+30);continue;}
+                if(bytes+required+buildBytes>budget){
+                    // Nearer sections outrank farther ones: a full budget must never leave the ground the player
+                    // just walked off without LODs (seams that only a world reload cleared). Free farther
+                    // sections; their memory returns after KEEP frames, then this section builds.
+                    makeRoomFor(s,required+buildBytes,x,z,frame);
+                    budgetRejects++;retryAfter.put(s.pos(),frame+KEEP+1);continue;
+                }
                 RtBuffer g=ctx.createBuffer(required,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,true,"DH section geometry");
                 RtAccel.PersistentBuild pb=null;
                 try {
@@ -170,7 +176,20 @@ public final class RtDhLods {
     }
     private void retire(Entry e,long frame) {
         evictions++;
-        retired.add(new Retired(frame+KEEP,()->{RtAccel.destroyEntityAccel(e.build.accel(),e.build.backing());e.geometry.destroy();bytes-=e.geometry.size+e.build.backing().size;}));
+        long size=e.geometry.size+e.build.backing().size;releasing+=size;
+        retired.add(new Retired(frame+KEEP,()->{RtAccel.destroyEntityAccel(e.build.accel(),e.build.backing());e.geometry.destroy();bytes-=size;releasing-=size;}));
+    }
+    /** Bytes already retired but not yet returned (they come back KEEP frames after retirement). */
+    private long releasing;
+    /** Evict the farthest resident sections that lie farther than {@code s} until {@code need} fits. */
+    private void makeRoomFor(DhLodCapture.SectionSnapshot s,long need,double x,double z,long frame) {
+        double near=distance(s,x,z);
+        for(int evicted=0;bytes-releasing+need>budget && evicted<16;evicted++) {
+            Map.Entry<Long,Entry> far=null;double farDistance=near;
+            for(var c:cache.entrySet()){if(c.getKey()==s.pos())continue;double d=distance(c.getValue().snapshot,x,z);if(d>farDistance){farDistance=d;far=c;}}
+            if(far==null)return;
+            retire(far.getValue(),frame);cache.remove(far.getKey());retryAfter.put(far.getKey(),frame+600);
+        }
     }
     /** Caller has quiesced the context, matching all other entity cache shutdowns. */
     public void shutdown() {

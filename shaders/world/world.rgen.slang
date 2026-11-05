@@ -480,6 +480,7 @@ float3 sampleGGXVNDF(float3 n, float3 ve, float rough, inout uint s) {
 //   bit 1 (0x02) — the primary camera ray.
 // Terrain / entities / block entities keep 0xFF (both bits). Particles use 0x02: primary-visible
 // receiver billboards only. The first-person camera owner uses 0x01 (secondary only).
+static const float NIGHT_VISION_AMBIENT = 0.03;
 static const uint CULL_SECONDARY = 0x01u;
 static const uint CULL_PRIMARY = 0x02u;
 // Ordinary scene instances carry this bit; the camera owner's first-person body (mask=1) does not.
@@ -2054,6 +2055,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             }
             L += throughput * emitterColor * emission * EMISSIVE_STRENGTH * worldPush.visualLight.x;
         }
+        // Night vision: vanilla lifts every surface to its own colour regardless of light. Add that as an
+        // ambient term on the camera-visible surface only (about 1% of sunlit diffuse, invisible by day);
+        // auto exposure raises it to a readable image in the dark. Light sources keep their own brightness.
+        if (worldPush.effectControl.x > 0.0 && bounce == gvBounce)
+            L += throughput * albedo * (NIGHT_VISION_AMBIENT * worldPush.effectControl.x);
 
         // NEE: direct light from the dominant celestial body (sun by day, moon by night) — Lambert
         // diffuse + GGX specular, one shadow ray. Jitter the light direction within its square angular

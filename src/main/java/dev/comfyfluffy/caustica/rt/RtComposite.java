@@ -1180,7 +1180,8 @@ public final class RtComposite {
                     terrain.lightCount(),
                     risPush(),
                     new Float4(CausticaConfig.Rt.Visuals.FOG_HEIGHT.value(), CausticaConfig.Rt.Visuals.FOG_RAIN.value(),
-                            CausticaConfig.Rt.Visuals.FOG_HAZE.value(), CausticaConfig.Rt.Visuals.FOG_SUN.value())
+                            CausticaConfig.Rt.Visuals.FOG_HAZE.value(), CausticaConfig.Rt.Visuals.FOG_SUN.value()),
+                    new Float4(nightVision(), 0f, 0f, 0f)
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             // Upload any entity textures registered this frame into the bindless set before the trace.
@@ -2306,4 +2307,15 @@ public final class RtComposite {
         b.get(0).srcOffsets(1).set(w,h,1);b.get(0).dstOffsets(0).set(0,dst.height,0);b.get(0).dstOffsets(1).set(dst.width,0,1);
         VK10.vkCmdBlitImage(cmd,src,VK10.VK_IMAGE_LAYOUT_GENERAL,dst.image,VK10.VK_IMAGE_LAYOUT_GENERAL,b,VK10.VK_FILTER_NEAREST);
     }
+
+    /** Vanilla night-vision strength, including its fade-out flicker in the last 10 seconds. */
+    private static float nightVision() {
+        var player = net.minecraft.client.Minecraft.getInstance().player;
+        if (player == null) return 0f;
+        var effect = player.getEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION);
+        if (effect == null) return 0f;
+        if (!effect.endsWithin(200)) return 1f;
+        return 0.7f + net.minecraft.util.Mth.sin(effect.getDuration() * (float) Math.PI * 0.2f) * 0.3f;
+    }
+
 }

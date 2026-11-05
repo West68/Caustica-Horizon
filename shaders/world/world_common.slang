@@ -100,6 +100,7 @@ public struct WorldPush {
     public uint     lightCount;       // packed Light records in pc.lightBufAddr
     public uint     risCandidates;    // RIS candidate count M per diffuse vertex (0 = emitter NEE off)
     public float4   fogControl;       // x height falloff (blocks), y rain fog gain, z far haze strength, w sun in-scatter gain
+    public float4   effectControl;    // x night-vision strength (0..1, vanilla fade flicker); yzw reserved
 };
 
 public static const uint FRAME_FLAG_DISABLE_ORE_EMISSION = 65536u;
