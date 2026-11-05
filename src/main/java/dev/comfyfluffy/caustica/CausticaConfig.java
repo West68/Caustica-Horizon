@@ -660,6 +660,11 @@ public final class CausticaConfig {
             public static final FloatSetting HELD_BRIGHTNESS=clampedFloat("caustica.rt.heldBrightness","visuals.held-brightness",1f,0f,8f);
             public static final FloatSetting WETNESS=clampedFloat("caustica.rt.wetness","visuals.wetness",1f,0f,1f);
             public static final FloatSetting FOG=clampedFloat("caustica.rt.fogDensity","visuals.fog-density",1f,0f,4f);
+            /** Fog detail: height falloff in blocks, rain thickening, far-distance sky haze, sunlit fog. */
+            public static final FloatSetting FOG_HEIGHT=clampedFloat("caustica.rt.fogHeight","visuals.fog-height-falloff",64f,16f,256f);
+            public static final FloatSetting FOG_RAIN=clampedFloat("caustica.rt.fogRain","visuals.fog-rain",1f,0f,4f);
+            public static final FloatSetting FOG_HAZE=clampedFloat("caustica.rt.fogHaze","visuals.fog-haze",1f,0f,2f);
+            public static final FloatSetting FOG_SUN=clampedFloat("caustica.rt.fogSun","visuals.fog-sun",1f,0f,3f);
             public static final FloatSetting WATER_SCATTER=clampedFloat("caustica.rt.waterScatter","visuals.water-scatter",1f,0f,4f);
         }
 
@@ -862,6 +867,9 @@ public final class CausticaConfig {
              */
             public static final BooleanSetting ITRP =
                     bool("caustica.rt.itrpLook", "look.itrp", true);
+            /** Caustica (non-ITRP) look view transform: true = upstream ACES 2.0 + default look LMT, false = legacy AgX. */
+            public static final BooleanSetting ACES2 =
+                    bool("caustica.rt.look.aces2", "look.aces2", true);
 
             public static final FloatSetting BRIGHTNESS=clampedFloat("caustica.rt.look.brightness","look.brightness",1f,0.25f,2f);
             public static final FloatSetting CONTRAST=clampedFloat("caustica.rt.look.contrast","look.contrast",1f,0.5f,1.5f);

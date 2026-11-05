@@ -95,7 +95,7 @@ public final class RtExposure {
     // Manual mode's exposure scale, also used as the auto-history seed (resetAutoHistory) so the very
     // first auto-exposure frame starts from the dialed-in EV bias instead of a bare 1.0.
     private float manualExposureScale() {
-        return CausticaConfig.Rt.Exposure.clampScale((float) Math.pow(2.0, manualEv()));
+        return CausticaConfig.Rt.Exposure.clampScale((float) Math.pow(2.0, manualEv() + NIGHT_VISION_EV * nightVision()));
     }
 
     private void recordAuto(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, RtImage traceColor) {
@@ -159,10 +159,22 @@ public final class RtExposure {
         return new AutoConfig(
                 CausticaConfig.Rt.Exposure.KEY.value(),
                 CausticaConfig.Rt.Exposure.minEv(),
-                CausticaConfig.Rt.Exposure.maxEv(),
+                CausticaConfig.Rt.Exposure.maxEv() + NIGHT_VISION_MAX_EV * nightVision(),
                 CausticaConfig.Rt.Exposure.ADAPT_UP.value(),
                 CausticaConfig.Rt.Exposure.ADAPT_DOWN.value(),
-                manualEv());
+                manualEv() + NIGHT_VISION_EV * nightVision());
+    }
+
+    // Night vision: vanilla brightens the lightmap; the path tracer has no lightmap, so it lifts exposure
+    // (and the auto-exposure ceiling) instead. Scale follows vanilla's fade-out flicker in the last 10 s.
+    private static final float NIGHT_VISION_EV = 2.0f, NIGHT_VISION_MAX_EV = 5.0f;
+    private static float nightVision() {
+        var player = net.minecraft.client.Minecraft.getInstance().player;
+        if (player == null) return 0f;
+        var effect = player.getEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION);
+        if (effect == null) return 0f;
+        if (!effect.endsWithin(200)) return 1f;
+        return 0.7f + net.minecraft.util.Mth.sin(effect.getDuration() * (float) Math.PI * 0.2f) * 0.3f;
     }
 
     record AutoConfig(float key, float minEv, float maxEv, float adaptUp, float adaptDown, float evBias) {

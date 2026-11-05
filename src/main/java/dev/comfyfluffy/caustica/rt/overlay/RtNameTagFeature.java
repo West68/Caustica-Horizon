@@ -81,6 +81,8 @@ final class RtNameTagFeature implements RtOverlayFeature {
     private final Matrix4f viewProj = new Matrix4f();
     private float camOffX, camOffY, camOffZ;
     private final List<DrawPage> drawPages = new ArrayList<>();
+    private final Map<net.minecraft.network.chat.Component, net.minecraft.util.FormattedCharSequence> visualOrder = new java.util.HashMap<>();
+    private net.minecraft.locale.Language visualOrderLanguage;
 
     private record DrawPage(GpuTextureView view, RtBuffer vbo, int vertexCount) {
     }
@@ -109,12 +111,19 @@ final class RtNameTagFeature implements RtOverlayFeature {
 
         Font font = Minecraft.getInstance().font;
         Quaternionf billboard = RtEntities.INSTANCE.cameraOrientation();
-        pages.clear();
+        // Keep each page's arrays across frames (clear, not reallocate): rebuilding them grew every
+        // list from empty each frame. Pages left empty this frame are skipped below exactly as before.
+        for (PageBuilder b : pages.values()) { b.posUv.clear(); b.colors.clear(); }
+        net.minecraft.locale.Language language = net.minecraft.locale.Language.getInstance();
+        if (language != visualOrderLanguage || visualOrder.size() > 1024) { visualOrder.clear(); visualOrderLanguage = language; }
         for (RtEntities.NameTagEntity tag : tags) {
             pose.identity().translate(tag.x(), tag.y(), tag.z()).rotate(billboard)
                     .scale(EntityRenderer.NAMETAG_SCALE, -EntityRenderer.NAMETAG_SCALE, EntityRenderer.NAMETAG_SCALE);
             float x = -font.width(tag.text()) / 2.0F;
-            Font.PreparedText text = font.prepareText(tag.text().getVisualOrderText(), x, 0.0F, TEXT_COLOR, false, false, BACKGROUND_COLOR);
+            // The bidi visual order depends only on the component's content and the language. Name tag
+            // components are rebuilt every frame, so the component's own cache never hit.
+            net.minecraft.util.FormattedCharSequence ordered = visualOrder.computeIfAbsent(tag.text(), c -> c.getVisualOrderText());
+            Font.PreparedText text = font.prepareText(ordered, x, 0.0F, TEXT_COLOR, false, false, BACKGROUND_COLOR);
             glyphCapture.pose = pose;
             text.visit(glyphCapture);
         }

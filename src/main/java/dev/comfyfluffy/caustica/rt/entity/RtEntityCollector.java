@@ -294,7 +294,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         long directCubeCounts = 0L;
         java.util.List<HiddenCameraPart> hiddenCameraParts = FirstPersonModelCompat.cameraCapture()
                 && state instanceof net.minecraft.client.renderer.entity.state.HumanoidRenderState
-                ? hideCameraHeads(model.root()) : java.util.List.of();
+                ? hideCameraHeads(model.root(), FirstPersonModelCompat.hideArms()) : java.util.List.of();
         long drawStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {
             if (directTemplate != null) {
@@ -505,18 +505,29 @@ public final class RtEntityCollector implements SubmitNodeCollector {
 
     private record HiddenCameraPart(ModelPart part, boolean visible) {}
 
-    private static java.util.List<HiddenCameraPart> hideCameraHeads(ModelPart root) {
-        var hidden = new java.util.ArrayList<HiddenCameraPart>(2);
-        hideCameraHeads(root, hidden);
+    private static java.util.List<HiddenCameraPart> hideCameraHeads(ModelPart root, boolean arms) {
+        var hidden = new java.util.ArrayList<HiddenCameraPart>(arms ? 6 : 2);
+        hideCameraHeads(root, hidden, arms);
         return hidden;
     }
 
-    private static void hideCameraHeads(ModelPart root, java.util.List<HiddenCameraPart> hidden) {
+    private static boolean cameraArm(String name) {
+        return name.equals("left_arm") || name.equals("right_arm") || name.equals("left_sleeve") || name.equals("right_sleeve");
+    }
+
+    /** First Person Model hides arms + held items when its vanilla first-person hands are shown. */
+    private static boolean cameraHidesItem(ItemDisplayContext context) {
+        return FirstPersonModelCompat.cameraCapture()
+                && (context == ItemDisplayContext.THIRD_PERSON_LEFT_HAND || context == ItemDisplayContext.THIRD_PERSON_RIGHT_HAND)
+                && FirstPersonModelCompat.hideArms();
+    }
+
+    private static void hideCameraHeads(ModelPart root, java.util.List<HiddenCameraPart> hidden, boolean arms) {
         for (var entry : ((dev.comfyfluffy.caustica.mixin.ModelPartAccessor)(Object)root).caustica$children().entrySet()) {
-            if (entry.getKey().equals("head") || entry.getKey().equals("hat")) {
+            if (entry.getKey().equals("head") || entry.getKey().equals("hat") || (arms && cameraArm(entry.getKey()))) {
                 hidden.add(new HiddenCameraPart(entry.getValue(), entry.getValue().visible));
                 entry.getValue().visible = false;
-            } else hideCameraHeads(entry.getValue(), hidden);
+            } else hideCameraHeads(entry.getValue(), hidden, arms);
         }
     }
 
@@ -966,7 +977,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                            int overlayCoords, int outlineColor, int[] tintLayers, List<BakedQuad> quads,
                            MeshView mesh, ItemStackRenderState.FoilType foilType) {
         if (probeHand && RtFirstPerson.probe()) probeItem++;
-        if (capture == null) {
+        if (capture == null || cameraHidesItem(displayContext)) {
             return;
         }
         bakedLayers.begin();
@@ -1091,7 +1102,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords, int overlayCoords,
                            int outlineColor, int[] tintLayers, List<BakedQuad> quads, ItemStackRenderState.FoilType foilType) {
-        if (capture == null) {
+        if (capture == null || cameraHidesItem(displayContext)) {
             return;
         }
         itemFoil=foilType!=ItemStackRenderState.FoilType.NONE;

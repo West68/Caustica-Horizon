@@ -1220,6 +1220,11 @@ public final class RtTerrain {
             completeTask(task, prepared, build, t);
             return;
         }
+        if (compaction == null) { // size query unavailable: publish the uncompacted BLAS
+            prepared.releaseBuildInputs();
+            completeTask(task, prepared, build, null);
+            return;
+        }
         try {
             ctx.gpuExecutor().submit(
                     () -> !isTaskCurrent(task),

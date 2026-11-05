@@ -1054,6 +1054,7 @@ public final class RtComposite {
             RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, terrain.staticInstances(),
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
             frameEntities = fe;
+            if (RtEntities.INSTANCE.rainVeilActive()) flags |= 1 << 20; // world.rgen: run the rain-veil transmittance query
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
@@ -1177,7 +1178,9 @@ public final class RtComposite {
                     new Int4(terrain.lightGridDimX(), terrain.lightGridDimY(), terrain.lightGridDimZ(),
                             Float.floatToRawIntBits(CausticaConfig.Rt.Look.SNOW_REFLECTANCE.value())),
                     terrain.lightCount(),
-                    risPush()
+                    risPush(),
+                    new Float4(CausticaConfig.Rt.Visuals.FOG_HEIGHT.value(), CausticaConfig.Rt.Visuals.FOG_RAIN.value(),
+                            CausticaConfig.Rt.Visuals.FOG_HAZE.value(), CausticaConfig.Rt.Visuals.FOG_SUN.value())
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             // Upload any entity textures registered this frame into the bindless set before the trace.

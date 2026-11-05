@@ -99,6 +99,7 @@ public struct WorldPush {
     public int4     lightGridDims;    // xyz dense grid dimensions, w snow reflectance (float bits)
     public uint     lightCount;       // packed Light records in pc.lightBufAddr
     public uint     risCandidates;    // RIS candidate count M per diffuse vertex (0 = emitter NEE off)
+    public float4   fogControl;       // x height falloff (blocks), y rain fog gain, z far haze strength, w sun in-scatter gain
 };
 
 public static const uint FRAME_FLAG_DISABLE_ORE_EMISSION = 65536u;
@@ -160,6 +161,9 @@ public struct Payload {
 // Query-only alias: invoke its retained hit object without another traversal or a larger payload.
 public static const uint PAYLOAD_HAS_RELIEF = 0x10000000u;
 public static const uint PAYLOAD_RELIEF_QUERY = 0x20000000u;
+// Rain-veil transmittance query (world.rgen rainVeilTransmittance): payload.hitT carries this sentinel in,
+// albedo.x accumulates the product of (1 - streak opacity), albedo.y carries the per-frame opacity scale.
+public static const float RAIN_VEIL_QUERY = -7.0;
 // Flat block glass (including block-item geometry) supplies RR guides from the optical continuation.
 // The legacy name describes the slab model, not whether its entity has a motion vector.
 public static const uint PAYLOAD_STATIC_GLASS = 0x40000000u;

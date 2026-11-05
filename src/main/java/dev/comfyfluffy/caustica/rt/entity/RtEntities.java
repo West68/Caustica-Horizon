@@ -93,6 +93,9 @@ public final class RtEntities {
     // 0x10: also visible to specular continuations (mirrors, glass and water) …never to the dominant
     // diffuse/shadow rays, which keep skipping particles (world.rgen CULL_SPECULAR_PARTICLES).
     private static final int PARTICLE_MASK = MASK_PRIMARY | 0x10;
+    /** Rain sheets: their own instance, reached only by world.rgen's rain-veil transmittance query. */
+    public static final int RAIN_VEIL_MASK = 0x80;
+    private boolean rainVeilSplit;
     public static boolean particlesEnabled() {
         return CausticaConfig.Rt.Entities.PARTICLES_ENABLED.value();
     }
@@ -641,6 +644,7 @@ public final class RtEntities {
             }
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.particles")) {
                 captureParticles(ctx, build, mc, partial, rbx, rby, rbz, projection, viewRotation);
+                captureRainVeil(ctx, build, mc, partial);
                 captureModelParticles(ctx,build,mc,partial,rbx,rby,rbz,projection,viewRotation);
             }
             }
@@ -1297,6 +1301,7 @@ public final class RtEntities {
     private void captureParticles(RtContext ctx, FrameBuild build, Minecraft mc, float partial,
                                   int rbx, int rby, int rbz, Matrix4f projection, Matrix4f viewRotation) {
         billboardParticlesCaptured=0;
+        rainVeilSplit=false;
         int particleLimit = maxParticles();
         if (build.full()) {
             particlePrev.clear();
@@ -1382,11 +1387,15 @@ public final class RtEntities {
             var invoker=(dev.comfyfluffy.caustica.mixin.WeatherEffectRendererInvoker)(Object)renderer;
             capture.currentAlphaBucket=RtAccel.ENTITY_BUCKET_ANY_HIT;capture.clearUvRemap();capture.currentOrder=0;
             capture.currentTexSlot=RtEntityTextures.INSTANCE.slotForAtlas(net.minecraft.resources.Identifier.withDefaultNamespace("textures/environment/rain.png"));
-            particleCapture.rainStyle(true);
-            particleCapture.weatherStyle(true,camPos.x,camPos.y,camPos.z,net.minecraft.util.Util.getMillis()/1000.0);
-            invoker.caustica$renderInstances(particleCapture,weatherCapture.rainColumns,camPos,1f,weatherCapture.radius,weatherCapture.intensity);
-            particleCapture.flush();particleCapture.rainStyle(false);
-            particleCapture.weatherStyle(false,0,0,0,0);
+            // Rain sheets are captured separately as the rain-veil instance (captureRainVeil).
+            rainVeilSplit=true;
+            if(!rainVeilSplit) {
+                particleCapture.rainStyle(true);
+                particleCapture.weatherStyle(true,camPos.x,camPos.y,camPos.z,net.minecraft.util.Util.getMillis()/1000.0);
+                invoker.caustica$renderInstances(particleCapture,weatherCapture.rainColumns,camPos,1f,weatherCapture.radius,weatherCapture.intensity);
+                particleCapture.flush();particleCapture.rainStyle(false);
+                particleCapture.weatherStyle(false,0,0,0,0);
+            }
             capture.currentTexSlot=RtEntityTextures.INSTANCE.slotForAtlas(net.minecraft.resources.Identifier.withDefaultNamespace("textures/environment/snow.png"));
             invoker.caustica$renderInstances(particleCapture,weatherCapture.snowColumns,camPos,.8f,weatherCapture.radius,weatherCapture.intensity);
             particleCapture.flush();
@@ -1406,6 +1415,46 @@ public final class RtEntities {
         appendCapture(ctx, build, new Motion(dispAddr, 0f, 0f, 0f),
                 -1, PARTICLE_BIT, PARTICLE_MASK, IDENTITY); // one combined mesh, per-particle MV
     }
+
+    /**
+     * Rain sheets as their own instance (mask {@link #RAIN_VEIL_MASK}). The camera ray no longer stops at
+     * every streak and restarts behind it; world.rgen instead integrates the veil's transmittance in one
+     * any-hit pass bounded by the visible surface. The veil composite is order independent (a constant
+     * colour per frame), so the image matches the per-crossing loop.
+     */
+    private void captureRainVeil(RtContext ctx, FrameBuild build, Minecraft mc, float partial) {
+        rainVeilActive=false;
+        if(!rainVeilSplit || build.full() || mc.level==null || mc.level.getRainLevel(partial)<=0)return;
+        rainVeilSplit=false;
+        if(weatherCapture.rainColumns.isEmpty())return;
+        Camera cam = mc.gameRenderer.mainCamera();
+        if (cam == null) return;
+        var camPos=cam.position();
+        var renderer=mc.levelRenderer.weatherEffectRenderer();
+        var invoker=(dev.comfyfluffy.caustica.mixin.WeatherEffectRendererInvoker)(Object)renderer;
+        capture.reset();
+        particleDisp.clear();
+
+        try {
+            capture.currentAlphaBucket=RtAccel.ENTITY_BUCKET_ANY_HIT;capture.clearUvRemap();capture.currentOrder=0;
+            capture.currentTexSlot=RtEntityTextures.INSTANCE.slotForAtlas(net.minecraft.resources.Identifier.withDefaultNamespace("textures/environment/rain.png"));
+            particleCapture.rainStyle(true);
+            particleCapture.weatherStyle(true,camPos.x,camPos.y,camPos.z,net.minecraft.util.Util.getMillis()/1000.0);
+            invoker.caustica$renderInstances(particleCapture,weatherCapture.rainColumns,camPos,1f,weatherCapture.radius,weatherCapture.intensity);
+            particleCapture.flush();
+        } finally {
+            particleCapture.rainStyle(false);
+            particleCapture.weatherStyle(false,0,0,0,0);
+        }
+        if(capture.isEmpty())return;
+        for(int i=0;i<capture.verts.size()/3;i++) {particleDisp.add(0);particleDisp.add(0);particleDisp.add(0);particleDisp.add(0);}
+        long dispAddr = uploadDisp(ctx, build, particleDisp);
+        appendCapture(ctx, build, new Motion(dispAddr, 0f, 0f, 0f), -1, PARTICLE_BIT, RAIN_VEIL_MASK, IDENTITY);
+        rainVeilActive=true;
+    }
+    private boolean rainVeilActive;
+    /** True when this frame's TLAS holds a rain-veil instance (world.rgen runs the veil query). */
+    public boolean rainVeilActive() { return rainVeilActive; }
 
     /** Vanilla has two model-particle groups in addition to billboard quads: pickup and elder guardian.
      * Reuse their own extracted render states so vanilla interpolation, pose and texture selection survive.

@@ -621,11 +621,13 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             if ((pr.flags & 8192u) != 0u) {
                 // The moving enchantment tint must remain legible on saturated bright armour.
                 // Preserve the original surface between bands; tint the band without adding geometry.
-                float band = saturate(max(foilGlow.r, max(foilGlow.g, foilGlow.b)) * 3.0) * foilStrength;
+                // Vanilla foil is a faint additive shimmer: keep the armour readable and never self-lit
+                // enough for night auto-exposure to blow it out (3.1.1).
+                float band = saturate(max(foilGlow.r, max(foilGlow.g, foilGlow.b)) * 2.0 - 0.2) * foilStrength;
                 float foilLuma = max(dot(foilGlow, float3(0.2126, 0.7152, 0.0722)), 0.01);
                 float baseLuma = max(dot(albedo, float3(0.2126, 0.7152, 0.0722)), 0.15);
-                albedo = lerp(albedo, foilGlow * (baseLuma / foilLuma), 0.45 * band);
-                surface.emission = max(surface.emission, 0.015 * band);
+                albedo = lerp(albedo, foilGlow * (baseLuma / foilLuma), 0.3 * band);
+                surface.emission = max(surface.emission, 0.003 * band);
             } else {
                 albedo += foilGlow * 0.06;
                 surface.emission = max(surface.emission, 0.006 * max(foilGlow.r, max(foilGlow.g, foilGlow.b)));

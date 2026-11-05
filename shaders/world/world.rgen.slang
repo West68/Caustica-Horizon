@@ -600,6 +600,23 @@ float3 visibilityMasked(float3 origin, float3 dir, float tmax,uint mask) {
     return hObj.IsMiss() ? shadowVis.rgb : float3(0.0, 0.0, 0.0);
 }
 
+static const uint RAIN_VEIL_FLAG = 1u << 20;
+static const uint CULL_RAIN_VEIL = 0x80u;
+// Rain columns stand within the weather radius around the camera (at most 10 blocks out and up); this
+// bound keeps the query short for sky and distant hits.
+static const float RAIN_VEIL_MAX_DISTANCE = 48.0;
+float rainVeilTransmittance(float3 origin, float tmin, float3 dir, float tmax, uint cone, float opacityScale) {
+    if (tmax <= tmin) return 1.0;
+    Payload q = makeShadowPayload();
+    q.hitT = RAIN_VEIL_QUERY;
+    q.rayCone = cone;
+    q.albedo = float3(1.0, opacityScale, 0.0);
+    // Traversal only: any-hit accumulates and ignores every streak; the hit object is never invoked.
+    HitObject::TraceRay(topLevelAS, RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, CULL_RAIN_VEIL, SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u,
+            makeRay(origin, tmin, dir, tmax), q);
+    return saturate(q.albedo.x);
+}
+
 // Short silhouette probe for sunlight rims. Respect cutout alpha, like the lit surface itself.
 bool probeHit(float3 origin, float3 dir, float tmax) {
     Payload shadowPayload = makeShadowPayload();
@@ -740,6 +757,17 @@ float3 volumeLighting(float3 position,float3 viewRay,float g,float3 extinction,b
             *exp(-extinction*mediumDistance)*vis;
 }
 
+// Overworld air: what the fog takes away from a far surface comes back as the horizon sky in that direction
+// (aerial perspective), so distant terrain fades toward the sky instead of turning dark grey. The sun's own
+// in-scatter stays in volumeLighting. Gated by the camera's sky access like water, so caves get no sky haze.
+float3 overworldHaze(float3 rd) {
+    if(worldPush.skyLutAddr==0uL)return float3(0,0,0);
+    float cameraSky=saturate(worldPush.environment.w);
+    float3 horizon=normalize(float3(rd.x,max(abs(rd.y),.06),rd.z));
+    return max(sampleSkyLut(worldPush.skyLutAddr,worldPush.skyLutWidth,worldPush.skyLutHeight,horizon),float3(0,0,0))
+            *(cameraSky*cameraSky*cameraSky*worldPush.fogControl.z);
+}
+
 void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
         float3 waterAbsorb,inout float3 throughput,inout float3 radiance,inout uint seed) {
     if(distance<=0)return;
@@ -764,8 +792,8 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
     else {
         if(worldPush.environment.z<=0)return;
         float absoluteY=ro.y+rd.y*distance*.5+worldPush.cloudWorld.y-worldPush.camOffset.y;
-        float height=exp(-max(absoluteY-worldPush.mediumParams.z,0.0)/64.0);
-        sigma=worldPush.mediumParams.w>0.5 ? 4.0 : ((dim==1 || dim==2)?worldPush.dimensionFog.w:(.0006+.002*rain)*(.25+.75*height))*worldPush.environment.z;
+        float height=exp(-max(absoluteY-worldPush.mediumParams.z,0.0)/max(worldPush.fogControl.x,1.0));
+        sigma=worldPush.mediumParams.w>0.5 ? 4.0 : ((dim==1 || dim==2)?worldPush.dimensionFog.w:(.0006+.002*rain*worldPush.fogControl.y)*(.25+.75*height))*worldPush.environment.z;
     }
     float3 extinction=water ? waterAbsorb+sigma : float3(sigma,sigma,sigma);
     float3 transmit=exp(-extinction*distance);
@@ -790,14 +818,15 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
         float cameraSky=saturate(worldPush.environment.w);
         float waterSky=lerp(.002,1.0,saturate(worldPush.sunDir.w))*cameraSky*cameraSky*cameraSky;
         float3 incoming=water ? ((worldPush.flags & 512u)!=0u?float3(.4,.41,.5):worldPush.waterParams.xyz)*(.025*waterSky) :
-                worldPush.mediumParams.w>0.5?float3(.8,.06,.003):(dim==1||dim==2)?worldPush.dimensionFog.xyz:float3(0,0,0);
+                worldPush.mediumParams.w>0.5?float3(.8,.06,.003):(dim==1||dim==2)?worldPush.dimensionFog.xyz:overworldHaze(rd);
         // Direct term: exp(-sigma_t*t)*sigma_s*Li / p(t).
         // One random point on the view ray: indoors it rarely lands in a sunbeam, and when it does the pixel stands out
         // as a white dot, the more so in rain, which thickens the air fourfold. Bounded so that stays below visibility.
         float3 mediumLight=exp(-extinction*t)*source*(sigma/max(pdf,1e-20));
         if(!water) {
+            mediumLight*=worldPush.fogControl.w;
             float mediumAmount=luminance(mediumLight);
-            float mediumLimit=luminance(activeLightRadiance)*0.015;
+            float mediumLimit=luminance(activeLightRadiance)*0.015*max(worldPush.fogControl.w,0.0);
             if(mediumAmount>mediumLimit)mediumLight*=mediumLimit/mediumAmount;
         }
         radiance+=throughput*(mediumLight
@@ -811,7 +840,7 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
         float depth=landDistance*lerp(.005,.015,rain);
         float gate=1.0-exp2(-landDistance*.02);
         float3 haze=itrpReferenceAtmosphere(rd,worldPush.sunDir.xyz,rain,depth)
-                *(ITRP_SCENE_SKY_SCALE*.02*gate*gate);
+                *(ITRP_SCENE_SKY_SCALE*.02*gate*gate*worldPush.fogControl.z);
         radiance+=throughput*haze;
         throughput*=itrpLandTransmission(rd,landDistance*.005,rain);
     }
@@ -1394,8 +1423,21 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         if (waterContinuationMask != 0u) receiverMask = waterContinuationMask;
         waterContinuationMask = 0u;
         throughTransmission = false;
-        HitObject receiverHit=traceRadianceReordered(receiverMask, ro,
-                waterBoundaryContinuation ? WATER_BOUNDARY_TMIN : 0.0, rd, 10000.0);
+        float receiverTmin = waterBoundaryContinuation ? WATER_BOUNDARY_TMIN : 0.0;
+        HitObject receiverHit=traceRadianceReordered(receiverMask, ro, receiverTmin, rd, 10000.0);
+        // Rain veil on the camera's own line of sight, integrated in one any-hit pass up to the visible
+        // surface instead of stopping at every streak and restarting behind it. Each streak adds
+        // T*a*C and scales T by (1-a) with one C per frame, so the sum is C*(1-prod(1-a)) in any order.
+        if (primaryCamRay && (worldPush.flags & RAIN_VEIL_FLAG) != 0u
+                && (receiverMask & (CULL_PRIMARY | CULL_SPECULAR_PARTICLES)) != 0u) {
+            float veilEnd = min(payload.hitT >= 0.0 ? payload.hitT : 10000.0, RAIN_VEIL_MAX_DISTANCE);
+            float transmit = rainVeilTransmittance(ro, receiverTmin, rd, veilEnd, incomingCone,
+                    0.15 * saturate(worldPush.mediumParams.y));
+            if (transmit < 1.0) {
+                L += throughput * (1.0 - transmit) * (activeLightRadiance * 0.001 + 0.002);
+                throughput *= transmit;
+            }
+        }
         waterBoundaryContinuation = false;
         // Only the hand receiver excludes its camera-owner body. Once the path lands on
         // the world again, ordinary body shadows/GI are restored for that receiver.

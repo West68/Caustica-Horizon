@@ -50,6 +50,19 @@ float alphaDitherThreshold(uint salt) {
 
 #include "dh_visibility.slang"
 
+// world.rchit's rayConeTextureLod for the particle path, reproduced for the rain-veil query.
+float rainVeilEdge(float3 p0, float3 p1, float2 uv0, float2 uv1, float2 size) {
+    float worldLen = length(p1 - p0);
+    return worldLen <= 1.0e-7 ? 0.0 : length((uv1 - uv0) * size) / worldLen;
+}
+float rainVeilLod(uint rayCone, Sampler2D tex, float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, float2 uv2) {
+    uint w, h; tex.GetDimensions(w, h); float2 size = float2(w, h);
+    float texelsPerWorld = max(rainVeilEdge(p0, p1, uv0, uv1, size), max(rainVeilEdge(p1, p2, uv1, uv2, size), rainVeilEdge(p2, p0, uv2, uv0, size)));
+    float2 cone = unpackHalf2(rayCone);
+    float width = max(cone.x + cone.y * max(RayTCurrent(), 0.0), 1.0e-5);
+    return clamp(log2(max(width * texelsPerWorld, 1.0e-4)), 0.0, 12.0);
+}
+
 [shader("anyhit")]
 void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) {
     uint pid = PrimitiveIndex();
@@ -67,6 +80,26 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         uint i2 = indices[3u * pid + 2u];
         float2 uv = bary.x * uvs[i0] + bary.y * uvs[i1] + bary.z * uvs[i2];
         Prim epr = ConstPtr<Prim>(g.primAddr)[pid];
+        if (payload.hitT == RAIN_VEIL_QUERY) {
+            // Every streak in front of the visible surface, in any order: the veil composite is order
+            // independent. Same streak test (LOD 0, >= 0.1) and same opacity (ray-cone LOD alpha) as the
+            // closest-hit/raygen veil it replaces.
+            if (instanceKind == PARTICLE_BIT && (epr.flags & 32768u) != 0u) {
+                int slot = int(epr.tint.w + 0.5);
+                float a0 = entityAlbedoTex[NonUniformResourceIndex(slot)].SampleLevel(uv, 0.0).a;
+                if((epr.flags&512u)!=0u)a0*=dot(bary,float3(epr.aux0&255u,(epr.aux0>>8u)&255u,(epr.aux0>>16u)&255u)/255.0);
+                if (a0 >= 0.1) {
+                    float3x3 o2w = (float3x3)ObjectToWorld3x4();
+                    float lod = rainVeilLod(payload.rayCone, entityAlbedoTex[NonUniformResourceIndex(slot)],
+                            mul(o2w, HitTriangleVertexPosition(0)), mul(o2w, HitTriangleVertexPosition(1)),
+                            mul(o2w, HitTriangleVertexPosition(2)), uvs[i0], uvs[i1], uvs[i2]);
+                    float mask = entityAlbedoTex[NonUniformResourceIndex(slot)].SampleLevel(uv, lod).a;
+                    payload.albedo.x *= 1.0 - saturate(mask * payload.albedo.y);
+                }
+            }
+            IgnoreHit();
+            return;
+        }
         if((epr.flags&2048u)!=0u) {
             dhVisibility(payload,g,epr);
             return;

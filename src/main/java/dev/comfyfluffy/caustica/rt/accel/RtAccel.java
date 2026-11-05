@@ -460,9 +460,16 @@ public final class RtAccel {
         long compactedSize;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             java.nio.LongBuffer result = stack.mallocLong(1);
-            RtContext.check(VK10.vkGetQueryPoolResults(ctx.vk(), source.accel.compactionQueryPool,
-                    0, 1, result, Long.BYTES, VK10.VK_QUERY_RESULT_64_BIT),
-                    "vkGetQueryPoolResults(terrain BLAS compacted size)");
+            int rc = VK10.vkGetQueryPoolResults(ctx.vk(), source.accel.compactionQueryPool,
+                    0, 1, result, Long.BYTES, VK10.VK_QUERY_RESULT_64_BIT);
+            if (rc == VK10.VK_NOT_READY) {
+                // Seen on world load: the size query is not available although the build completed. The
+                // uncompacted BLAS is complete and valid, so keep it rather than failing the section build.
+                VK10.vkDestroyQueryPool(ctx.vk(), source.accel.compactionQueryPool, null);
+                source.accel.compactionQueryPool = 0L;
+                return null;
+            }
+            RtContext.check(rc, "vkGetQueryPoolResults(terrain BLAS compacted size)");
             compactedSize = result.get(0);
         }
         VK10.vkDestroyQueryPool(ctx.vk(), source.accel.compactionQueryPool, null);
@@ -1090,7 +1097,9 @@ public final class RtAccel {
             VkAccelerationStructureInstanceKHR record = records.get(i);
             record.transform().matrix().put(instance.transform3x4());
             record.instanceCustomIndex(instance.customIndex())
-                    .mask(instance.mask())
+                    // 0x80 is reserved for the rain-veil instance: every other instance drops it so the
+                    // veil transmittance query (cull mask 0x80) traverses nothing but rain sheets.
+                    .mask(instance.mask() == 0x80 ? 0x80 : instance.mask() & ~0x80)
                     .instanceShaderBindingTableRecordOffset(instance.sbtRecordOffset())
                     .flags(VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
                     .accelerationStructureReference(instance.blasDeviceAddress());

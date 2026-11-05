@@ -19,6 +19,9 @@ layout(push_constant) uniform Push {
     vec4 grade0; // brightness, linear contrast, saturation, temperature
     vec4 grade1; // display gamma, shadow lift, highlight softness, ITRP scene-linear bloom mix
     float detailSharpen; // ITRP DETAIL_SHARPEN_AMOUNT (0 = off; overworld ITRP look only)
+    int aces2;           // 1 = ACES 2.0 view transform (Caustica look), 0 = legacy AgX; ignored when itrpLook
+    float lutSize;       // toneLut texels per axis
+    float lookLutSize;   // lookLut texels per axis
     mat4 invViewProj;    // jitter-free camera-relative inverse view-projection (same as world.rgen)
     vec4 skyAxis;        // x star density, yz celestial rotation axis (x axis component is zero), w rotation angle (the star field's wheel)
     vec4 night;          // x night strength (0 = off), y time (s), z rain, w Milky Way texture ready
@@ -32,6 +35,10 @@ layout(binding = 6) uniform sampler2D milkyWay;                            // Ni
 const float MILKY_WAY_PEAK = 3.0;
 layout(binding = 7, set = 0, r32f) uniform readonly image2D coverHistory;  // last frame's stable sky mask
 layout(binding = 8, set = 0, r32f) uniform writeonly image2D coverOutput;  // copied to history after dispatch
+// Upstream Caustica #35 baked LUTs (tools/bake_display_lut.py): ACES 2.0 SDR 100-nit Rec.709 output transform
+// (sRGB-encoded output) and the default look's scene-referred LMT. Both take ACEScg through a log2 shaper.
+layout(binding = 9) uniform sampler3D toneLut;
+layout(binding = 10) uniform sampler3D lookLut;
 
 float skyCoverage(ivec2 pix, ivec2 size) {
     ivec2 gs = imageSize(guideImage);
@@ -241,6 +248,26 @@ vec3 agx(vec3 color) {
     return clamp(color, 0.0, 1.0);
 }
 
+// ACES 2.0. The shaper range MUST match SHAPER_LO/HI_STOPS of the baked LUTs (RtToneLut rejects others).
+const float LUT_SHAPER_LO = -12.0;
+const float LUT_SHAPER_HI = 12.0;
+// The path tracer works in linear Rec.709/sRGB primaries (D65); the LUTs expect ACEScg (AP1, D60).
+// Rec.709 -> AP1 with Bradford adaptation (OCIO "Linear Rec.709 (sRGB)" -> "ACEScg"), column-major.
+const mat3 REC709_TO_AP1 = mat3(
+    0.61309732, 0.07019422, 0.02061560,
+    0.33952285, 0.91635557, 0.10956983,
+    0.04737928, 0.01345021, 0.86981457
+);
+vec3 shaperEncode(vec3 c) { return clamp((log2(max(c, vec3(1.0e-6))) - LUT_SHAPER_LO) / (LUT_SHAPER_HI - LUT_SHAPER_LO), 0.0, 1.0); }
+vec3 shaperDecode(vec3 s) { return exp2(mix(vec3(LUT_SHAPER_LO), vec3(LUT_SHAPER_HI), clamp(s, 0.0, 1.0))); }
+// Edge-aligned LUT: texel 0 centre = 0.0, texel N-1 centre = 1.0.
+vec3 lutCoord(vec3 uvw, float n) { return uvw * ((n - 1.0) / n) + 0.5 / n; }
+vec3 aces2(vec3 exposedRec709) {
+    vec3 ap1 = REC709_TO_AP1 * max(exposedRec709, vec3(0.0));
+    ap1 = shaperDecode(textureLod(lookLut, lutCoord(shaperEncode(ap1), pc.lookLutSize), 0.0).rgb);
+    return clamp(textureLod(toneLut, lutCoord(shaperEncode(ap1), pc.lutSize), 0.0).rgb, 0.0, 1.0);
+}
+
 // ITRP-PTGI 0.8.31 default view transform, reimplemented from the curve shape and the pack's own default
 // constants rather than copied from its GLSL: SEUSTonemap is a Lottes cone-overlap curve with
 // TONE_CURVE_POWER 2.5 (doubled to 5.0 inside), GAMMA 2.2, cone overlaps RG 0.02 / RB 0.002 / GB 0.008 and
@@ -294,7 +321,7 @@ vec3 tonemap(vec3 hdr,float exposure,vec2 uv) {
         vec3 excess=max(exposed-1.0,vec3(0.0));
         exposed=min(exposed,vec3(1.0))+excess/(1.0+excess*pc.grade1.z);
     }
-    vec3 encoded=pc.itrpLook!=0?itrpTonemap(exposed*(1.26*itrpVignette(uv))):agx(exposed);
+    vec3 encoded=pc.itrpLook!=0?itrpTonemap(exposed*(1.26*itrpVignette(uv))):(pc.aces2!=0?aces2(exposed):agx(exposed));
     if(!hasDisplayGrade()) return encoded; // neutral controls preserve the calibrated baseline exactly
     return pow(clamp(gradeLinearDisplay(pow(max(encoded,vec3(0.0)),vec3(2.2))),0.0,1.0),vec3(1.0/2.2));
 }

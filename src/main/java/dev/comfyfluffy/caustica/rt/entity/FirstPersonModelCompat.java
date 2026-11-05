@@ -9,7 +9,7 @@ import net.minecraft.world.phys.Vec3;
 /** Optional First Person Model API bridge; its camera pose must not replace the reflection pose. */
 public final class FirstPersonModelCompat {
     private static Object core, logic;
-    private static Method shouldApply, updateOffset, getOffset, rendering;
+    private static Method shouldApply, updateOffset, getOffset, rendering, hideArms;
     private static boolean initialized, fullBody, cameraCapture;
 
     public static boolean cameraCapture() { return cameraCapture; }
@@ -28,6 +28,8 @@ public final class FirstPersonModelCompat {
             updateOffset = logic.getClass().getMethod("updatePositionOffset", Entity.class, float.class);
             getOffset = logic.getClass().getMethod("getOffset");
             rendering = api.getMethod("isRenderingPlayer");
+            try { hideArms = logic.getClass().getMethod("hideArmsAndItems", net.minecraft.world.entity.LivingEntity.class); }
+            catch (NoSuchMethodException ignored) { hideArms = null; }
             Class<?> activation = Class.forName("dev.tr7zw.firstperson.api.ActivationHandler");
             Object handler = Proxy.newProxyInstance(activation.getClassLoader(), new Class<?>[]{activation},
                     (proxy, method, args) -> switch (method.getName()) {
@@ -55,6 +57,14 @@ public final class FirstPersonModelCompat {
         if (core == null || fullBody) return false;
         try { return (boolean) rendering.invoke(null); }
         catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
+    }
+
+    /** First Person Model's "vanilla hands" mode: the body it draws in first person has no arms/held items. */
+    public static boolean hideArms() {
+        var player = net.minecraft.client.Minecraft.getInstance().player;
+        if (core == null || hideArms == null || player == null) return false;
+        try { return (boolean) hideArms.invoke(logic, player); }
+        catch (ReflectiveOperationException error) { return false; }
     }
 
     public static Vec3 cameraOffset(Entity entity, float partial) {

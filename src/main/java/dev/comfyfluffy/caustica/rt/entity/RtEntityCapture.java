@@ -241,21 +241,31 @@ public final class RtEntityCapture implements VertexConsumer {
         packedPrim.ensureCapacity(prim.size());
         int[] indices = idx.elements();
         float[] primitives = prim.elements();
+        int[] buckets = alphaBuckets.elements();
+        // Same stable bucket order as the per-element loop, but each run of consecutive triangles in the
+        // current bucket is copied with one arraycopy (entity triangles arrive in long same-bucket runs).
+        packedIdx.size(idx.size());
+        packedPrim.size(prim.size());
+        int[] outIdx = packedIdx.elements();
+        float[] outPrim = packedPrim.elements();
+        int written = 0;
         for (int bucket = 0; bucket < RtAccel.ENTITY_BUCKETS; bucket++) {
-            for (int tri = 0; tri < triangleCount; tri++) {
-                if (alphaBuckets.getInt(tri) != bucket) {
-                    continue;
-                }
-                int indexBase = tri * 3;
-                packedIdx.add(indices[indexBase]);
-                packedIdx.add(indices[indexBase + 1]);
-                packedIdx.add(indices[indexBase + 2]);
-                int primBase = tri * 12;
-                for (int lane = 0; lane < 12; lane++) {
-                    packedPrim.add(primitives[primBase + lane]);
-                }
-                packedBucketTris[bucket]++;
+            int tri = 0;
+            while (tri < triangleCount) {
+                if (buckets[tri] != bucket) { tri++; continue; }
+                int run = tri + 1;
+                while (run < triangleCount && buckets[run] == bucket) run++;
+                int n = run - tri;
+                System.arraycopy(indices, tri * 3, outIdx, written * 3, n * 3);
+                System.arraycopy(primitives, tri * 12, outPrim, written * 12, n * 12);
+                written += n;
+                packedBucketTris[bucket] += n;
+                tri = run;
             }
+        }
+        if (written != triangleCount) { // a bucket id outside 0..ENTITY_BUCKETS-1
+            packedIdx.size(written * 3);
+            packedPrim.size(written * 12);
         }
         if (packedIdx.size() != idx.size() || packedPrim.size() != prim.size()) {
             throw new IllegalStateException("Entity capture contains an invalid alpha bucket");

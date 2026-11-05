@@ -31,7 +31,7 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 /** Compute pass that maps the display-res HDR RT image into an LDR image compatible with the main target. */
 public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
-    /** Push constants: int hdrEnabled, float paperWhiteNits, float headroom, int itrpLook. */
+    /** Push constants: see Push in display.comp (offset 52 = ACES 2.0 flag, 56/60 = LUT sizes). */
     private static final int PUSH_BYTES = 224; // base16 + two float4 grades + sharpen (pad to 64) + night-sky mat4 + 2 float4 + previous view-projection
 
     private final RtContext ctx;
@@ -41,6 +41,10 @@ public final class RtDisplayPipeline {
     private final long pipelineLayout;
     private final long pipeline;
     private final long bloomSampler;
+    // ACES 2.0 SDR output transform and the default scene-referred look (LMT), both baked 65^3 LUTs from
+    // upstream Caustica #35. Used by the Caustica (non-ITRP) look in place of AgX.
+    private RtToneLut toneLut;
+    private RtToneLut lookLut;
     private boolean destroyed;
 
     private RtDisplayPipeline(RtContext ctx, long dsl, long pool, long set, long layout, long pipeline, long bloomSampler) {
@@ -56,7 +60,7 @@ public final class RtDisplayPipeline {
     public static RtDisplayPipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(9, stack);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(11, stack);
             binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(1).binding(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -78,6 +82,11 @@ public final class RtDisplayPipeline {
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(8).binding(8).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            // 9/10: ACES 2.0 SDR output-transform LUT and default look LMT (3D, immutable after create).
+            binds.get(9).binding(9).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(10).binding(10).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(rt display)");
@@ -86,7 +95,7 @@ public final class RtDisplayPipeline {
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
             poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(7);
-            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(2);
+            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(4);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(rt display)");
             long pool = p.get(0);
@@ -141,11 +150,34 @@ public final class RtDisplayPipeline {
             check(VK10.vkCreateSampler(vk,skySamplerInfo,null,p),"display night sky sampler");
             RtDisplayPipeline created=new RtDisplayPipeline(ctx, dsl, pool, set, layout, pPipeline.get(0),bloomSamplerHandle);
             created.skySampler=p.get(0);
+            try {
+                created.toneLut=RtToneLut.load(ctx,"sdr_aces2_rec709.bin");
+                created.lookLut=RtToneLut.loadResource(ctx,"/caustica/color/looks/default/lmt.bin");
+                created.bindLuts();
+            } catch (RuntimeException e) {
+                created.destroy();
+                throw e;
+            }
             return created;
         }
     }
 
     private long skySampler;
+
+    private void bindLuts() {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            var tone = VkDescriptorImageInfo.calloc(1, stack);
+            tone.get(0).imageView(toneLut.view()).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL).sampler(toneLut.sampler());
+            var look = VkDescriptorImageInfo.calloc(1, stack);
+            look.get(0).imageView(lookLut.view()).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL).sampler(lookLut.sampler());
+            var writes = VkWriteDescriptorSet.calloc(2, stack);
+            writes.get(0).sType$Default().dstSet(descriptorSet).dstBinding(9).descriptorCount(1)
+                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(tone);
+            writes.get(1).sType$Default().dstSet(descriptorSet).dstBinding(10).descriptorCount(1)
+                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(look);
+            VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
+        }
+    }
     public long skySampler() { return skySampler; }
     private long boundSkyView;
 
@@ -243,6 +275,9 @@ public final class RtDisplayPipeline {
             if (overworld) push.putFloat(16,dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.BRIGHTNESS.value()
                     * (1f + ((float) Math.sqrt(dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS.value()) - 1f) * Math.clamp(nightStrength, 0f, 1f)));
             push.putFloat(48,itrpLook && overworld ? dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.DETAIL_SHARPEN.value() : 0f);
+            // 52: ACES 2.0 view transform for the Caustica (non-ITRP) look; 0 keeps the legacy AgX curve.
+            push.putInt(52, !itrpLook && dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.ACES2.value() ? 1 : 0);
+            push.putFloat(56, toneLut.size).putFloat(60, lookLut.size);
             invViewProj.get(64, push);
             push.putFloat(128, axisX).putFloat(132, axisY).putFloat(136, axisZ).putFloat(140, angle);
             push.putFloat(144, overworld ? nightStrength : 0f).putFloat(148, time).putFloat(152, rain)
@@ -258,6 +293,8 @@ public final class RtDisplayPipeline {
             return;
         }
         VkDevice vk = ctx.vk();
+        if(toneLut!=null)toneLut.destroy();
+        if(lookLut!=null)lookLut.destroy();
         VK10.vkDestroySampler(vk,bloomSampler,null);
         if(skySampler!=0L)VK10.vkDestroySampler(vk,skySampler,null);
         VK10.vkDestroyPipeline(vk, pipeline, null);
