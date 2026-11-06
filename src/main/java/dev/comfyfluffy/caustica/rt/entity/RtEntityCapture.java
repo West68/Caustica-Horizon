@@ -50,6 +50,8 @@ public final class RtEntityCapture implements VertexConsumer {
     // Decal-stacking rank for the current submission (0 = no offset). Set by the collector from
     // SubmitNodeCollector#order(int) — see emitQuad's coincident-layer push.
     int currentOrder;
+    /** Minimum emission for the quads being appended (glow item frame contents); 0 normally. */
+    float emissionFloor;
     // When a model textures from an atlas sprite (block entities: chests/signs/beds via a Material),
     // its ModelPart UVs are 0..1 in a virtual texture and must be remapped into the sprite's atlas
     // region — the work vanilla's sprite-coordinate-expander VertexConsumer does, which we bypass.
@@ -437,6 +439,7 @@ public final class RtEntityCapture implements VertexConsumer {
 
     private void appendQuad(float[] x, float[] y, float[] z, int[] corners, float[] u, float[] v,
                             float nx, float ny, float nz, int color, boolean remapUv, float emission) {
+        if (emissionFloor > 0f) emission = -Math.max(emission, emissionFloor); // negative = forced (world.rchit)
         // Authored model normal (pose-transformed by compile); planar quad, so vertex 0's normal is the
         // face normal. Baked quads (items/blocks) pass no normal → fall back to a geometric one from the
         // quad edges. The closest-hit flips it toward the viewer, as for terrain. Computed BEFORE the

@@ -825,9 +825,12 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
         // as a white dot, the more so in rain, which thickens the air fourfold. Bounded so that stays below visibility.
         float3 mediumLight=exp(-extinction*t)*source*(sigma/max(pdf,1e-20));
         if(!water) {
-            mediumLight*=worldPush.fogControl.w;
+            // The sunlit-fog slider shapes sun shafts only: at night the same light is the moon, which
+            // must keep its default scatter (a strong setting turned the moon into a glowing fog ball).
+            float fogGain=lerp(1.0,max(worldPush.fogControl.w,0.0),saturate(worldPush.sunDir.w));
+            mediumLight*=fogGain;
             float mediumAmount=luminance(mediumLight);
-            float mediumLimit=luminance(activeLightRadiance)*0.015*max(worldPush.fogControl.w,0.0);
+            float mediumLimit=luminance(activeLightRadiance)*0.015*fogGain;
             if(mediumAmount>mediumLimit)mediumLight*=mediumLimit/mediumAmount;
         }
         radiance+=throughput*(mediumLight

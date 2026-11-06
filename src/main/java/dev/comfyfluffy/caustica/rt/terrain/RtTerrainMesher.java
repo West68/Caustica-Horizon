@@ -455,10 +455,7 @@ final class RtTerrainMesher {
             q.nx = nx; q.ny = ny; q.nz = nz;
 
             ChunkSectionLayer layer = quad.chunkLayer();
-            q.cutout = layer != ChunkSectionLayer.SOLID
-                    // Redstone dust's untinted overlay sprite is fully transparent; reported as SOLID it became an
-                    // opaque black slab over every wire.
-                    || (state != null && state.is(net.minecraft.world.level.block.Blocks.REDSTONE_WIRE));
+            q.cutout = layer != ChunkSectionLayer.SOLID;
             q.translucent = layer == ChunkSectionLayer.TRANSLUCENT
                     || (layer != ChunkSectionLayer.SOLID && dev.comfyfluffy.caustica.rt.material.RtMaterials.clearGlass(state));
 
@@ -491,6 +488,11 @@ final class RtTerrainMesher {
             q.emission = quad.emissive() ? 1f : (state != null ? state.getLightEmission() / 15f : 0f);
             TextureAtlasSprite sprite = spriteFinder.find(quad);
             q.sprite = sprite;
+            // Trust the texture, not only the reported layer: fast/opaque leaves, resource-pack 3D leaf models
+            // and grass/redstone overlays arrive as SOLID while their sprite has holes. Without the alpha test
+            // the filler colour behind those holes (light green in realistic packs, black in redstone's overlay)
+            // was drawn as a solid slab. The game precomputes this per sprite, so it costs nothing here.
+            if (sprite != null && !sprite.contents().transparency().isOpaque()) q.cutout = true;
             q.materialId = materials.resolve(sprite, state, dev.comfyfluffy.caustica.rt.material.RtMaterials.refractive(state,q.translucent));
         }
 

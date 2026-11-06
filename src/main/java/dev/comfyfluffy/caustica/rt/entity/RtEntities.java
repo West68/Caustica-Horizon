@@ -953,7 +953,7 @@ public final class RtEntities {
                 try {
                     collector.suppressTextShadows = entity instanceof net.minecraft.world.entity.Display.TextDisplay
                             && !CausticaConfig.Rt.Entities.NAME_TAG_SHADOWS.value();
-                    collector.itemEmissionFloor = entity instanceof net.minecraft.world.entity.decoration.GlowItemFrame ? 0.6f : 0f;
+                    collector.itemEmissionFloor = entity instanceof net.minecraft.world.entity.decoration.GlowItemFrame ? 0.15f : 0f;
                     dispatcher.submit(state, cameraState, 0.0, 0.0, 0.0, entityPoseStack, collector);
                 } finally {
                     collector.suppressTextShadows = false;
@@ -1645,11 +1645,16 @@ public final class RtEntities {
             collector.begin(capture, false);
             // Identity pose ???block-local mesh; world placement is the per-frame instance transform in emitBe.
             resetPoseStack(blockEntityPoseStack);
+            // The conduit is a light-15 block drawn only as a block entity: give its shell the emission its
+            // block state carries, or it lights nothing in RT although it lights the world in vanilla.
+            capture.emissionFloor = be instanceof net.minecraft.world.level.block.entity.ConduitBlockEntity
+                    ? 0.25f * be.getBlockState().getLightEmission() / 15f : 0f;
             beDispatcher.submit(state, blockEntityPoseStack, collector, cameraState);
         } catch (Throwable t) {
             throw new RuntimeException("RT block-entity capture failed", t); // propagate to composite() (see entity path)
         } finally {
             resetPoseStack(blockEntityPoseStack);
+            capture.emissionFloor = 0f;
             collector.begin(null, false);
         }
         if (capture.isEmpty()) {

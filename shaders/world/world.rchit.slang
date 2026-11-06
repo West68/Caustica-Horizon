@@ -569,7 +569,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                 ? glassSlabTint(baseAlbedo,entityTexel.a) : baseAlbedo;
         Surface surface = evaluateMaterial(header, euvCoord, entityLod, albedo, n,
                 ep0, ep1, ep2, euv[e0], euv[e1], euv[e2], vdir,
-                header.params.x, header.params.y, (vertexColor||bakedFoil)?0.0:pr.normal.w, material == MATERIAL_OPAQUE,
+                header.params.x, header.params.y, (vertexColor||bakedFoil)?0.0:max(pr.normal.w,0.0), material == MATERIAL_OPAQUE,
                 // Entities were hard-coded out of the parallax path, so a held item or a first-person arm
                 // got PBR normals, roughness and F0 but never the height field: the displacement, the
                 // displaced UVs and the height-based shading normal all sat behind this flag. Opaque entity
@@ -578,6 +578,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                 // which is what a held item seen by the player is.
                 material == MATERIAL_OPAQUE, (payload.flags & PAYLOAD_CAMERA_MISS) != 0u, texSlot==0);
         if(reliefQuery) { payload.albedo=float3(surface.reliefVisibility); return; }
+        // Negative per-primitive emission = forced glow (conduit shell, glow item frame contents): kept even when a
+        // resource pack's LabPBR map (or the albedo heuristic) would otherwise own and zero the emission.
+        if(!vertexColor && !bakedFoil && pr.normal.w<0.0) surface.emission=max(surface.emission,-pr.normal.w);
         n = surface.normal;
         if (material == MATERIAL_GLASS) {
             // Held/dropped glass uses the entity path, but it is still the same two-boundary

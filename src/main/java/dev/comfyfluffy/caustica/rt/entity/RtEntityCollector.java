@@ -427,7 +427,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // Clear glass items bake in the cutout layer; like terrain, they are still a glass slab.
         boolean transmissive = RtMaterials.refractiveItemSprite(spriteName,
                 q.materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT);
-        capture.currentAlphaBucket = transmissive ? RtAccel.ENTITY_BUCKET_ANY_HIT
+        capture.currentAlphaBucket = transmissive || spriteHasHoles(sprite) ? RtAccel.ENTITY_BUCKET_ANY_HIT
                 : alphaBucket(q.materialInfo().layer(), false);
         setSpriteMaterial(sprite, transmissive ? RtMaterials.Profile.GLASS : RtMaterials.Profile.DEFAULT,
                 transmissive, false);
@@ -541,6 +541,15 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                 entry.getValue().visible = false;
             } else hideCameraHeads(entry.getValue(), hidden, arms);
         }
+    }
+
+    /**
+     * Flat items (a diamond in an item frame, dropped items) report the SOLID layer although their sprite is
+     * mostly transparent; without the alpha test the transparent texels became an opaque square (black in a
+     * frame, a glowing slab in a glow frame). The game precomputes sprite transparency, so this is free.
+     */
+    private static boolean spriteHasHoles(TextureAtlasSprite sprite) {
+        return sprite != null && !sprite.contents().transparency().isOpaque();
     }
 
     /** Classify one vanilla submission for the entity BLAS geometry split. */
@@ -994,12 +1003,13 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         }
         bakedLayers.begin();
         itemFoil=foilType!=ItemStackRenderState.FoilType.NONE;
+        capture.emissionFloor=displayContext==ItemDisplayContext.FIXED?itemEmissionFloor:0f;
         int heldFrom=capture.verts.size();
         try {
             addQuads(poseStack.last().pose(), quads, tintLayers);
             addMeshQuads(poseStack, mesh, tintLayers, true);
         } finally {
-            itemFoil=false;capture.clearUvRemap();bakedLayers.end(capture);
+            itemFoil=false;capture.emissionFloor=0f;capture.clearUvRemap();bakedLayers.end(capture);
         }
         recordHeldLight(displayContext, heldFrom, poseStack.last().pose());
     }
@@ -1041,7 +1051,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                 sprite == null ? null : sprite.contents().name().toString(), translucent);
         boolean stochasticAlpha = itemMesh && !transmissive && quad.itemRenderType() != null
                 && quad.itemRenderType().hasBlending();
-        capture.currentAlphaBucket = transmissive ? RtAccel.ENTITY_BUCKET_ANY_HIT
+        capture.currentAlphaBucket = transmissive || spriteHasHoles(sprite) ? RtAccel.ENTITY_BUCKET_ANY_HIT
                 : alphaBucket(quad.chunkLayer(), stochasticAlpha);
         if (state != null) {
             setBlockSpriteMaterial(sprite, state, transmissive, stochasticAlpha);
@@ -1068,7 +1078,8 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         }
         int color = ARGB.multiply(averageQuadColor(quad), tint);
         float emission = quad.emissive() ? 1f : state != null ? state.getLightEmission() / 15f : 0f;
-        if (itemMesh) emission = Math.max(emission, itemEmissionFloor);
+        // Glow item frames are drawn full-bright in vanilla (frame and item), not as a lamp: cap their glow.
+        if (itemEmissionFloor > 0f) emission = Math.min(emission, itemEmissionFloor);
         capture.addDirectQuad(meshX, meshY, meshZ, meshU, meshV, 0f, 0f, 0f, color, emission);
         bakedLayers.record(capture, quad.chunkLayer() != ChunkSectionLayer.SOLID || quad.tintIndex() >= 0);
         if(itemMesh && itemFoil) {
@@ -1119,9 +1130,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             return;
         }
         itemFoil=foilType!=ItemStackRenderState.FoilType.NONE;
+        capture.emissionFloor=displayContext==ItemDisplayContext.FIXED?itemEmissionFloor:0f;
         int heldFrom=capture.verts.size();
         try {addQuads(poseStack.last().pose(), quads, tintLayers);}
-        finally {itemFoil=false;capture.clearUvRemap();}
+        finally {itemFoil=false;capture.emissionFloor=0f;capture.clearUvRemap();}
         recordHeldLight(displayContext, heldFrom, poseStack.last().pose());
     }
 
