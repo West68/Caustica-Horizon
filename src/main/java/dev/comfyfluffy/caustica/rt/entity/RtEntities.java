@@ -953,9 +953,11 @@ public final class RtEntities {
                 try {
                     collector.suppressTextShadows = entity instanceof net.minecraft.world.entity.Display.TextDisplay
                             && !CausticaConfig.Rt.Entities.NAME_TAG_SHADOWS.value();
+                    collector.itemEmissionFloor = entity instanceof net.minecraft.world.entity.decoration.GlowItemFrame ? 0.6f : 0f;
                     dispatcher.submit(state, cameraState, 0.0, 0.0, 0.0, entityPoseStack, collector);
                 } finally {
                     collector.suppressTextShadows = false;
+                    collector.itemEmissionFloor = 0f;
                     RtFrameStats.FRAME.endStage("entity.capture.submit", submitStart);
                 }
             } catch (Throwable t) {

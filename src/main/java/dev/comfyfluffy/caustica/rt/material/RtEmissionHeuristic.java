@@ -23,7 +23,8 @@ final class RtEmissionHeuristic {
         float[] mask = new float[pixels];
         for (int pixel = 0; pixel < pixels; pixel++) {
             int i = pixel * 4;
-            float value = clamp01(luminance(linearRgba[i], linearRgba[i + 1], linearRgba[i + 2]));
+            float value = clamp01(Math.max(luminance(linearRgba[i], linearRgba[i + 1], linearRgba[i + 2]),
+                    0.75f * Math.max(linearRgba[i], Math.max(linearRgba[i + 1], linearRgba[i + 2]))));
             if (value >= DARK_FLOOR) {
                 float strength = (float) Math.pow(value, LUMINANCE_POWER);
                 mask[pixel] = clamp01(strength * linearRgba[i + 3]);

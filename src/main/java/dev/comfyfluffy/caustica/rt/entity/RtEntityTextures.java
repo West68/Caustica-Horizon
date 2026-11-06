@@ -144,7 +144,7 @@ public final class RtEntityTextures {
         // Verified against 26.2 renderer getBlockLightLevel overrides, not scene lightmap brightness.
         boolean fullBright=name.contains("/allay/")||name.contains("/illager/vex")
                 ||name.contains("dragon_fireball")||name.contains("shulker/spark")||name.contains("experience_orb")
-                ||name.contains("end_crystal_beam")||pass.contains("beacon_beam")||pass.contains("lightning");
+                ||name.contains("end_crystal_beam")||name.contains("/conduit/")||pass.contains("beacon_beam")||pass.contains("lightning");
         if(CausticaConfig.Rt.Visuals.VANILLA_ENTITY_EMISSION.value() && (crystal || fullBright || brightOnly || additive || pass.contains("emissive") || pass.contains("dragon_rays") || name.contains("dragon_exploding") || name.contains("glow_squid")))
             id=RtMaterialRegistry.INSTANCE.withEntityEmission(id,brightOnly,additive,crystal);
         else if(additive)id=RtMaterialRegistry.INSTANCE.withAdditiveEntityAlpha(id);

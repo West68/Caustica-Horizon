@@ -112,7 +112,7 @@ public final class RtVideoOptions {
                     row(scalar("fogHeight", CausticaConfig.Rt.Visuals.FOG_HEIGHT, 16f, 256f), CausticaConfig.Rt.Visuals.FOG_HEIGHT),
                     row(scalar("fogRain", CausticaConfig.Rt.Visuals.FOG_RAIN, 0f, 4f), CausticaConfig.Rt.Visuals.FOG_RAIN),
                     row(scalar("fogHaze", CausticaConfig.Rt.Visuals.FOG_HAZE, 0f, 2f), CausticaConfig.Rt.Visuals.FOG_HAZE),
-                    row(scalar("fogSun", CausticaConfig.Rt.Visuals.FOG_SUN, 0f, 3f), CausticaConfig.Rt.Visuals.FOG_SUN)));
+                    row(scalar("fogSun", CausticaConfig.Rt.Visuals.FOG_SUN, 0f, 8f), CausticaConfig.Rt.Visuals.FOG_SUN)));
             case "material" -> List.of(
                 section("parallax",
                     row(parallax(), CausticaConfig.Rt.Material.PARALLAX),

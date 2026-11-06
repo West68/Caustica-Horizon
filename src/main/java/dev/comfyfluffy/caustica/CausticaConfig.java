@@ -664,7 +664,7 @@ public final class CausticaConfig {
             public static final FloatSetting FOG_HEIGHT=clampedFloat("caustica.rt.fogHeight","visuals.fog-height-falloff",64f,16f,256f);
             public static final FloatSetting FOG_RAIN=clampedFloat("caustica.rt.fogRain","visuals.fog-rain",1f,0f,4f);
             public static final FloatSetting FOG_HAZE=clampedFloat("caustica.rt.fogHaze","visuals.fog-haze",1f,0f,2f);
-            public static final FloatSetting FOG_SUN=clampedFloat("caustica.rt.fogSun","visuals.fog-sun",1f,0f,3f);
+            public static final FloatSetting FOG_SUN=clampedFloat("caustica.rt.fogSun","visuals.fog-sun",1f,0f,8f);
             public static final FloatSetting WATER_SCATTER=clampedFloat("caustica.rt.waterScatter","visuals.water-scatter",1f,0f,4f);
         }
 

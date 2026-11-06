@@ -455,7 +455,10 @@ final class RtTerrainMesher {
             q.nx = nx; q.ny = ny; q.nz = nz;
 
             ChunkSectionLayer layer = quad.chunkLayer();
-            q.cutout = layer != ChunkSectionLayer.SOLID;
+            q.cutout = layer != ChunkSectionLayer.SOLID
+                    // Redstone dust's untinted overlay sprite is fully transparent; reported as SOLID it became an
+                    // opaque black slab over every wire.
+                    || (state != null && state.is(net.minecraft.world.level.block.Blocks.REDSTONE_WIRE));
             q.translucent = layer == ChunkSectionLayer.TRANSLUCENT
                     || (layer != ChunkSectionLayer.SOLID && dev.comfyfluffy.caustica.rt.material.RtMaterials.clearGlass(state));
 

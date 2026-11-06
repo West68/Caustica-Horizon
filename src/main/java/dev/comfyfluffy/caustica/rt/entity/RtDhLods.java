@@ -183,7 +183,9 @@ public final class RtDhLods {
     private long releasing;
     /** Evict the farthest resident sections that lie farther than {@code s} until {@code need} fits. */
     private void makeRoomFor(DhLodCapture.SectionSnapshot s,long need,double x,double z,long frame) {
-        double near=distance(s,x,z);
+        // Hysteresis: only sections clearly farther (1.5x, squared distances) give way, so the budget frontier
+        // does not trade sections back and forth every time the player moves (LOD flicker).
+        double near=distance(s,x,z)*2.25+256.0;
         for(int evicted=0;bytes-releasing+need>budget && evicted<16;evicted++) {
             Map.Entry<Long,Entry> far=null;double farDistance=near;
             for(var c:cache.entrySet()){if(c.getKey()==s.pos())continue;double d=distance(c.getValue().snapshot,x,z);if(d>farDistance){farDistance=d;far=c;}}

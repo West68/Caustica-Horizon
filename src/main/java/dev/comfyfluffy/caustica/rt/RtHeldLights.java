@@ -84,7 +84,7 @@ public final class RtHeldLights {
         }
         if(fromRules>=0)level=fromRules;
         if(override!=null)level=Math.round(override[0]);
-        if(level<=0)return new float[4]; // No texture work for non-emitting items.
+        if(level<=2)return new float[4]; // No texture work for non-emitting items; level 1-2 blocks give no hand light.
         float r=1,g=.5f,b=.2f;
         if(id.contains("soul_")){r=.15f;g=.7f;b=1;}
         else if(id.contains("sea_lantern")){r=.5f;g=.9f;b=1;}

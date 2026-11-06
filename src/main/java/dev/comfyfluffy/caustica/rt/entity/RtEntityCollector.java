@@ -130,6 +130,9 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     private record ModelSurface(int start, int end) {}
     private final java.util.IdentityHashMap<ModelPart, ModelSurface> modelSurfaces = new java.util.IdentityHashMap<>();
     private final java.util.IdentityHashMap<ModelPart, Integer> modelLayerOrders = new java.util.IdentityHashMap<>();
+    private final java.util.IdentityHashMap<Class<?>, Integer> modelClassOrders = new java.util.IdentityHashMap<>();
+    /** Glow item frames draw their item full-bright in vanilla; set around that entity's submit only. */
+    float itemEmissionFloor;
     public void probeHand(boolean on) { probeHand = on; }
     /** Clears the aggregate probe counters; called once per emitted log line. */
     public static void resetProbeCounters() {
@@ -157,6 +160,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             this.pendingOrder = 0;
             modelSurfaces.clear();
             modelLayerOrders.clear();
+            modelClassOrders.clear();
         }
     }
 
@@ -192,7 +196,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // and the explicitly ordered emblem layers become 2+. Otherwise the BVH can select white cloth.
         capture.currentOrder = pendingOrder + (isBannerPattern(renderType) ? 1 : 0);
         String passName = "";
-        if(renderType!=null){Object setup=((RenderTypeAccessor)renderType).caustica$state();String pass=((RenderSetupAccessor)setup).caustica$pipeline().getLocation().toString();passName=pass;if(pass.contains("eyes")||pass.contains("emissive")||pass.contains("glint")||pass.contains("energy_swirl"))capture.currentOrder++;}
+        if(renderType!=null){Object setup=((RenderTypeAccessor)renderType).caustica$state();String pass=((RenderSetupAccessor)setup).caustica$pipeline().getLocation().toString();passName=pass;if(pass.contains("water_mask")){pendingOrder=0;return;}if(pass.contains("eyes")||pass.contains("emissive")||pass.contains("glint")||pass.contains("energy_swirl"))capture.currentOrder++;}
         // The enchantment glint is a SECOND draw of the same model with its own render type. The cuboid
         // shortcut caches one template per model class, so the glint pass reused the base pass's cuboids
         // (and for armour, the inflated outer-shell dimensions) and drew a box around the model instead of
@@ -217,6 +221,13 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             int rank = modelLayerOrders.getOrDefault(model.root(), 0);
             capture.currentOrder += rank;
             modelLayerOrders.put(model.root(), rank + 1);
+        } else if (state instanceof net.minecraft.client.renderer.entity.state.LivingEntityRenderState) {
+            // Saddles, llama decor and horse armour are a second model of the SAME class drawn over the
+            // body with identical cubes. Vanilla resolves that by draw order; in a BVH the coplanar
+            // layers fought (saddle patches, black bodies). Push each repeat one rank outward.
+            int rank = modelClassOrders.getOrDefault(model.getClass(), 0);
+            capture.currentOrder += rank;
+            modelClassOrders.put(model.getClass(), rank + 1);
         }
         pendingOrder = 0;
         if (profileDynamicEntity) {
@@ -312,8 +323,9 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             RtFrameStats.FRAME.endStage("entity.capture.submit.modelDraw", drawStart);
         }
         // Character-only indirect rays must alpha-test their own clothing/hat layers.
-        if (state instanceof net.minecraft.client.renderer.entity.state.HumanoidRenderState
-                || state instanceof net.minecraft.client.renderer.entity.state.VillagerRenderState) {
+        if (state instanceof net.minecraft.client.renderer.entity.state.LivingEntityRenderState) {
+            // Any mob can wear a coplanar shell (armour, saddle, decor): alpha-test it on indirect rays and
+            // let the body's light rays start outside it (ARMOR_SKIN_LIT), or the shell blacks the body out.
             for (int p = primStart; p < capture.prim.size(); p += 12) {
                 capture.prim.set(p + 9, Float.intBitsToFloat(Float.floatToRawIntBits(capture.prim.getFloat(p + 9)) | 4096));
             }
@@ -1056,6 +1068,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         }
         int color = ARGB.multiply(averageQuadColor(quad), tint);
         float emission = quad.emissive() ? 1f : state != null ? state.getLightEmission() / 15f : 0f;
+        if (itemMesh) emission = Math.max(emission, itemEmissionFloor);
         capture.addDirectQuad(meshX, meshY, meshZ, meshU, meshV, 0f, 0f, 0f, color, emission);
         bakedLayers.record(capture, quad.chunkLayer() != ChunkSectionLayer.SOLID || quad.tintIndex() >= 0);
         if(itemMesh && itemFoil) {

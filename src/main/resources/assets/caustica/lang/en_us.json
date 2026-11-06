@@ -394,5 +394,5 @@
   "caustica.enhanced.param.fogHaze": "Distant Haze",
   "caustica.enhanced.param.fogHaze.tooltip": "How strongly far terrain fades toward the horizon sky. Lower is clearer but darker, higher is hazier; default 1.",
   "caustica.enhanced.param.fogSun": "Sunlit Fog",
-  "caustica.enhanced.param.fogSun.tooltip": "Strength of light shafts and glow where sunlight enters fog. 0 turns it off; default 1."
+  "caustica.enhanced.param.fogSun.tooltip": "Strength of sun shafts in fog (Tyndall effect), up to 8. Adds no rays and costs no frame rate; higher is more visible but grainier. 0 turns it off; default 1."
 }

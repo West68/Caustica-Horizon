@@ -248,5 +248,5 @@
   "caustica.enhanced.param.fogHaze": "遠景大氣透視",
   "caustica.enhanced.param.fogHaze.tooltip": "遠處地形向地平線天空顏色過渡的強度。調低遠景更清晰但更暗，調高更朦朧；預設 1。",
   "caustica.enhanced.param.fogSun": "陽光霧散射",
-  "caustica.enhanced.param.fogSun.tooltip": "陽光照進霧裡形成的光束和光暈強度。0 關閉，預設 1。"
+  "caustica.enhanced.param.fogSun.tooltip": "陽光照進霧裡形成的光束（丁達爾效應）強度，最高 8。不增加光線、不影響幀率；調高後光束更明顯但顆粒更多。0 關閉，預設 1。"
 }
