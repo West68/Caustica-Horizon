@@ -555,7 +555,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         // Translucent mob texels (see world.rahit.slang): a clear tinted slab with eta=1 instead of a
         // stochastic coverage mask. Opaque texels of the same layer shade normally.
         bool entityVeil = material == MATERIAL_OPAQUE && (header.features & MATERIAL_FEATURE_STOCHASTIC_ALPHA) != 0u
-                && (header.features & 524288u) == 0u && entityTexel.a < 0.99;
+                && (header.features & 524288u) == 0u && entityTexel.a < ENTITY_VEIL_MAX_ALPHA;
         if (entityVeil) material = MATERIAL_GLASS;
         float3 entityTint=pr.tint.rgb;
         bool vertexColor=(pr.flags&1024u)!=0u;

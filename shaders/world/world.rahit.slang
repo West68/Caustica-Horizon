@@ -167,7 +167,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             // are filtered by the same tint. No random number at all, so nothing for DLSS-RR to crawl.
             float a = clamp(texel.a, 0.0, 1.0);
             if (a < 0.02) { IgnoreHit(); return; }
-            if (shadowQuery && a < 0.99) {
+            if (shadowQuery && a < ENTITY_VEIL_MAX_ALPHA) {
                 payload.albedo *= glassBoundaryTransmission(glassSlabTint(srgbToLinear(texel.rgb) * epr.tint.rgb, a), 1.0);
                 IgnoreHit();
             }

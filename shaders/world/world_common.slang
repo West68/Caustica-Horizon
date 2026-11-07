@@ -328,6 +328,9 @@ public struct EntityGeom {
 };
 
 // TLAS instance-custom-index encoding + terrain geometry buckets (shared by rahit/rchit).
+// Translucent mob texels at or above this alpha shade as a surface (vanilla alpha-blends them mostly over
+// what is behind, e.g. the sulfur cube's 75-88% shell); below it they stay a tinted eta=1 veil (slime 63%).
+public static const float ENTITY_VEIL_MAX_ALPHA = 0.7;
 public static const uint ENTITY_BIT = 0x800000u;
 public static const uint PARTICLE_BIT = 0x400000u; // particles share the entity cutout path
 public static const uint IDX_MASK = 0x3FFFFFu;     // low 22 bits = geom-table index
