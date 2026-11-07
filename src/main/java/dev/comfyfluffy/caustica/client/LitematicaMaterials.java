@@ -160,7 +160,7 @@ final class LitematicaMaterials {
             // More than eight pages remain visible with their base material; never sample another page.
             if(e.pageIndex()<0 || e.pageIndex()>=PAGES)continue;
             tiles.add(new SchematicUvIndex.Tile(s.getU0(),s.getV0(),s.getU1(),s.getV1(),
-                    e.materialU(),e.materialV(),e.materialDu(),e.materialDv(),e.pageIndex(),e.maxLod(),e.features()));
+                    e.materialU(),e.materialV(),e.materialDu(),e.materialDv(),e.pageIndex(),e.maxLod()&15,e.features()));
         }
         tiles.sort(Comparator.comparingDouble(SchematicUvIndex.Tile::u0).thenComparingDouble(SchematicUvIndex.Tile::v0));
         var data=SchematicUvIndex.build(tiles);

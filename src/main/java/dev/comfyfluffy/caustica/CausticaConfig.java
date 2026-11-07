@@ -680,6 +680,8 @@ public final class CausticaConfig {
 
             public static final FloatSetting PARALLAX_STRENGTH = clampedFloat("caustica.rt.parallaxStrength", "material.parallax-strength", 1f, 0f, 2f);
             public static final IntSetting SMOOTH_STEPS = clampedInt("caustica.rt.smoothSteps", "material.smooth-steps", 3, 2, 8);
+            /** Largest PBR map side kept in the material pages (0 = original). Applies on resource reload. */
+            public static final IntSetting PBR_MAX_SIZE = clampedInt("caustica.rt.pbrMaxSize", "material.pbr-max-size", 0, 0, 4096);
             public static final BooleanSetting SMOOTH_HEIGHT_NORMAL = bool("caustica.rt.smoothHeightNormal", "material.smooth-height-normal", true);
             public static final BooleanSetting SMOOTH_SHADOW = bool("caustica.rt.smoothShadow", "material.smooth-shadow", true);
 

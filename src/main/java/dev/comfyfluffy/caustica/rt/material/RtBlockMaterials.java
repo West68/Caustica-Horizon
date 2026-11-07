@@ -92,6 +92,8 @@ public final class RtBlockMaterials {
         final int height;
         int storageWidth, storageHeight;
         int page = -1;
+        int lodShift;
+        long surface1Key = -1;
         PackedMaterialTile tile;
         Candidate alias;
         int x;
@@ -282,7 +284,14 @@ public final class RtBlockMaterials {
                 candidate.emissionSummary=decoded.emissionSummary();
                 candidate.overrideEmissionSummary=decoded.overrideEmissionSummary();
                 candidate.emissionGrid=decoded.emissionGrid(); candidate.overrideEmissionGrid=decoded.overrideEmissionGrid();
-                candidate.tile=new PackedMaterialTile(decoded.levels());
+                // PBR resolution cap (VRAM): drop the largest mips above the cap. The kept chain is the same
+                // filtered chain the page already sampled at distance; the shader shifts its LOD to match.
+                var levels=decoded.levels();int cap=dev.comfyfluffy.caustica.CausticaConfig.Rt.Material.PBR_MAX_SIZE.value();
+                int shift=0;
+                while(cap>0 && levels.size()-shift>1 && Math.max(levels.get(shift).width(),levels.get(shift).height())>cap)shift++;
+                candidate.lodShift=Math.min(shift,15);
+                candidate.surface1Key=constantKey(levels.get(0).surface1());
+                candidate.tile=new PackedMaterialTile(shift==0?levels:levels.subList(shift,levels.size()));
             } catch(Throwable t) { warnOnce("RT canonical material decode failed for "+candidate.name,t); }
         });
         for(Candidate candidate:authored) {
@@ -307,6 +316,28 @@ public final class RtBlockMaterials {
         }
         pageSize=bestPage;
         List<LayoutPage> layouts=pack(unique,pageSize);
+        // Lossless VRAM saving: tiles whose whole surface1 (F0 + porosity) is one constant are packed on pages of
+        // their own, and those pages bind a 4x4 image of that constant instead of a full page. Any UV/LOD sampled
+        // there returns the same value, so shading is unchanged; only one page class keeps the full surface1.
+        long sharedKey=-1;int constFirstPage=layouts.size();
+        {
+            Map<Long,Long> weight=new HashMap<>();
+            for(Candidate c:unique)if(c.surface1Key>=0)weight.merge(c.surface1Key,(long)c.storageWidth*c.storageHeight,Long::sum);
+            long best=0;for(var e:weight.entrySet())if(e.getValue()>best){best=e.getValue();sharedKey=e.getKey();}
+            if(Boolean.getBoolean("caustica.test.noConstSurface1"))sharedKey=-1; // A/B baseline
+            if(sharedKey>=0) {
+                final long key=sharedKey;
+                List<Candidate> rest=new ArrayList<>(),shared=new ArrayList<>();
+                for(Candidate c:unique)(c.surface1Key==key?shared:rest).add(c);
+                List<LayoutPage> grouped=pack(rest,pageSize);
+                constFirstPage=grouped.size();
+                packAppend(grouped,shared,pageSize);
+                if(grouped.size()<=materialPageCapacity){layouts=grouped;}
+                else {sharedKey=-1;constFirstPage=Integer.MAX_VALUE;layouts=pack(unique,pageSize);}
+                CausticaMod.LOGGER.info("RT material constant-surface1 pages: tiles={}, pages={}..{}, key={}",
+                        shared.size(),constFirstPage,layouts.size()-1,Long.toHexString(Math.max(sharedKey,0)));
+            } else constFirstPage=Integer.MAX_VALUE;
+        }
         if (layouts.size() > materialPageCapacity) {
             throw new IllegalStateException("RT material pages require " + layouts.size()
                     + " descriptor slots but capacity is " + materialPageCapacity);
@@ -345,7 +376,9 @@ public final class RtBlockMaterials {
             heightBoxPages.add(heightBox);
             RtMaterialPageTexture[] s0=uploadPage(ctx,pageSize,height,pixels.surface0,uploaded);
             RtMaterialPageTexture[] n=uploadPage(ctx,pageSize,height,pixels.normalAo,uploaded);
-            RtMaterialPageTexture[] s1=uploadPage(ctx,pageSize,height,pixels.surface1,uploaded);
+            RtMaterialPageTexture[] s1=pageIndex>=constFirstPage
+                    ?uploadPage(ctx,4,4,List.of(constantTexels(sharedKey)),uploaded)
+                    :uploadPage(ctx,pageSize,height,pixels.surface1,uploaded);
             pages.add(new Page(s0[0],n[0],s1[0],s0[1],n[1],s1[1],heightBox,pageIndex));
         }
         } catch(Throwable failure) {
@@ -370,7 +403,9 @@ public final class RtBlockMaterials {
         }
         for (Candidate candidate : authored) {
             if (candidate.page < 0) continue;
-            int maxLod = maxLodFor(candidate.width, candidate.height);
+            int baseLod = candidate.alias != null ? candidate.alias.lodShift : candidate.lodShift;
+            // Low nibble: highest page mip; high nibble: mips dropped by the PBR resolution cap.
+            int maxLod = Math.min(15, Math.max(0, maxLodFor(candidate.width, candidate.height) - baseLod)) | (baseLod << 4);
             Entry entry = new Entry(candidate.features, candidate.page, maxLod,
                     candidate.x / (float) pageSize, candidate.y / (float) pageHeights[candidate.page],
                     candidate.storageWidth / (float) pageSize, candidate.storageHeight / (float) pageHeights[candidate.page],
@@ -392,6 +427,37 @@ public final class RtBlockMaterials {
                 pages.size(), pageSize, java.util.Arrays.toString(pageHeights), MAX_VALID_LOD,
                 String.format(java.util.Locale.ROOT, "%.2f", textureBytes / (1024.0 * 1024.0)));
 
+    }
+
+    /** Exact page bytes (RGBA8, as {@link RtMaterialTextureData#unorm8}) of a constant channel set, or -1. */
+    private static long constantKey(float[] rgba) {
+        if(rgba.length<4)return -1;
+        int r=RtMaterialTextureData.unorm8(rgba[0]),g=RtMaterialTextureData.unorm8(rgba[1]),
+            b=RtMaterialTextureData.unorm8(rgba[2]),a=RtMaterialTextureData.unorm8(rgba[3]);
+        for(int i=4;i<rgba.length;i+=4)
+            if(RtMaterialTextureData.unorm8(rgba[i])!=r||RtMaterialTextureData.unorm8(rgba[i+1])!=g
+                ||RtMaterialTextureData.unorm8(rgba[i+2])!=b||RtMaterialTextureData.unorm8(rgba[i+3])!=a)return -1;
+        return ((long)r<<24)|(g<<16)|(b<<8)|a;
+    }
+
+    private static byte[] constantTexels(long key) {
+        byte[] texels=new byte[4*4*4];
+        for(int i=0;i<texels.length;i+=4){texels[i]=(byte)(key>>>24);texels[i+1]=(byte)(key>>>16);texels[i+2]=(byte)(key>>>8);texels[i+3]=(byte)key;}
+        return texels;
+    }
+
+    /** Pack {@code group} into new pages appended after {@code layouts}; never shares a page with earlier tiles. */
+    private static void packAppend(List<LayoutPage> layouts,List<Candidate> group,int pageSize) {
+        int first=layouts.size();
+        for(Candidate candidate:group) {
+            boolean placed=false;
+            for(int i=first;i<layouts.size();i++)if(layouts.get(i).place(candidate)){candidate.page=i;placed=true;break;}
+            if(!placed) {
+                LayoutPage page=new LayoutPage(pageSize,false);
+                if(!page.place(candidate))throw new IllegalStateException("RT material tile does not fit an empty page");
+                candidate.page=layouts.size();layouts.add(page);
+            }
+        }
     }
 
     private static List<LayoutPage> pack(List<Candidate> unique,int pageSize) {

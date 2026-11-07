@@ -394,5 +394,8 @@
   "caustica.enhanced.param.fogHaze": "远景大气透视",
   "caustica.enhanced.param.fogHaze.tooltip": "远处地形向地平线天空颜色过渡的强度。调低远景更清晰但更暗，调高更朦胧；默认 1。",
   "caustica.enhanced.param.fogSun": "阳光雾散射",
-  "caustica.enhanced.param.fogSun.tooltip": "阳光照进雾里形成的光束（丁达尔效应）强度，最高 8。不增加光线、不影响帧率；调高后光束更明显但颗粒更多。0 关闭，默认 1。"
+  "caustica.enhanced.param.fogSun.tooltip": "阳光照进雾里形成的光束（丁达尔效应）强度，最高 8。不增加光线、不影响帧率；调高后光束更明显但颗粒更多。0 关闭，默认 1。",
+  "caustica.enhanced.param.pbrMaxSize": "PBR 贴图精度",
+  "caustica.enhanced.param.pbrMaxSize.tooltip": "材质包法线/高度/高光贴图在显存里的最大尺寸，不影响颜色贴图。64x 起显存约减为 128x 包的四分之一，只有贴脸看凹凸会略柔和。改动后按 F3+T 重载资源生效。",
+  "caustica.enhanced.param.pbrMaxSize.original": "原始"
 }

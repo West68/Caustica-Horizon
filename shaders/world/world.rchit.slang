@@ -206,8 +206,9 @@ Surface evaluateMaterial(MaterialHeader header, float2 atlasUv, float lod, float
     float2 localUv = clamp((atlasUv - header.albedoUv.xy) * header.albedoUv.zw,
             float2(0.0, 0.0), float2(1.0, 1.0));
     float2 pageUv = header.materialUv.xy + localUv * header.materialUv.zw;
-    float maxMaterialLod = float((header.features >> MATERIAL_MAX_LOD_SHIFT) & MATERIAL_MAX_LOD_MASK);
-    float materialLod = min(lod, maxMaterialLod);
+    // Bits 24-27: highest page mip; 28-31: mips dropped by the PBR resolution cap (page level 0 = sprite lod shift).
+    float maxMaterialLod = float((header.features >> MATERIAL_MAX_LOD_SHIFT) & 15u);
+    float materialLod = clamp(lod - float((header.features >> 28u) & 15u), 0.0, maxMaterialLod);
     uint page = header.texturePage;
     bool useHeightNormal=false;
     float3 heightNormal=geometricNormal;

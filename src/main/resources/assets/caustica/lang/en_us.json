@@ -394,5 +394,8 @@
   "caustica.enhanced.param.fogHaze": "Distant Haze",
   "caustica.enhanced.param.fogHaze.tooltip": "How strongly far terrain fades toward the horizon sky. Lower is clearer but darker, higher is hazier; default 1.",
   "caustica.enhanced.param.fogSun": "Sunlit Fog",
-  "caustica.enhanced.param.fogSun.tooltip": "Strength of sun shafts in fog (Tyndall effect), up to 8. Adds no rays and costs no frame rate; higher is more visible but grainier. 0 turns it off; default 1."
+  "caustica.enhanced.param.fogSun.tooltip": "Strength of sun shafts in fog (Tyndall effect), up to 8. Adds no rays and costs no frame rate; higher is more visible but grainier. 0 turns it off; default 1.",
+  "caustica.enhanced.param.pbrMaxSize": "PBR Map Resolution",
+  "caustica.enhanced.param.pbrMaxSize.tooltip": "Largest size kept in VRAM for resource-pack normal/height/specular maps; colour textures are unaffected. 64x uses about a quarter of the VRAM of a 128x pack; only close-up relief gets slightly softer. Press F3+T to reload resources after changing.",
+  "caustica.enhanced.param.pbrMaxSize.original": "Original"
 }

@@ -118,6 +118,7 @@ public final class RtVideoOptions {
                     row(parallax(), CausticaConfig.Rt.Material.PARALLAX),
                     row(scalar("parallaxStrength", CausticaConfig.Rt.Material.PARALLAX_STRENGTH, 0f, 2f), CausticaConfig.Rt.Material.PARALLAX_STRENGTH),
                     row(smoothSteps(), CausticaConfig.Rt.Material.SMOOTH_STEPS),
+                    row(pbrMaxSize(), CausticaConfig.Rt.Material.PBR_MAX_SIZE),
                     row(toggle("caustica.enhanced.smoothHeightNormal", CausticaConfig.Rt.Material.SMOOTH_HEIGHT_NORMAL), CausticaConfig.Rt.Material.SMOOTH_HEIGHT_NORMAL),
                     row(toggle("caustica.enhanced.smoothShadow", CausticaConfig.Rt.Material.SMOOTH_SHADOW), CausticaConfig.Rt.Material.SMOOTH_SHADOW),
                     row(scalar("reliefShadow", CausticaConfig.Rt.Visuals.RELIEF_SHADOW, 0f, 1f), CausticaConfig.Rt.Visuals.RELIEF_SHADOW)),
@@ -274,6 +275,15 @@ public final class RtVideoOptions {
 
     private static OptionInstance<Boolean> dlssEnabled() {
         return OptionInstance.createBoolean("caustica.enhanced.rr",OptionInstance.cachedConstantTooltip(Component.translatable("caustica.enhanced.rr.tooltip")),CausticaConfig.Rt.DlssRr.ENABLED.value(),CausticaConfig.Rt.DlssRr.ENABLED::set);
+    }
+
+    private static OptionInstance<Integer> pbrMaxSize() {
+        return new OptionInstance<>("caustica.enhanced.param.pbrMaxSize", OptionInstance.cachedConstantTooltip(
+            Component.translatable("caustica.enhanced.param.pbrMaxSize.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, value == 0
+                ? Component.translatable("caustica.enhanced.param.pbrMaxSize.original") : Component.literal(value + "x")),
+            new OptionInstance.Enum<>(List.of(0, 128, 64, 32), Codec.INT),
+            CausticaConfig.Rt.Material.PBR_MAX_SIZE.value(), CausticaConfig.Rt.Material.PBR_MAX_SIZE::set);
     }
 
     private static OptionInstance<Integer> smoothSteps() {

@@ -161,7 +161,10 @@ public final class RtDhLods {
                 if((memory.memoryHeaps(i).flags()&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)!=0)
                     free=Math.min(free,heaps.get(i).budget()-heaps.get(i).usage());
             if(free==Long.MAX_VALUE)return;
-            long target=Math.max(MIN_BUDGET,Math.min(BUDGET,bytes+free-VRAM_RESERVE));
+            // Frame generation allocates its own history after we size this budget; leave it room or DLSS-G
+            // reports over-budget and the driver starts paging (FPS drop) on 8 GB cards.
+            long reserve=VRAM_RESERVE+(CausticaConfig.Rt.Fg.ENABLED.value()?(512L<<20):0L);
+            long target=Math.max(MIN_BUDGET-(CausticaConfig.Rt.Fg.ENABLED.value()?(256L<<20):0L),Math.min(BUDGET,bytes+free-reserve));
             // Shrink at once under pressure, grow slowly: a budget that follows every transient allocation
             // built sections only to evict them a second later (thousands of wasted BLAS builds).
             budget=target<budget?target:Math.min(target,budget+(32L<<20));
