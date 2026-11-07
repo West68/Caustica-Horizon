@@ -764,9 +764,14 @@ float3 volumeLighting(float3 position,float3 viewRay,float g,float3 extinction,b
 float3 overworldHaze(float3 rd) {
     if(worldPush.skyLutAddr==0uL)return float3(0,0,0);
     float cameraSky=saturate(worldPush.environment.w);
-    float3 horizon=normalize(float3(rd.x,max(abs(rd.y),.06),rd.z));
-    return max(sampleSkyLut(worldPush.skyLutAddr,worldPush.skyLutWidth,worldPush.skyLutHeight,horizon),float3(0,0,0))
-            *(cameraSky*cameraSky*cameraSky*worldPush.fogControl.z);
+    // Average the horizon all around instead of the sky behind the hit: toward a low sun that sky holds the sun
+    // glow and individual clouds, which the haze smeared over the whole view as a cloudy veil at sunset.
+    float3 haze=float3(0,0,0);
+    [unroll] for(uint i=0u;i<8u;i++) {
+        float a=float(i)*0.78539816;
+        haze+=sampleSkyLut(worldPush.skyLutAddr,worldPush.skyLutWidth,worldPush.skyLutHeight,normalize(float3(cos(a),.12,sin(a))));
+    }
+    return max(haze*0.125,float3(0,0,0))*(cameraSky*cameraSky*cameraSky*worldPush.fogControl.z);
 }
 
 void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
