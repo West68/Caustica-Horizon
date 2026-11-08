@@ -204,7 +204,7 @@ final class RtTerrainMesher {
                     // (15) rides the emission channel (water emits 0).
                     FluidState fluid = state.getFluidState();
                     if (!fluid.isEmpty()) {
-                        fluidCapture.skyLight=region.getBrightness(net.minecraft.world.level.LightLayer.SKY,m.above());
+                        fluidCapture.skyLight=rainCovered(wx,wy+1,wz)?0:region.getBrightness(net.minecraft.world.level.LightLayer.SKY,m.above());
                         fluidCapture.emission = state.getLightEmission() / 15f;
                         // Water is the dielectric fluid; lava stays an opaque emitter. Tagged per-prim
                         // so the path tracer can branch (see emitQuad).
@@ -664,11 +664,22 @@ final class RtTerrainMesher {
         double x=pos.getX()+localX-.5,z=pos.getZ()+localZ-.5;
         int ix=(int)Math.floor(x),iz=(int)Math.floor(z),y=pos.getY()+1;
         float fx=(float)(x-ix),fz=(float)(z-iz);
-        float a=view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix,y,iz));
-        float b=view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix+1,y,iz));
-        float c=view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix,y,iz+1));
-        float d=view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix+1,y,iz+1));
+        float a=rainCovered(ix,y,iz)?0:view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix,y,iz));
+        float b=rainCovered(ix+1,y,iz)?0:view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix+1,y,iz));
+        float c=rainCovered(ix,y,iz+1)?0:view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix,y,iz+1));
+        float d=rainCovered(ix+1,y,iz+1)?0:view.getBrightness(net.minecraft.world.level.LightLayer.SKY,cursor.set(ix+1,y,iz+1));
         return Math.round(((a+(b-a)*fx)*(1-fz)+(c+(d-c)*fx)*fz)*17f);
+    }
+
+    // Skylight passes through glass, leaves and other transparent roofs, so it cannot decide rain exposure.
+    // Vanilla stops rain at the MOTION_BLOCKING heightmap; use the same rule so covered floors stay dry.
+    static boolean rainCovered(int x,int y,int z) {
+        try {
+            ClientLevel level=Minecraft.getInstance().level;
+            return level!=null && level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING,x,z)>y;
+        } catch(RuntimeException e) {
+            return false;
+        }
     }
 
     /** One block's buffered quad, awaiting coplanar resolution before it is emitted into a section bucket. */

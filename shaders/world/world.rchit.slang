@@ -482,8 +482,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payload.f0 = float3(0.0, 0.0, 0.0);
         // Rain marker for world.rgen's ITRP veil: x=-1, y = streak mask (texture alpha, Weather_FS).
         if((pr.flags&32768u)!=0u)payload.f0=float3(-1.0,entityAlbedoTex[NonUniformResourceIndex(pslot)].SampleLevel(puv,particleLod).a,0.0);
-        payloadSetPacked(payload, MATERIAL_PARTICLE, 1.0, 0.0, 0.0, 0.0,
-                1.0, 0.0, EMISSION_SOURCE_NONE);
+        float particleEmission=(pr.flags&32768u)!=0u?0.0:abs(pr.normal.w); // self-lit (vanilla lightmap) part
+        payloadSetPacked(payload, MATERIAL_PARTICLE, 1.0, 0.0, particleEmission, 0.0,
+                1.0, 0.0, particleEmission>0.0?EMISSION_SOURCE_UNIFORM:EMISSION_SOURCE_NONE);
         return;
     }
     // Dynamic entities: instances with this custom-index flag bit carry real captured ModelPart

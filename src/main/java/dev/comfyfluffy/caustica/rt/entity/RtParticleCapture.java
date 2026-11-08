@@ -38,6 +38,14 @@ public final class RtParticleCapture implements VertexConsumer {
         weatherStyle=enabled;weatherCamX=cx;weatherCamY=cy;weatherCamZ=cz;weatherTime=time;
     }
     public void rainStyle(boolean enabled) { rainStyle=enabled; }
+    // Vanilla draws self-lit particles (flame, end rod, portal, glow...) through a raised lightmap value.
+    // The path tracer ignores the lightmap, so the part above the world's block light becomes emission.
+    private boolean selfLit;
+    private int levelBlockLight;
+    private float emissionFloor;
+    public void selfLight(boolean enabled,int levelBlock,float floor) {
+        selfLit=enabled;levelBlockLight=levelBlock;emissionFloor=floor;
+    }
     private float x, y, z, u, v;
     private int color = 0xFFFFFFFF;
     private int light = FULL_BRIGHT;
@@ -65,6 +73,11 @@ public final class RtParticleCapture implements VertexConsumer {
         if(skipQuad){pending=false;return;}
         int before=out.prim.size();
         out.addVertex(x, y, z, tint, u, v, 0, 0, 0f, 0f, 0f);
+        if(selfLit && out.prim.size()>before) {
+            float emission=Math.max(emissionFloor,(((light>>4)&15)-levelBlockLight)/15f);
+            if(emission>0f)
+                for(int p=before;p<out.prim.size();p+=12)out.prim.set(p+3,emission);
+        }
         if(rainStyle && out.prim.size()>before) {
             for(int p=before;p<out.prim.size();p+=12)
                 out.prim.set(p+9,Float.intBitsToFloat(Float.floatToRawIntBits(out.prim.getFloat(p+9))|32768));

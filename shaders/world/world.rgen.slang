@@ -1731,6 +1731,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         }
         if (material == MATERIAL_PARTICLE) {
             float3 albedo = payload.albedo;
+            float particleEmission=payloadEmission();
+            if(particleEmission>0.0)L+=throughput*albedo*particleEmission*EMISSIVE_STRENGTH*worldPush.visualLight.x;
             if (bounce == gvBounce) { // a particle seen in a mirror must not replace the mirror's guides
             gv_normal = n;
             gv_albedo = albedo; // RR demodulation target = the particle texel (keeps it sharp)

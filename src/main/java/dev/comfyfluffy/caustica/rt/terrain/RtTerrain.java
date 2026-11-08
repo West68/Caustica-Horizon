@@ -398,6 +398,20 @@ public final class RtTerrain {
         }
     }
 
+    /** Re-mesh the sections strictly below a roof change in one column (rain exposure only; no neighbours). */
+    public static void markRainColumnDirty(int x, int y, int z) {
+        RtTerrain terrain = INSTANCE;
+        int top = (y >> 4) - 1;
+        synchronized (terrain.dirtyLock) {
+            LongArrayList keys = new LongArrayList();
+            for (int scy = top; scy >= top - 1; scy--) keys.add(sectionKey(x >> 4, scy, z >> 4));
+            long groupId = ++terrain.dirtyGroupSeq;
+            if (groupId == NO_DIRTY_GROUP) groupId = ++terrain.dirtyGroupSeq;
+            terrain.dirtyEvents.add(new DirtyEvent(groupId, keys));
+            terrain.dirtyPending = true;
+        }
+    }
+
     /**
      * Request a full residency clear, applied on the next {@link #tick} (render thread, where the RT
      * context is available). Wired to Fabric's {@code InvalidateRenderStateCallback} — vanilla's

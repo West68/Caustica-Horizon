@@ -1300,6 +1300,21 @@ public final class RtEntities {
      * texture slot comes from the layer's atlas (block/item/particle) via the bindless registry. One
      * {@code PARTICLE_BIT} instance with mask {@link #PARTICLE_MASK} (primary-ray only).
      */
+    // Dragon breath glows in vanilla's End lightmap; keep it readable in the path-traced End.
+    private static final float DRAGON_BREATH_GLOW=.35f;
+    private static final java.util.Map<Class<?>,Boolean> SELF_LIT_PARTICLES=new java.util.concurrent.ConcurrentHashMap<>();
+    /** True when the particle class overrides Particle.getLightCoords (vanilla's self-lit particles). */
+    private static boolean selfLitParticle(Class<?> type) {
+        return SELF_LIT_PARTICLES.computeIfAbsent(type,t->{
+            for(Class<?> c=t;c!=null && c!=net.minecraft.client.particle.Particle.class;c=c.getSuperclass()) {
+                for(var m:c.getDeclaredMethods())
+                    if(m.getParameterCount()==1 && m.getParameterTypes()[0]==float.class && m.getReturnType()==int.class
+                            && m.getName().equals("getLightCoords"))return true;
+            }
+            return false;
+        });
+    }
+
     private void captureParticles(RtContext ctx, FrameBuild build, Minecraft mc, float partial,
                                   int rbx, int rby, int rbz, Matrix4f projection, Matrix4f viewRotation) {
         billboardParticlesCaptured=0;
@@ -1349,6 +1364,15 @@ public final class RtEntities {
                     int ub = capture.uvList.size(), prb = capture.prim.size(), abb = capture.alphaBuckets.size();
                     int vertBefore = vb / 3;
                     particleCapture.rainStyle(p instanceof net.minecraft.client.particle.WaterDropParticle);
+                    boolean breath=p instanceof net.minecraft.client.particle.DragonBreathParticle;
+                    if(breath || selfLitParticle(p.getClass())) {
+                        var box=p.getBoundingBox();
+                        int levelBlock=mc.level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK,
+                                net.minecraft.core.BlockPos.containing(box.getCenter()));
+                        particleCapture.selfLight(true,levelBlock,breath?DRAGON_BREATH_GLOW:0f);
+                    } else {
+                        particleCapture.selfLight(false,0,0f);
+                    }
                     particleScratch.clear();
                     sq.extract(particleScratch, cam, partial);
                     for (SingleQuadParticle.Layer layer : particleScratch.layers()) {
@@ -1405,6 +1429,7 @@ public final class RtEntities {
             RtFrameStats.FRAME.count("weatherColumnsCaptured",weatherCapture.rainColumns.size()+weatherCapture.snowColumns.size());
         }
         particleCapture.rainStyle(false);
+        particleCapture.selfLight(false,0,0f);
         billboardParticlesCaptured=particlesCaptured;
         RtFrameStats.FRAME.count("particlesCaptured", particlesCaptured);
         IdentityHashMap<Particle, ParticlePrev> oldPrev = particlePrev;
