@@ -1300,6 +1300,7 @@ public final class RtEntities {
      * texture slot comes from the layer's atlas (block/item/particle) via the bindless registry. One
      * {@code PARTICLE_BIT} instance with mask {@link #PARTICLE_MASK} (primary-ray only).
      */
+    private static final double PARTICLE_NEAR_CULL = 0.3;
     // Dragon breath glows in vanilla's End lightmap; keep it readable in the path-traced End.
     private static final float DRAGON_BREATH_GLOW=.35f;
     private static final java.util.Map<Class<?>,Boolean> SELF_LIT_PARTICLES=new java.util.concurrent.ConcurrentHashMap<>();
@@ -1386,7 +1387,12 @@ public final class RtEntities {
                     }
                     particleCenter(vertBefore, vertAfter, particleCenterScratch);
                     // pointInFrustum wants the world position: rebased center + rebase origin.
-                    if (!frustum.pointInFrustum(particleCenterScratch[0] + rbx, particleCenterScratch[1] + rby, particleCenterScratch[2] + rbz)) {
+                    // Rays have no near plane: a petal drifting through the eye filled the screen and made the
+                    // whole frame pulse under cherry trees. Drop particles that touch the camera.
+                    double ncx = particleCenterScratch[0] + rbx - camPos.x, ncy = particleCenterScratch[1] + rby - camPos.y,
+                            ncz = particleCenterScratch[2] + rbz - camPos.z;
+                    if (ncx * ncx + ncy * ncy + ncz * ncz < PARTICLE_NEAR_CULL * PARTICLE_NEAR_CULL
+                            || !frustum.pointInFrustum(particleCenterScratch[0] + rbx, particleCenterScratch[1] + rby, particleCenterScratch[2] + rbz)) {
                         capture.verts.size(vb); // off-screen →?truncate this particle back out (clean quad boundary)
                         capture.idx.size(ib);
                         capture.uvList.size(ub);

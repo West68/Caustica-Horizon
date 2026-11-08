@@ -28,11 +28,6 @@ public class LevelExtractorMixin {
     @Inject(method = "blockChanged(Lnet/minecraft/core/BlockPos;I)V", at = @At("HEAD"))
     private void caustica$rtBlockChanged(BlockPos pos, int updateFlags, CallbackInfo ci) {
         RtTerrain.markBlocksDirty(pos.getX(), pos.getY(), pos.getZ(), pos.getX(), pos.getY(), pos.getZ());
-        // Rain exposure is baked from the rain heightmap. A roof change at the column top re-dries/re-wets
-        // the floor below, which sits in other sections; refresh up to two sections underneath.
-        var level=net.minecraft.client.Minecraft.getInstance().level;
-        if(level!=null && level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING,pos.getX(),pos.getZ())<=pos.getY()+1)
-            RtTerrain.markRainColumnDirty(pos.getX(), pos.getY(), pos.getZ());
     }
 
     @Inject(method = "setBlocksDirty(IIIIII)V", at = @At("HEAD"))
