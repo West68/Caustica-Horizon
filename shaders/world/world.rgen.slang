@@ -1753,7 +1753,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             // rays exclude particles anyway, but this keeps the origin sane when the light is behind the
             // camera side.
             float signedNdl = dot(n, lightDir);
-            float ndl = abs(signedNdl);
+            // Weather snow columns are vertical sheets turned toward the camera, so |N.L| swung with the
+            // view direction: blown-out white facing the sun, dark grey side-on. A snowfall is a volume of
+            // tumbling flakes; light it with the mean |cos| of random orientations instead.
+            const bool weatherSnow = payload.f0.z > 0.5;
+            float ndl = weatherSnow ? 0.5 : abs(signedNdl);
             if (ndl > 0.0) {
                 float3 shadowOrigin = hitPos + (signedNdl >= 0.0 ? n : -n) * SURF_BIAS;
                 float3 vis = visibility(shadowOrigin, lightDir, 10000.0);
@@ -1767,8 +1771,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             }
             L+=throughput*heldLighting(hitPos,n,-rd,albedo,float3(0,0,0),1.0,false,float2(1,1),inWater,waterExt,seed);
             throughput *= albedo;
-            ro = hitPos + n * SURF_BIAS;
-            rd = cosineDir(n, seed);
+            // Snow gathers sky light from above. Following the camera-facing sheet sent its rays back
+            // toward the viewer, onto ice and water, which flickered beside frozen rivers.
+            float3 continueN = weatherSnow ? float3(0.0, 1.0, 0.0) : n;
+            ro = hitPos + continueN * SURF_BIAS;
+            rd = cosineDir(continueN, seed);
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
             showCelestial = false; pathDiffuse = true; // diffuse receiver: direct sun/moon was handled by NEE above
             continue;

@@ -481,6 +481,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
         payload.f0 = float3(0.0, 0.0, 0.0);
         // Rain marker for world.rgen's ITRP veil: x=-1, y = streak mask (texture alpha, Weather_FS).
+        // Weather snow marker for world.rgen: z=1 (scattering volume, orientation-independent light).
+        if((pr.flags&4096u)!=0u)payload.f0=float3(0.0,0.0,1.0);
         if((pr.flags&32768u)!=0u)payload.f0=float3(-1.0,entityAlbedoTex[NonUniformResourceIndex(pslot)].SampleLevel(puv,particleLod).a,0.0);
         float particleEmission=(pr.flags&32768u)!=0u?0.0:abs(pr.normal.w); // self-lit (vanilla lightmap) part
         payloadSetPacked(payload, MATERIAL_PARTICLE, 1.0, 0.0, particleEmission, 0.0,

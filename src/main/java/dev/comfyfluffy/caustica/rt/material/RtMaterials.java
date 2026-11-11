@@ -67,6 +67,9 @@ public final class RtMaterials {
     }
     /** Item atlases can report clear glass as solid/cutout; its sprite still identifies the dielectric. */
     public static boolean refractiveItemSprite(String name, boolean translucent) {
+        // Only block textures are dielectric slabs; flat item sprites (spyglass, glass_bottle, slime_ball,
+        // honeycomb, melon_slice …) merely contain the keyword and would become a full-quad glass sheet.
+        if (name == null || !name.toLowerCase(java.util.Locale.ROOT).contains("block/")) return false;
         return refractiveSprite(name, translucent || clearGlassSprite(name));
     }
     /** Canonical ore sprites and pack-specific variants, without matching unrelated names such as spores. */

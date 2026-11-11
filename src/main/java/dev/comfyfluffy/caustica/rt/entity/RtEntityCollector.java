@@ -323,7 +323,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             RtFrameStats.FRAME.endStage("entity.capture.submit.modelDraw", drawStart);
         }
         // Character-only indirect rays must alpha-test their own clothing/hat layers.
-        if (state instanceof net.minecraft.client.renderer.entity.state.LivingEntityRenderState) {
+        // Player/zombie heads placed as blocks carry the same transparent hat shell; without the flag their
+        // indirect rays were force-opaque and the empty hat texels blacked the whole head out.
+        if (state instanceof net.minecraft.client.renderer.entity.state.LivingEntityRenderState
+                || hasHatShell(model.root(), 2)) {
             // Any mob can wear a coplanar shell (armour, saddle, decor): alpha-test it on indirect rays and
             // let the body's light rays start outside it (ARMOR_SKIN_LIT), or the shell blacks the body out.
             for (int p = primStart; p < capture.prim.size(); p += 12) {
@@ -513,6 +516,15 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         RenderPipeline pipeline = ((RenderSetupAccessor) setup).caustica$pipeline();
         ColorTargetState cts = pipeline.getColorTargetState();
         return cts != null && cts.blendFunction().isPresent();
+    }
+
+    /** A "hat" part near the root: the inflated, mostly transparent humanoid head overlay. */
+    private static boolean hasHatShell(ModelPart part, int depth) {
+        for (var entry : ((dev.comfyfluffy.caustica.mixin.ModelPartAccessor)(Object)part).caustica$children().entrySet()) {
+            if (entry.getKey().equals("hat")) return true;
+            if (depth > 1 && hasHatShell(entry.getValue(), depth - 1)) return true;
+        }
+        return false;
     }
 
     private record HiddenCameraPart(ModelPart part, boolean visible) {}

@@ -38,6 +38,9 @@ public final class RtParticleCapture implements VertexConsumer {
         weatherStyle=enabled;weatherCamX=cx;weatherCamY=cy;weatherCamZ=cz;weatherTime=time;
     }
     public void rainStyle(boolean enabled) { rainStyle=enabled; }
+    // Weather snow columns: shaded as a scattering volume (world.rgen), not as the camera-facing plane.
+    private boolean snowStyle;
+    public void snowStyle(boolean enabled) { snowStyle=enabled; }
     // Vanilla draws self-lit particles (flame, end rod, portal, glow...) through a raised lightmap value.
     // The path tracer ignores the lightmap, so the part above the world's block light becomes emission.
     private boolean selfLit;
@@ -77,6 +80,10 @@ public final class RtParticleCapture implements VertexConsumer {
             float emission=Math.max(emissionFloor,(((light>>4)&15)-levelBlockLight)/15f);
             if(emission>0f)
                 for(int p=before;p<out.prim.size();p+=12)out.prim.set(p+3,emission);
+        }
+        if(snowStyle && out.prim.size()>before) {
+            for(int p=before;p<out.prim.size();p+=12)
+                out.prim.set(p+9,Float.intBitsToFloat(Float.floatToRawIntBits(out.prim.getFloat(p+9))|4096));
         }
         if(rainStyle && out.prim.size()>before) {
             for(int p=before;p<out.prim.size();p+=12)

@@ -1291,6 +1291,35 @@ public final class RtEntities {
         return out;
     }
 
+    // AsyncParticles (GPU acceleration on) moves most billboard particles out of the vanilla queue into its
+    // own per-group queue and draws them with its raster path, which RT never sees: those particles vanished.
+    // Its queue is iteration-safe against the async tick, and SingleQuadParticle#extract stays vanilla.
+    private static final java.lang.invoke.MethodHandle ASYNC_GPU_QUEUE = asyncGpuQueueHandle();
+
+    private static java.lang.invoke.MethodHandle asyncGpuQueueHandle() {
+        if (!net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("asyncparticles")) return null;
+        try {
+            Class<?> type = Class.forName("fun.qu_an.minecraft.asyncparticles.client.addon.GpuParticleGroup");
+            return java.lang.invoke.MethodHandles.publicLookup().findVirtual(type, "asyncparticles$getGpuParticles",
+                    java.lang.invoke.MethodType.methodType(Queue.class)).asType(
+                    java.lang.invoke.MethodType.methodType(Queue.class, Object.class));
+        } catch (Throwable t) {
+            dev.comfyfluffy.caustica.CausticaMod.LOGGER.warn("AsyncParticles GPU queue not found; its fast particles stay invisible in RT", t);
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Queue<? extends Particle> asyncGpuParticles(ParticleGroup<?> group) {
+        if (ASYNC_GPU_QUEUE == null || !(group instanceof net.minecraft.client.particle.QuadParticleGroup)) return null;
+        try {
+            Queue<? extends Particle> q = (Queue<? extends Particle>) (Queue<?>) ASYNC_GPU_QUEUE.invokeExact((Object) group);
+            return q == null || q.isEmpty() ? null : q;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /**
      * Capture this frame's billboard particles as ONE combined mesh + BLAS (cutout, camera-only receiver),
      * with per-particle motion vectors. We iterate the LIVE {@code Particle} objects (via accessor mixins)
@@ -1350,7 +1379,9 @@ public final class RtEntities {
         try {
             particleGroups:
             for (ParticleGroup<?> group : groups.values()) {
-                Queue<? extends Particle> queue = ((ParticleGroupAccessor) group).caustica$getParticles();
+              Queue<? extends Particle> gpuQueue = asyncGpuParticles(group);
+              for (int qi = 0; qi < (gpuQueue == null ? 1 : 2); qi++) {
+                Queue<? extends Particle> queue = qi == 0 ? ((ParticleGroupAccessor) group).caustica$getParticles() : gpuQueue;
                 for (Particle p : queue) {
                     if (build.full() || particlesCaptured >= particleLimit) {
                         break particleGroups;
@@ -1404,6 +1435,7 @@ public final class RtEntities {
                     build.logicalCount++;
                     particlesCaptured++;
                 }
+              }
             }
         } catch (Throwable t) {
             capture.reset();
@@ -1429,8 +1461,10 @@ public final class RtEntities {
                 particleCapture.weatherStyle(false,0,0,0,0);
             }
             capture.currentTexSlot=RtEntityTextures.INSTANCE.slotForAtlas(net.minecraft.resources.Identifier.withDefaultNamespace("textures/environment/snow.png"));
+            particleCapture.snowStyle(true);
             invoker.caustica$renderInstances(particleCapture,weatherCapture.snowColumns,camPos,.8f,weatherCapture.radius,weatherCapture.intensity);
             particleCapture.flush();
+            particleCapture.snowStyle(false);
             for(int i=start;i<capture.verts.size()/3;i++) {particleDisp.add(0);particleDisp.add(0);particleDisp.add(0);particleDisp.add(0);}
             RtFrameStats.FRAME.count("weatherColumnsCaptured",weatherCapture.rainColumns.size()+weatherCapture.snowColumns.size());
         }
