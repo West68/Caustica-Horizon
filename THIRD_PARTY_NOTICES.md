@@ -47,9 +47,12 @@ only the user-installed, explicitly enabled v1.4.2 asset from the current game
 instance's `native-experiments` directory after checking its pinned SHA-256.
 Upstream: https://github.com/dashdogy/RTX40MFG-Unlock/tree/v1.4.2
 
-## Shader pack noise textures (release jars only)
+## Shader pack noise textures (user-supplied, never distributed)
 
-Caustica Horizon release jars include two 64×64 noise textures used for clouds and the End sky:
-`assets/caustica/external/seus_blue_noise.png` (from SEUS PTGI) and `assets/caustica/external/itrp_noise.png`
-(from ITRP). They are not part of this source repository, are not covered by the LGPL, and remain the property of
-their original authors. Please support the original shader packs.
+The clouds and the End sky can optionally use two 64×64 noise textures from shader packs the user already owns:
+`PTGI_BlueNoise.png` from SEUS PTGI and `noise.png` from ITRP. Neither this repository, the published jars, nor
+the installer contains them. The installer copies them out of the user's own shader pack archives into the jar it
+builds on the user's machine (`assets/caustica/external/`); otherwise Caustica reads them from an ITRP archive in
+the user's `shaderpacks` folder, and if neither is present it uses its own procedurally generated noise. The
+textures remain the property of their original authors and are not covered by the LGPL. Please support the
+original shader packs.
