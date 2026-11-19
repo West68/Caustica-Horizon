@@ -131,6 +131,16 @@ public final class RtTerrain {
     private static final RtTerrain INSTANCE = new RtTerrain();
 
     private final Long2ObjectOpenHashMap<SectionGeom> resident = new Long2ObjectOpenHashMap<>();
+    /** Diagnostics only: resident section count, total GPU bytes and the largest section. */
+    public static String memoryStats() {
+        long bytes = 0, max = 0; int n = 0, waving = 0;
+        for (SectionGeom g : INSTANCE.resident.values()) {
+            long b = g.blas.backingBytes() + g.uvs.size + g.material.size;
+            if (g.wave != null) { waving++; b += g.wave.positions().size + g.wave.indices().size; }
+            bytes += b; if (b > max) max = b; n++;
+        }
+        return "terrainSections=" + n + " terrainMB=" + (bytes >> 20) + " maxSectionKB=" + (max >> 10) + " waving=" + waving;
+    }
     // Persistent palette snapshots for tessellation regions (render-thread only); invalidated on dirty
     // sections, column unload/window-leave, and full clears.
     private final RtSectionSnapshots snapshots = new RtSectionSnapshots();
@@ -246,6 +256,55 @@ public final class RtTerrain {
 
     @FunctionalInterface public interface ReadySectionVisitor {void accept(int x,int y,int z);}
     /** Mirrors the geometry actually published in this frame, including known-empty sections. */
+    /** Published sections carrying waving vertex data (render thread). */
+    public List<SectionGeom> waveSections() {
+        waveScratch.clear();
+        for (SectionGeom g : resident.values()) if (g.wave != null) waveScratch.add(g);
+        return waveScratch;
+    }
+    private final java.util.ArrayList<SectionGeom> waveScratch = new java.util.ArrayList<>();
+    /** Sections containing waving blocks (written by mesher workers). */
+    private final java.util.Set<Long> waveCandidates = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Sections re-meshed to gain or drop waving data, not yet republished (render thread). */
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet waveRemeshPending = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+    private double waveCheckX = Double.NaN, waveCheckY, waveCheckZ;
+    private boolean waveCheckEnabled;
+    private int waveChecks;
+    private float waveCheckRange;
+
+    /**
+     * Render thread: re-mesh sections whose waving data no longer matches their distance (entered or left
+     * the data radius), or all candidates when waving was toggled. Runs after the player moved 4 blocks.
+     */
+    public void syncWaveData(double x, double y, double z) {
+        boolean on = RtWaving.enabled();
+        float range = RtWaving.range();
+        double dx = x - waveCheckX, dy = y - waveCheckY, dz = z - waveCheckZ;
+        if (on == waveCheckEnabled && range == waveCheckRange && !Double.isNaN(waveCheckX)
+                && dx * dx + dy * dy + dz * dz < 16.0) return;
+        waveCheckX = x; waveCheckY = y; waveCheckZ = z; waveCheckEnabled = on; waveCheckRange = range;
+        // A requested re-mesh that never republished (cancelled, emptied) must be retried eventually.
+        if (++waveChecks % 16 == 0) waveRemeshPending.clear();
+        for (Long boxed : waveCandidates) {
+            long key = boxed;
+            if (waveRemeshPending.contains(key)) continue;
+            SectionGeom g = resident.get(key);
+            if (g == null) continue;
+            boolean wants = RtWaving.wantsData(sectionX(key), sectionY(key), sectionZ(key));
+            if (wants == (g.wave != null)) continue;
+            waveRemeshPending.add(key);
+            // Only this section: block-change dirtying would also re-mesh 26 neighbours and reset the radiance cache.
+            synchronized (dirtyLock) {
+                long groupId = ++dirtyGroupSeq;
+                if (groupId == NO_DIRTY_GROUP) groupId = ++dirtyGroupSeq;
+                LongArrayList keys = new LongArrayList(1);
+                keys.add(key);
+                dirtyEvents.add(new DirtyEvent(groupId, keys));
+                dirtyPending = true;
+            }
+        }
+    }
+
     public void visitReadySections(ReadySectionVisitor visitor) {
         for(LongIterator it=published.iterator();it.hasNext();){long key=it.nextLong();visitor.accept(sectionX(key),sectionY(key),sectionZ(key));}
         for(LongIterator it=empty.iterator();it.hasNext();){long key=it.nextLong();visitor.accept(sectionX(key),sectionY(key),sectionZ(key));}
@@ -1159,6 +1218,7 @@ public final class RtTerrain {
                         completeTask(task, null, null, null);
                         return;
                     }
+                    if (cpu.waveCandidates()) waveCandidates.add(key); else waveCandidates.remove(key);
                     PackedSection packed = cpu.packed();
                     if (packed == null) {
                         completeTask(task, null, null, null);
@@ -1572,6 +1632,8 @@ public final class RtTerrain {
         for (PreparedSection ps : prepared) {
             SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(),
                     ps.blas().accel, ps.triBase(), ps.torchCenters(), ps.sx(), ps.sy(), ps.sz(), ps.indexedMaterials(), ps.indexedUvs(), ps.lights());
+            if (ps.wave() != null) g.wave = new RtSectionTable.WaveGeom(ps.positions(), ps.indices(), ps.wave(), ps.blas());
+            waveRemeshPending.remove(ps.key());
             if (!desired.contains(ps.key())) {
                 // Left the window while its batched BLAS build was in flight (window sync keeps running
                 // during builds). Never published — retire the fresh, unreferenced geometry.
@@ -1599,6 +1661,7 @@ public final class RtTerrain {
             }
             if (sectionLightsChanged || prev == null) updateLightSection(g);
             published.add(ps.key());
+            dev.comfyfluffy.caustica.client.FancyWorldAnimationsCompat.onSectionPublished(ps.sx() >> 4, ps.sy() >> 4, ps.sz() >> 4);
         }
         table.flushWrites();
 

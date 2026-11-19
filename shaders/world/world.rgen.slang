@@ -26,6 +26,7 @@ import environment_effects;
 import end_environment;
 import itrp_clouds;
 import itrp_atmosphere;
+import itrp_volumetric;
 
 [[vk::push_constant]] WorldPushConstants pc;
 
@@ -52,6 +53,17 @@ static float3 activeLightRadiance;
 // specularReflectionMotion / tracePath) can share them, mirroring the GLSL rayPayloadEXT globals.
 static Payload payload;
 static bool gv_farLod;
+// Debug view 15 (lighting probe of the visible surface): R = sun shadow-ray visibility (0 when facing away),
+// G = back-light (SSS) shadow-ray visibility, B = shading-normal N.L. Blue marks surfaces facing away.
+static float3 gv_dbgLight;
+// Debug view 16: first glass face on the camera line. R=reflected path taken, G=Fresnel F,
+// B=1 reflection reached sky / 0.35 reflection hit geometry; magenta = non-block glass (entity/overlay).
+static float3 gv_dbgGlass;
+static bool gv_dbgGlassSet;
+// Debug view 20: what stands between the first opaque surface and the main held light. R = player's own body
+// (held owner) on a full-mask ray, G = lit through the held-light shadow mask (4), B = any other geometry.
+static float3 gv_dbgShadow;
+static bool gv_dbgShadowSet;
 #ifdef CAUSTICA_DH
 [[vk::binding(0, 1)]] Sampler2D dhInputTextures[];
 static bool dhCandidate;
@@ -137,7 +149,8 @@ static const float RAY_CONE_GLOSSY_SPREAD_SCALE = 0.35;
 static const float WATER_DENSITY = 0.05;
 static const float3 WATER_ABSORB_FLOOR = float3(0.015, 0.010, 0.008);
 float3 waterExtinction(float3 tint) {
-    if((worldPush.flags & 512u)!=0u)return float3(.25,.04,.01);
+    // ITRP look: WaterFog.glsl's fixed exp2(-WATER_ATTENUATION*d), ATTENUATION=(.35,.13,.11), as ln2-scaled extinction.
+    if((worldPush.flags & 512u)!=0u)return max(worldPush.waterLook0.xyz,float3(0,0,0))*0.693147;
     return WATER_ABSORB_FLOOR + WATER_DENSITY * (float3(1.0, 1.0, 1.0) - clamp(tint, 0.0, 1.0));
 }
 
@@ -158,10 +171,60 @@ static const int   WAVE_COUNT = 10;            // λ = 14 m … 0.38 m (each oct
 static const float WAVE_G = 9.81;
 static const float2 WAVE_WIND = normalize(float2(1.0, 0.35)); // dominant travel direction
 static const float WAVE_MEANDER = 1.1;         // crest phase-wobble amplitude (rad) on the long components
+// ITRP-look water: a stack of stretched, rotated smooth-noise layers (two broad swells, one with a rounded
+// crest, plus three distorted detail layers) instead of a sine spectrum. Tuned against ITRP's look: same
+// layer scales/weights, the same ~400-block calm/rough modulation, and a matched RMS slope (top faces).
+float itrpWaveNoise(float2 uv) { // smooth value noise, mean 0.65, std ~0.14, ~9.5 lattice cells per unit/13.5
+    float2 x = uv * 13.4737, i = floor(x), f = x - i;
+    f = f * f * (3.0 - 2.0 * f);
+    int2 c = int2(i);
+    float4 h;
+    [unroll] for (int k = 0; k < 4; k++) {
+        uint n = uint(c.x + (k & 1)) * 374761393u + uint(c.y + (k >> 1)) * 668265263u;
+        n = (n ^ (n >> 13)) * 1274126177u; n ^= n >> 16;
+        h[k] = float(n & 0xFFFFFFu) * (1.0 / 16777216.0);
+    }
+    float v = lerp(lerp(h.x, h.y, f.x), lerp(h.z, h.w, f.x), f.y);
+    return 0.65 + (v - 0.5) * 0.65;
+}
+float itrpWaveField(float2 p, float2 tm, float bw) {
+    static const float4 LAYER[5] = { // (scale step, cross-stretch, weight, phase sign)
+        float4(1.0, 0.6, 16.0, 1.0), float4(2.0, 0.3, 12.0, -1.0), float4(1.8, 0.4, 2.0, 1.0),
+        float4(1.4, 0.4, 0.75, 1.0), float4(1.4, 0.6, 1.25, 1.0) };
+    const float2x2 turn = float2x2(-0.737369, -0.675490, 0.675490, -0.737369); // golden-angle rotation
+    float2 c = p * 0.022222;
+    float sum = 0.0, warp = 0.0;
+    [unroll] for (int i = 0; i < 5; i++) {
+        float4 L = LAYER[i];
+        if (i > 0) c = mul(turn, c * L.x);
+        if (i == 2) { warp = sum * 0.02; c -= tm * 0.2; }
+        float2 q = c * float2(1.0, L.y) + L.w * tm + (i == 0 ? 0.4 * bw : (i == 1 ? -0.3 * bw : warp));
+        float n = itrpWaveNoise(q);
+        if (i == 1) { n -= 1.0; n = 1.0 - n * n; } // rounded crest on the cross swell
+        sum += n * L.z;
+    }
+    return 1.0 - sum / 32.0;
+}
+float2 itrpWaveGrad(float2 p, float t) {
+    float2 tm = t * float2(0.03, 0.01);
+    float bw = itrpWaveNoise(p * 0.0025 + tm * 0.01);
+    float h0 = itrpWaveField(p, tm, bw);
+    float2 d = float2(itrpWaveField(p + float2(0.1, 0.0), tm, bw), itrpWaveField(p + float2(0.0, 0.1), tm, bw)) - h0;
+    // 6.48 = ITRP's top-face normal gain (18 * 0.36); 1.51 matches its RMS slope with this smoother noise.
+    return d * (6.48 * 1.51) * (saturate(bw * 2.0 - 0.7) * 0.7 + 0.3);
+}
 float2 waterWaveGrad(float2 p, float t,float localRain) {
+    if ((worldPush.flags & 512u) != 0u) {
+        float2 pw = p / clamp(worldPush.waterLook2.y, 0.25, 4.0);
+        return itrpWaveGrad(pw, t * max(worldPush.waterLook2.z, 0.0)) * max(worldPush.waterLook2.x, 0.0)
+                + rainRippleGradient(p, t, localRain * worldPush.dimensionControl.w, worldPush.waterAnchor.z, worldPush.waterAnchor.w);
+    }
     // Per-wave steepness a·k: gentle in the long swell, concentrated in the mid/short chop.
     const float Q[WAVE_COUNT] = { 0.030, 0.035, 0.042, 0.050, 0.060, 0.065, 0.065, 0.058, 0.048, 0.038 };
-    t *= WAVE_SPEED;
+    float rippleT = t;
+    t *= WAVE_SPEED * max(worldPush.waterLook2.z, 0.0);
+    float2 pRipple = p;
+    p /= clamp(worldPush.waterLook2.y, 0.25, 4.0); // wave size: slopes kept, wavelengths stretched
     float2 g = float2(0.0, 0.0);
     float lambda = 14.0;
     for (int i = 0; i < WAVE_COUNT; i++) {
@@ -193,7 +256,7 @@ float2 waterWaveGrad(float2 p, float t,float localRain) {
                 + 0.3 * sin((q.x * 0.8 - q.y) * 9.7 + 2.1) + 0.2 * sin((q.x + q.y * 1.3) * 15.3 + 4.0));
         g *= saturate(bw * 2.0 - 0.7) * 0.7 + 0.3;
     }
-    return g * WATER_WAVE_STRENGTH + rainRippleGradient(p,t/WAVE_SPEED,localRain*worldPush.dimensionControl.w,
+    return g * (WATER_WAVE_STRENGTH * max(worldPush.waterLook2.x, 0.0)) + rainRippleGradient(pRipple,rippleT,localRain*worldPush.dimensionControl.w,
             worldPush.waterAnchor.z,worldPush.waterAnchor.w);
 }
 
@@ -628,6 +691,26 @@ bool probeHit(float3 origin, float3 dir, float tmax) {
 }
 
 static float pathCloudShadow=-1.0;
+// Back-light transmission visibility. Tagged foliage attenuates the ray (world.rahit) rather than ending it:
+// packs that paint leaves fully opaque have no holes, so every neighbouring leaf block blocked the light and
+// the canopy read as dark solid cubes. FORCE_NON_OPAQUE keeps opaque leaf geometry / OMM states visible to
+// the any-hit stage. Ordinary sun shadows are unchanged.
+float3 visibilitySss(float3 origin, float3 dir, float tmax) {
+    Payload q = makeShadowPayload();
+    q.roughMetal = SSS_QUERY_MARK;
+    HitObject hObj = HitObject::TraceRay(topLevelAS,
+            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_FORCE_NON_OPAQUE,
+            secondaryReceiverMask, SBT_SHADOW, SBT_STRIDE_BUCKET, 0u,
+            makeRay(origin, RAY_TMIN, dir, tmax), q);
+    shadowVis = float4(q.albedo, q.hitT);
+    if (!hObj.IsMiss()) return float3(0.0, 0.0, 0.0);
+    float3 vis = q.albedo;
+    if (!any(vis > 0.0)) return vis;
+    if ((lookSwitches(worldPush.torchControl.w) & LOOK_SWITCH_NO_CLOUD_SHADOW) != 0u) return vis;
+    if (pathCloudShadow < 0.0) pathCloudShadow = itrpCloudShadow(worldPush, origin, dir);
+    return vis * pathCloudShadow;
+}
+
 float3 visibility(float3 origin,float3 dir,float tmax) {
     float3 vis=visibilityMasked(origin,dir,tmax,secondaryReceiverMask);
     // An occluded sample stays 0 whatever the clouds do: skip the cloud-deck noise lookups for it.
@@ -683,6 +766,17 @@ bool reflectedDirect(float3 origin, float3 dir, inout uint seed, out float3 radi
         if (worldPush.lightDir.w > 0.0) lightDir = sampleSquare(lightDir, worldPush.lightDir.w, seed);
         float ndl = dot(hitNormal, lightDir);
         if (ndl > 0.0) radiance = albedo * INV_PI * activeLightRadiance * ndl * visibility(hitPos, lightDir, 10000.0);
+        // A lamp seen in a pane is the reflection people notice most; its own glow costs no extra ray.
+        float emission = payloadEmission();
+        if (emission > 0.0 && payloadEmissionSource() != EMISSION_SOURCE_PORTAL) {
+            float3 emitterColor = max(payload.albedo, float3(0.0, 0.0, 0.0));
+            if ((worldPush.flags & 1024u) != 0u) {
+                uint source = payloadEmissionSource();
+                if (source == 6u) emitterColor = luminance(emitterColor) * worldPush.warmLightTint.rgb * 1.52;
+                else if (source == 7u) emitterColor = luminance(emitterColor) * pow(float3(1, .2, .17), float3(2.2)) * 4.0;
+            }
+            radiance += emitterColor * emission * EMISSIVE_STRENGTH * worldPush.visualLight.x;
+        }
     }
     payload = saved;
     return miss;
@@ -694,6 +788,7 @@ float3 heldLighting(float3 hitPos,float3 n,float3 v,float3 diffAlb,float3 F0,flo
     // outright to avoid the torch blowing out the pixels two centimetres from it. That also left the hand
     // and the held block unlit, which is the reported bug. Open it only for the camera ray's own hand
     // (first person, bounce 0): the third-person body, reflections and shadows keep the exemption.
+    if(pc.debugView==19u)return float3(0,0,0); // A/B: no analytic held light at all
     if((payload.flags & PAYLOAD_HELD_OWNER)!=0u && !(heldSelfVertex && firstPersonReceiver))return float3(0,0,0);
     float weight0=luminance(worldPush.mainLightColor.xyz)*heldFalloff(length(worldPush.mainLightPosition.xyz-hitPos),worldPush.mainLightPosition.w);
     float weight1=luminance(worldPush.offLightColor.xyz)*heldFalloff(length(worldPush.offLightPosition.xyz-hitPos),worldPush.offLightPosition.w);
@@ -753,6 +848,10 @@ float3 volumeLighting(float3 position,float3 viewRay,float g,float3 extinction,b
     }
     float3 vis=visibilityMasked(position,ld,max(distance-.002,RAY_TMIN),choose>=a?4u:secondaryReceiverMask);
     if(choose<a && any(vis>0.0) && (lookSwitches(worldPush.torchControl.w)&LOOK_SWITCH_NO_CLOUD_SHADOW)==0u)vis*=itrpCloudShadow(worldPush,position,ld);
+    // Underwater shafts: the sun reaching a point in the water was focused by the waves above it. Applying the
+    // same refraction caustic the floor gets turns the in-scatter into light shafts along the sun direction.
+    if(water && choose<a && shadowVis.a>0.0 && (worldPush.flags & 16u)!=0u && any(vis>0.0))
+        vis*=waterCaustic(position+ld*shadowVis.a,ld,shadowVis.a);
     float mediumDistance=water?min(distance,shadowVis.a>0?shadowVis.a:32.0):min(distance,128.0);
     return intensity*(attenuation*hgPhase(dot(viewRay,ld),g)/max(probability,1e-20))
             *exp(-extinction*mediumDistance)*vis;
@@ -772,6 +871,121 @@ float3 overworldHaze(float3 rd) {
         haze+=sampleSkyLut(worldPush.skyLutAddr,worldPush.skyLutWidth,worldPush.skyLutHeight,normalize(float3(cos(a),.12,sin(a))));
     }
     return max(haze*0.125,float3(0,0,0))*(cameraSky*cameraSky*cameraSky*worldPush.fogControl.z);
+}
+
+// Patchy fog layer ("sea of clouds"), the look of ITRP's noise-type volumetric fog: small wisps of mist
+// thresholded hard out of 3D noise, in a band centred on the "top" height that thins symmetrically above
+// and below it (faster the smaller the falloff). Close up it is drifting wisps; from high ground the band
+// averages into a sea of cloud. Lit by the sky (ambient gain) and the sun (forward-scattering lobe, its own
+// self-shadow from the absorption setting, cloud shadow). Camera line of sight only, also behind glass;
+// gated by the camera's sky access so caves stay clear. "Bottom" only cuts the band off below.
+// Average sky light for fog/water in-scatter: horizon ring plus zenith. The ITRP look draws its sky from the
+// reference atmosphere (world.rmiss), not the sky LUT; reading the LUT there lit the fog by a different, much
+// dimmer and warmer sky, so distant fog turned brown-black instead of melting into the sky behind it.
+float3 fogAmbientSky(float rain) {
+    float3 sky=float3(0,0,0);
+    bool reference=(worldPush.flags & 512u)!=0u;
+    if(!reference && worldPush.skyLutAddr==0uL)return sky;
+    [unroll] for(uint i=0u;i<4u;i++) {
+        float a=float(i)*1.5707963+.39;
+        float3 d=normalize(float3(cos(a),.2,sin(a)));
+        sky+=(reference ? itrpReferenceSky(d,worldPush.sunDir.xyz,rain)*ITRP_SCENE_SKY_SCALE
+                : sampleSkyLut(worldPush.skyLutAddr,worldPush.skyLutWidth,worldPush.skyLutHeight,d))*.125;
+    }
+    sky+=(reference ? itrpReferenceSky(float3(0,1,0),worldPush.sunDir.xyz,rain)*ITRP_SCENE_SKY_SCALE
+            : sampleSkyLut(worldPush.skyLutAddr,worldPush.skyLutWidth,worldPush.skyLutHeight,float3(0,1,0)))*.5;
+    return max(sky,float3(0,0,0));
+}
+
+// Non-repeating value noise on a 1-unit lattice (ITRP's fog noise cell: 5 blocks across, 20 tall once scaled).
+// The old texture lookup tiled every 40 blocks and drew visibly regular rows of fog.
+float fogLatticeHash(float3 c) {
+    c = frac(c * float3(.1031, .1030, .0973));
+    c += dot(c, c.yxz + 33.33);
+    return frac((c.x + c.y) * c.z);
+}
+float fogValueNoise(float3 p) {
+    float3 i = floor(p), f = p - i;
+    f = f * f * (3.0 - 2.0 * f);
+    float a = lerp(fogLatticeHash(i), fogLatticeHash(i + float3(1, 0, 0)), f.x);
+    float b = lerp(fogLatticeHash(i + float3(0, 1, 0)), fogLatticeHash(i + float3(1, 1, 0)), f.x);
+    float c = lerp(fogLatticeHash(i + float3(0, 0, 1)), fogLatticeHash(i + float3(1, 0, 1)), f.x);
+    float d = lerp(fogLatticeHash(i + float3(0, 1, 1)), fogLatticeHash(i + float3(1, 1, 1)), f.x);
+    return lerp(lerp(a, b, f.y), lerp(c, d, f.y), f.z);
+}
+
+void fogLayerTransport(float3 ro,float3 rd,float distance,inout float3 throughput,inout float3 radiance,inout uint seed) {
+    float strength=worldPush.fogLayer0.w;
+    if(strength<=0.0 || distance<=0.0 || worldPush.environment.x!=0.0 || worldPush.mediumParams.w>0.5)return;
+    float cameraSky=saturate(worldPush.environment.w);
+    float gate=cameraSky*cameraSky*cameraSky;
+    if(gate<=0.001)return;
+    float bottom=worldPush.fogLayer0.x,centre=worldPush.fogLayer0.y;
+    float falloff=max(worldPush.fogLayer0.z,1.0);
+    float rate=2.5/falloff;                 // log2 units per block away from the centre height
+    float reach=6.6/rate;                   // exp2(-6.6) ~ 1 %: beyond this the band is empty
+    float lo=max(centre-reach,bottom-8.0),hi=centre+reach;
+    if(hi<=lo)return;
+    float3 o=ro-worldPush.camOffset+worldPush.cloudWorld.xyz; // absolute world position
+    float t0=0.0,t1=min(distance,6000.0);
+    if(abs(rd.y)>1e-5) {
+        float ta=(lo-o.y)/rd.y,tb=(hi-o.y)/rd.y;
+        t0=max(t0,min(ta,tb));t1=min(t1,max(ta,tb));
+    } else if(o.y<lo || o.y>hi) return;
+    // The profile below is zero closer than 24 blocks along the ray (clear air around the player), so a
+    // segment ending there adds nothing: skip its 12 noise steps and the cloud-shadow lookup.
+    if(t1<=t0 || t1<=24.0)return;
+
+    float rain=saturate(worldPush.cloudWorld.w*worldPush.cloudDetail.z);
+    float sigmaPeak=.01*strength*gate*lerp(1.0,1.0+max(worldPush.fogControl.y,0.0),rain);
+    float coverage=clamp(worldPush.fogLayer1.x,.05,1.0);
+    float absorb=max(worldPush.fogLayer1.w,0.0);
+    float time=worldPush.waterParams.w*worldPush.cloudLight.w;
+    float3 wind=float3(.6,-.05,-1.0)*(.1*time);
+
+    // Sky light: horizon ring plus zenith.
+    float3 sky=fogAmbientSky(rain);
+    float3 ambient=max(sky,float3(0,0,0))*(.3*max(worldPush.fogLayer1.y,0.0))
+            +activeLightRadiance*(.03*.3*max(worldPush.fogLayer1.y,0.0)*(1.0-.5*rain));
+    float cosT=dot(rd,worldPush.lightDir.xyz);
+    float phase=hgPhase(cosT,.65)*.7+.035*0.0795775;
+    float3 sun=activeLightRadiance*(1.2*max(worldPush.fogLayer1.z,0.0)*phase);
+    if((lookSwitches(worldPush.torchControl.w)&LOOK_SWITCH_NO_CLOUD_SHADOW)==0u)
+        sun*=itrpCloudShadow(worldPush,ro+rd*(.5*(t0+t1)),worldPush.lightDir.xyz);
+
+    // Steps grow with distance (near wisps resolved, far band averaged), jittered per pixel.
+    const int STEPS=12;
+    float jitter=rndf(seed);
+    float span=t1-t0;
+    float3 T=float3(1,1,1);
+    float prevT=0.0;
+    float invC=1.0/coverage;
+    for(int i=0;i<STEPS;i++) {
+        float u=(float(i)+jitter)/float(STEPS);
+        float tt=span*(exp2(u*3.46)-1.0)*0.1; // 0..span along an exponential spacing (2^3.46 = 11)
+        float dt=tt-prevT;prevT=tt;
+        float3 p=o+rd*(t0+tt);
+        float profile=exp2(-abs(p.y-centre)*rate)*saturate((p.y-bottom)*.125+1.0);
+        profile*=smoothstep(24.0,112.0,t0+tt); // the air around the player stays clear; fog sits in the distance
+        if(profile<1e-3)continue;
+        // Matched to ITRP's noise.png .zw lookup (measured mean .654, std .109): uniform lattice noise has
+        // mean .5 / std .185, which gave half ITRP's average fog (E[d^4] .132 vs .273) and lost the even far
+        // haze. After this remap E[d^4] is .277.
+        // Mostly broad banks (32-block cells) with a quarter of the 5-block wisps on top: the wisp noise alone
+        // read as fine confetti across the whole view. Same average fog (x1.2 restores E[d^4] ~.27), less contrast.
+        float broad=fogValueNoise(p*float3(.03125,.0833,.03125)+wind*.3);
+        float n=.654+((.75*broad+.25*fogValueNoise(p*float3(.2,.05,.2)+wind))-.5)*.5;
+        float d=saturate(n*1.2*invC-(invC-1.0));
+        d*=d;d*=d*1.2;
+        d+=max(worldPush.waterLook3.y,0.0); // thin even veil inside the band: blends the far background
+        float sigma=sigmaPeak*profile*d;
+        if(sigma<1e-7)continue;
+        float stepT=exp(-sigma*dt);
+        float3 source=ambient+sun*exp2(-sigma*absorb*40.0);
+        radiance+=throughput*T*(1.0-stepT)*source;
+        T*=stepT;
+    }
+    throughput*=T;
 }
 
 void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
@@ -800,6 +1014,8 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
         float absoluteY=ro.y+rd.y*distance*.5+worldPush.cloudWorld.y-worldPush.camOffset.y;
         float height=exp(-max(absoluteY-worldPush.mediumParams.z,0.0)/max(worldPush.fogControl.x,1.0));
         sigma=worldPush.mediumParams.w>0.5 ? 4.0 : ((dim==1 || dim==2)?worldPush.dimensionFog.w:(.0006+.002*rain*worldPush.fogControl.y)*(.25+.75*height))*worldPush.environment.z;
+        // Base overworld fog (ITRP VFOG_DENSITY_BASE). 0 leaves only the land haze below and the fog layer.
+        if(dim==0.0 && worldPush.mediumParams.w<=0.5)sigma*=saturate(worldPush.waterLook2.w);
     }
     float3 extinction=water ? waterAbsorb+sigma : float3(sigma,sigma,sigma);
     float3 transmit=exp(-extinction*distance);
@@ -815,6 +1031,7 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
         }
         // Absorbed light does not scatter: 1-transmit alone is largest for red, which water absorbs most, and turned dim water red.
         float3 waterAlbedo=sigma/max(extinction,float3(1e-5));
+        // ITRP look fills water with its fixed WATER_SCATTERING colour (.1,.6,1), the teal that gives it its look.
         float3 scatterTint=water?waterAlbedo/max(max(waterAlbedo.x,max(waterAlbedo.y,waterAlbedo.z)),1e-5)*.8:float3(1.0);
         float3 source=worldPush.mediumParams.w>0.5?float3(0,0,0):volumeLighting(ro+rd*t,rd,(worldPush.flags & 512u)!=0u?(water?.65:.8):(water?.45:.65),extinction,water,seed);
         // Skylight access alone is not irradiance: it remains 15 at midnight.
@@ -838,6 +1055,22 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
             float mediumLimit=luminance(activeLightRadiance)*0.015*fogGain;
             if(mediumAmount>mediumLimit)mediumLight*=mediumLimit/mediumAmount;
         }
+        if(water && (worldPush.flags & 512u)!=0u) {
+            // ITRP look: its WaterFog model. A fixed-colour fill that saturates with water depth, lit by the
+            // average skylight and a forward-peaked sun term; seen from above water it fills fast (0.2/block),
+            // from inside slowly (0.04/block). Sun shafts (the path-traced term) only exist underwater, as in ITRP.
+            bool eyeIn=(worldPush.flags & 1u)!=0u;
+            float3 sky=fogAmbientSky(rain);
+            float skyAvg=dot(max(sky,float3(0,0,0)),float3(.33333,.33333,.33333));
+            float3 lightTravel=refract(-worldPush.lightDir.xyz,float3(0,1,0),1.0/WATER_IOR);
+            float vdotsr=dot(lightTravel,rd);
+            float3 sunTint=activeLightRadiance/max(luminance(activeLightRadiance),1e-6);
+            float scatterAmt=eyeIn ? 5.0/(vdotsr*5.0+5.5) : 8.0*.5/(vdotsr*5.0+5.2);
+            float3 fill=(sunTint*(scatterAmt*5.0*saturate(worldPush.sunDir.w*4.0))+(eyeIn?rd.y*.4+.6:1.0))
+                    *(skyAvg*(eyeIn?.005:.015)*cameraSky*cameraSky*cameraSky)*worldPush.waterLook1.xyz;
+            float fillRate=(eyeIn?.04:.2)*max(worldPush.waterLook0.w,0.0);
+            radiance+=throughput*((eyeIn?mediumLight:float3(0,0,0))+fill*(1.0-exp2(-distance*fillRate)));
+        } else
         radiance+=throughput*(mediumLight
                 +(1.0-transmit)*incoming*scatterTint);
     }
@@ -849,9 +1082,11 @@ void transportMedium(float3 ro,float3 rd,float distance,bool water,bool scatter,
         float depth=landDistance*lerp(.005,.015,rain);
         float gate=1.0-exp2(-landDistance*.02);
         float3 haze=itrpReferenceAtmosphere(rd,worldPush.sunDir.xyz,rain,depth)
-                *(ITRP_SCENE_SKY_SCALE*.02*gate*gate*worldPush.fogControl.z);
+                *(ITRP_SCENE_SKY_SCALE*.2*gate*gate*worldPush.fogControl.z); // .2: matches ITRP land in-scatter (~4% of sky at 300 blocks); .02 left it ~10x too faint
         radiance+=throughput*haze;
-        throughput*=itrpLandTransmission(rd,landDistance*.005,rain);
+        // ITRP LandAtmosphericScattering only adds in-scatter (color += ...); it never attenuates. The extra
+        // transmission here ate blue first (brown-black distance, worse in rain) and its depth>10 cutoff
+        // zeroed downward rays past ~2000 blocks, drawing a hard line across distant terrain.
     }
 }
 
@@ -959,12 +1194,19 @@ void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNorm
     refracted = true;
 
     float3 ro = surfacePos - boundaryNormal * WATER_BOUNDARY_BIAS;
-    payload.hitT = -1.0;
-    payloadSetTraceState(false, rayConeWidth, rayConeSpread);
-    // RR must describe the same visible scene as the camera transmission path, not the hidden body.
-    traceRadianceReordered(cameraView ? CULL_HAND_WORLD | (showWaterBody ? CULL_WATER_BODY : CULL_CAMERA_BODY)
-                    : (firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY),
-            ro, WATER_BOUNDARY_TMIN, refractedDir, 10000.0);
+    // A thin water body (falling column, flowing sheet) is entered and left again within a block: the first
+    // hit is its own far face. That gave RR a black albedo over the whole column, so it smeared everything
+    // seen through it. Walk through up to three water faces to the surface actually visible behind them.
+    [loop] for (int waterFace = 0; waterFace < 3; waterFace++) {
+        payload.hitT = -1.0;
+        payloadSetTraceState(false, rayConeWidth, rayConeSpread);
+        // RR must describe the same visible scene as the camera transmission path, not the hidden body.
+        traceRadianceReordered(cameraView ? CULL_HAND_WORLD | (showWaterBody ? CULL_WATER_BODY : CULL_CAMERA_BODY)
+                        : (firstPersonReceiver ? CULL_HAND_WORLD : CULL_SECONDARY),
+                ro, WATER_BOUNDARY_TMIN, refractedDir, 10000.0);
+        if (payload.hitT < 0.0 || payloadMaterial() != MATERIAL_WATER) break;
+        ro += refractedDir * payload.hitT;
+    }
     if (payload.hitT < 0.0) {
         hitCamRel = (ro + refractedDir * 1.0e6) - worldPush.camOffset; // sky through the surface, at infinity
         motionPrev = float3(0.0, 0.0, 0.0);
@@ -1072,6 +1314,12 @@ static bool gv_psr;
 // First visible surface (the glass pane itself, not the PSR-unfolded content behind it) for raster overlays.
 static float3 gv_primaryCamRel;
 static bool gv_primaryValid;
+// Overlay depth (Litematica projection test): the first OPAQUE surface on the camera's straight line. Clear
+// glass is skipped, or a projection behind a window was discarded everywhere except where sky showed through.
+static float3 gv_overlayCamRel;
+static bool gv_overlayValid;
+static bool gv_overlayPending;
+static int gv_overlayBounce; // path vertex that currently supplies the overlay depth
 // The camera ray passed an ITRP rain veil: the surface behind it is still the camera's visible surface.
 static bool cameraThroughRain;
 // Cloud transmittance of the camera's own sky pixel (world.rmiss), for display.comp's night sky.
@@ -1218,7 +1466,7 @@ float3 lightShadedRadiance(Light light, float3 raw) {
     uint kind = (light.section >> 27u) & 7u;
     float3 le = raw;
     if ((worldPush.flags & 1024u) != 0u) {
-        if ((kind & 2u) != 0u) le = luminance(raw) * pow(float3(1, .6, .25), float3(2.2)) * 1.52;
+        if ((kind & 2u) != 0u) le = luminance(raw) * worldPush.warmLightTint.rgb * 1.52;
         else if ((kind & 4u) != 0u) le = luminance(raw) * pow(float3(1, .2, .17), float3(2.2)) * 4.0;
     }
     if ((kind & 1u) != 0u) le *= worldPush.torchControl.x;
@@ -1365,15 +1613,22 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
     bool showCelestial = true;
     bool waterScatterDone=false;
     gv_farLod=false;
+    gv_dbgLight=float3(0.0, 0.0, 0.0);
+    gv_dbgGlass=float3(0.0, 0.0, 0.0); gv_dbgGlassSet=false; gv_dbgShadow=float3(0.0,0.0,0.0); gv_dbgShadowSet=false;
     rc_count = 0u;
     rc_launchRough = 0.0;
     bool cacheOn = worldPush.cacheCapacity != 0u;
     gv_psr = false;
     gv_primaryValid = false;
+    gv_overlayValid = false;
+    gv_overlayPending = false;
     cameraThroughRain = false;
     gv_skyTransmittance = 0.0;
     gv_glassSky = false;
     bool cameraThroughGlass = false;
+    // Air behind glass seen straight from the camera still gets its fog; only bounce 0 had it before,
+    // so a window or stained glass showed the far side with no haze at all.
+    bool fogLine = false;
     // Refraction continues the camera view, even when RR cannot unfold its guides. Do not reveal
     // the hidden camera owner's hollow body until this path actually reflects or scatters.
     bool cameraVisibilityPath = true;
@@ -1419,6 +1674,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         uint incomingCone=payload.rayCone;
         if(bounce==0 || cameraThroughRain || cameraThroughGlass) payload.flags |= PAYLOAD_CAMERA_MISS;
         bool viaGlass = cameraThroughGlass;
+        bool fogSegment = bounce==0 || fogLine || cameraThroughRain;
+        fogLine = false;
         cameraThroughRain = false;
         cameraThroughGlass = false;
         ser_hint = (bounce == 0 ? 0u : 2u) | (showCelestial ? 0u : 1u);
@@ -1456,6 +1713,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             gv_primaryValid = payload.hitT >= 0.0;
             if (gv_primaryValid) gv_primaryCamRel = ro + rd * payload.hitT - worldPush.camOffset;
         }
+        if(bounce==0 || gv_overlayPending) {
+            gv_overlayPending = false;
+            gv_overlayValid = payload.hitT >= 0.0;
+            if (gv_overlayValid) gv_overlayCamRel = ro + rd * payload.hitT - worldPush.camOffset;
+            gv_overlayBounce = bounce;
+        }
         secondaryReceiverMask=handHit ? CULL_HAND_WORLD : CULL_SECONDARY;
 
 #ifdef CAUSTICA_DH
@@ -1489,9 +1752,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             L += throughput * worldPush.netherLighting.rgb * worldPush.dimensionControl.y * saturate(rayLength * 0.1 - 0.1);
         }
         float mediumDistance=payload.hitT>=0 ? payload.hitT : inWater?96.0:0.0;
-        if(inWater || bounce==0) {
-            bool scatter=inWater?!waterScatterDone:bounce==0;
+        if(inWater || fogSegment) {
+            bool scatter=inWater?!waterScatterDone:fogSegment;
             transportMedium(ro,rd,mediumDistance,inWater,scatter,waterExt,throughput,L,seed);
+            if(!inWater && scatter)fogLayerTransport(ro,rd,payload.hitT>=0 ? payload.hitT : max(worldPush.waterLook3.x,64.0),throughput,L,seed);
             if(inWater)waterScatterDone=true;
         }
 #ifdef CAUSTICA_DH
@@ -1595,6 +1859,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             bool glassHitSurface=false; // the reflection hit geometry: a path is chosen instead of adding sky
             // A block's normal map would scatter a mirror reflection into per-texel shards; keep a trace of it for the sheen.
             float3 glassMirror=reflect(rd,staticGlass?normalize(lerp(refractNormal,n,0.15)):n);
+            if(pc.debugView==18u)glassSkyDone=true; // A/B: glass reflects nothing
             if(deterministic && !glassSkyDone && F>1.0e-4) { // eta=1 mob veils reflect nothing
                 glassSkyDone=true;
                 float3 glassDirect=float3(0.0);
@@ -1609,11 +1874,21 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                     // out. Above that a low floor on the chance: each reflected pixel loses the view through the pane.
                     // Held glass reflects nothing anyone can make out, so it never takes a reflected path.
                     float reflectWeight=heldGlass?0.0:F*smoothstep(0.10,0.25,F);
-                    float reflectChance=reflectWeight>0.0?max(reflectWeight,0.06):0.0;
+                    // A per-pixel reflect/transmit choice here is the grain on grazing panes against a dark background.
+                    // Transmit only: the reflected surface's sun and glow were added above; its bounce light is
+                    // approximated by keeping half the reflected energy on the view through (same room, similar light).
+                    // Debug view 17 restores the old stochastic choice for A/B.
+                    float reflectChance=pc.debugView==17u && reflectWeight>0.0?max(reflectWeight,0.06):0.0;
                     reflected=reflectChance>0.0 && glassFresnelSample(DispatchRaysIndex().xy+uint2(0x9E3779B9u,0u),glassSampleOrdinal)<reflectChance;
-                    throughput*=reflected?reflectWeight/reflectChance:(1.0-F)/(1.0-reflectChance);
+                    if(reflectChance>0.0) throughput*=reflected?reflectWeight/reflectChance:(1.0-F)/(1.0-reflectChance);
+                    else throughput*=1.0-0.5*F;
                     if(reflected) { reflectedPathBase=L; reflectedPathCap=reflectWeight/reflectChance; skipSunOnce=glassShaded; }
                 }
+            }
+            if(primaryCamRay && !gv_dbgGlassSet) {
+                gv_dbgGlassSet=true;
+                gv_dbgGlass=!staticGlass && !heldGlass ? float3(1.0,0.0,1.0)
+                    : float3(reflected?1.0:0.0, saturate(F), glassSkyDone ? (glassHitSurface?0.35:1.0) : 0.0);
             }
             if(!totalInternal && !deterministic) {
                 float choice=rndf(seed); // keep the downstream path's RNG sequence unchanged
@@ -1669,6 +1944,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 // factors cancel across a parallel entry/exit pair.
                 throughput*=tint*(heldGlass?1.0:eta*eta);
                 throughTransmission=true;
+                fogLine=fogSegment && !heldGlass && !reflected;
+                // Straight through clear glass from the camera: the overlay depth moves on to what lies behind.
+                if(fogLine && gv_overlayValid && bounce==gv_overlayBounce) gv_overlayPending=true;
                 // Still on the camera's straight line of sight (clear static glass, unfolded guides).
                 cameraThroughGlass=unfold && clearGlass && !heldGlass && !mobVeil && (bounce==0 || viaGlass);
                 if(unfold) {
@@ -1800,6 +2078,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 // World-stable wave domain: rebased hit XZ + the pushed anchor (terrain origin mod 4096)
                 // reconstructs a world-pinned coordinate that survives the per-move terrain rebase.
                 n = applyWaterWaves(n, hitPos.xz + worldPush.waterAnchor.xy, worldPush.waterParams.w,(payload.flags&PAYLOAD_RAIN_EXPOSED)!=0u?worldPush.mediumParams.y:0.0);
+                // A far, grazing pixel covers many waves, so its average normal is nearly flat. Full per-sample slopes
+                // there tipped grazing reflections below the horizon and the far water under the fog went black.
+                float footprint=rayConeWidth/max(abs(rd.y),.02);
+                n=normalize(lerp(waterPlaneNormal,n,1.0/(1.0+footprint/1.5)));
             }
             waterExt = waterExtinction(payload.albedo);
             L+=throughput*heldLighting(hitPos,n,-rd,float3(0,0,0),float3(.02,.02,.02),
@@ -1855,6 +2137,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 reflectNow = waterMirror || rndf(seed) < F;
                 if (waterMirror) throughput *= F;
             }
+            // The camera's water reflection crosses the same air: give it the camera's fog/haze too. Without it
+            // the fog band hid the far shore but its mirror image in the water stayed sharp and clear.
+            if (reflectNow && bounce == gvBounce) fogLine = fogSegment;
             // RR guides follow a deterministic ray, independent of the sampled Fresnel branch.
             if (bounce == gvBounce && !rc_update) {
                 gv_normal = n;
@@ -2067,7 +2352,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             float3 emitterColor=albedo;
             if((worldPush.flags&1024u)!=0u) {
                 uint source=payloadEmissionSource();
-                if(source==6u)emitterColor=luminance(albedo)*pow(float3(1,.6,.25),float3(2.2))*1.52;
+                if(source==6u)emitterColor=luminance(albedo)*worldPush.warmLightTint.rgb*1.52;
                 else if(source==7u)emitterColor=luminance(albedo)*pow(float3(1,.2,.17),float3(2.2))*4.0;
             }
             L += throughput * emitterColor * emission * EMISSIVE_STRENGTH * worldPush.visualLight.x;
@@ -2091,6 +2376,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         float ndl = max(0.0, dot(n, lightDir));
         bool skipSun = skipSunOnce;
         skipSunOnce = false;
+        if (bounce == gvBounce) gv_dbgLight = float3(0.0, 0.0, ndl);
         if (ndl > 0.0 && !skipSun) {
             // Armour sits 1-2 texels off the body, so a body vertex's own armour is the first thing its sun
             // ray meets (wearing only boots blacked out the whole upper body). With ARMOR_SKIN_LIT on, the
@@ -2098,6 +2384,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             // shadows on the world; only this thin band is stepped over.
             const bool armorSkinLit = (payload.flags & 8u) != 0u && (lookSwitches(worldPush.torchControl.w) & LOOK_SWITCH_ARMOR_SKIN_LIT) != 0u;
             float3 vis = visibility(armorSkinLit ? p + n * 0.12 : p, lightDir, 10000.0);
+            if (bounce == gvBounce) gv_dbgLight.x = max(vis.r, max(vis.g, vis.b));
             // Underwater receiver whose shadow ray crossed a water surface: scale the direct light by
             // the wave-refraction caustic at the exit point. Focusing scales the incident irradiance,
             // so it applies to the whole NEE term (diffuse + specular).
@@ -2175,6 +2462,26 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
             }
         }
 
+        if(pc.debugView==20u && bounce==gvBounce && !gv_dbgShadowSet) {
+            gv_dbgShadowSet=true;
+            float3 o=hitPos+n*SURF_BIAS,lpos=worldPush.mainLightPosition.xyz;
+            float len=length(lpos-o);
+            if(luminance(worldPush.mainLightColor.xyz)<=0 || len<=0.05) gv_dbgShadow=float3(.15,.15,.15); // no held light
+            else {
+                float3 dl=(lpos-o)/len;
+                float lit4=luminance(visibilityMasked(o,dl,max(len-.002,RAY_TMIN),4u));
+                Payload saved=payload;
+                payload.hitT=-1.0;
+                payloadSetTraceState(false,RAY_CONE_MIN_WIDTH,RAY_CONE_MIN_SPREAD);
+                HitObject h=HitObject::TraceRay(topLevelAS,RAY_FLAG_NONE,0xFFu,SBT_RADIANCE,SBT_STRIDE_BUCKET,0u,
+                        makeRay(o,RAY_TMIN,dl,max(len-.002,RAY_TMIN)),payload);
+                HitObject::Invoke(topLevelAS,h,payload);
+                bool blocked=payload.hitT>=0.0;
+                bool owner=blocked && (payload.flags&PAYLOAD_HELD_OWNER)!=0u;
+                payload=saved;
+                gv_dbgShadow=float3(owner?1.0:0.0,lit4,blocked && !owner?1.0:0.0);
+            }
+        }
         if(bounce-clearInterfaces<2)L+=throughput*heldLighting(hitPos,n,v,diffAlb,F0,rough,pbr,heldHeightVisibility,inWater,waterExt,seed);
 
         // RIS direct lighting from block emitters: front lobe + SSS backlighting share ONE shadow ray (a light
@@ -2198,7 +2505,18 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         if (sss > 0.0 && bounce == gvBounce) { // the visible surface only: a deeper vertex's glow averages away
             float backNdl = max(0.0, dot(-n, lightDir));
             if (backNdl > 0.0) {
-                float3 visB = visibility(hitPos - n * SURF_BIAS, lightDir, 10000.0);
+                // Start past the hit's own block. A cross plant's second card runs through the same block, so
+                // the back-light ray always crossed it and printed that card's blades onto this one — the
+                // "second layer of grass". Neighbouring blocks still shadow; only the block's own cards don't.
+                float3 inside = hitPos - n * SURF_BIAS;
+                float3 cell = floor(inside);
+                float exitT = 1.0e9;
+                [unroll] for (int ax = 0; ax < 3; ax++) {
+                    float d = lightDir[ax];
+                    if (abs(d) > 1.0e-5) exitT = min(exitT, ((d > 0.0 ? cell[ax] + 1.0 : cell[ax]) - inside[ax]) / d);
+                }
+                float3 visB = visibilitySss(inside + lightDir * (min(exitT, 1.8) + 1.0e-3), lightDir, 10000.0);
+                gv_dbgLight.y = 0.25 + 0.75 * max(visB.r, max(visB.g, visB.b)); // 0.25 = ray fired but blocked
                 // Same caustic as the front-face NEE — underwater kelp/seagrass transmission should
                 // flicker with the same light bands as the floor around it.
                 if (inWater && waterWaves && shadowVis.a > 0.0) {
@@ -2378,6 +2696,18 @@ void main() {
     frameRadiance /= float(spp);
     if (rc_update) return; // cache population only: no color, guides or debug output
 
+    // Vanilla view-limiting fog (blindness, darkness, head inside powder snow): a deterministic veil over the
+    // finished pixel by primary distance. effectControl: y end distance (0 = off), z start, w 0 black / 1 snow white.
+    if (worldPush.effectControl.y > 0.0) {
+        float veilDistance = gv_primaryValid ? length(gv_primaryCamRel) : 1.0e6;
+        float veil = saturate((veilDistance - worldPush.effectControl.z)
+                / max(worldPush.effectControl.y - worldPush.effectControl.z, 1.0e-3));
+        float3 veilColor = worldPush.effectControl.w * float3(0.62, 0.73, 0.79)
+                * (dot(activeLightRadiance, float3(1.0 / 3.0)) * 0.02 + 0.01);
+        frameRadiance = lerp(frameRadiance, veilColor, veil);
+        gv_skyTransmittance *= 1.0 - veil; // the display pass must not draw stars over the veil
+    }
+
     // Hardware (non-linear, reversed-Z) depth for DLSS-RR + Frame Generation: project the camera-relative
     // primary hit through the forward view-projection and take ndc z/w — exactly the value a rasterizer
     // would write. Reversed-Z (near=1, far=0), so DLSS gets the DepthInverted flag; sky's far hit -> ~0.
@@ -2390,11 +2720,11 @@ void main() {
     // Do not substitute GGX alpha: the SDK BRDF-albedo example squares material roughness separately.
     gNormal[pix] = float4(gv_normal, gv_rough);
     // Alpha: depth of the first visible surface, read by the raster overlay layer (LitematicaMaterials).
-    float4 primaryClip = mul(worldPush.curViewProj, float4(gv_primaryCamRel, 1.0));
-    float primaryDepth = gv_primaryValid && primaryClip.w > 0.0 ? primaryClip.z / primaryClip.w : 0.0;
+    float4 primaryClip = mul(worldPush.curViewProj, float4(gv_overlayCamRel, 1.0));
+    float primaryDepth = gv_overlayValid && primaryClip.w > 0.0 ? primaryClip.z / primaryClip.w : 0.0;
     // A camera ray that reached the sky stores -(cloud transmittance): display.comp draws the night sky
     // there at full output resolution. Overlay depth readers clamp negatives to the far plane.
-    if (!gv_primaryValid || gv_glassSky) primaryDepth = -max(gv_skyTransmittance, 1.0e-4);
+    if (!gv_primaryValid || gv_glassSky || !gv_overlayValid) primaryDepth = -max(gv_skyTransmittance, 1.0e-4);
     gAlbedo[pix] = float4(gv_albedo, primaryDepth);
     gDepth[pix] = gv_depth;
     gSpecAlbedo[pix] = float4(gv_specAlb, 1.0); // specular albedo for RR demodulation
@@ -2429,9 +2759,17 @@ void main() {
     gSpecMotion[pix] = specMotion;
 
     // Debug guide-buffer visualization: bypass accumulation and show a guide directly.
-    if (pc.debugView != 0u && pc.debugView < 10u) {
+    if (pc.debugView != 0u && (pc.debugView < 10u || (pc.debugView >= 13u && pc.debugView <= 16u) || pc.debugView == 20u)) {
         float3 dbg;
-        if (pc.debugView == 1u) {
+        if (pc.debugView == 20u) {
+            dbg = gv_dbgShadow;
+        } else if (pc.debugView == 16u) {
+            dbg = gv_dbgGlass;
+        } else if (pc.debugView == 15u) {
+            dbg = gv_dbgLight;
+        } else if (pc.debugView >= 13u) {
+            dbg = gv_farLod ? float3(1.0, 1.0, 1.0) : gv_albedo; // ID colours from the closest hit; DH LOD white
+        } else if (pc.debugView == 1u) {
             dbg = gv_normal * 0.5 + 0.5;            // world normal -> [0,1]
         } else if (pc.debugView == 2u) {
             dbg = gv_albedo;                        // diffuse albedo

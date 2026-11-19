@@ -647,6 +647,9 @@ public final class RtEntities {
                 captureRainVeil(ctx, build, mc, partial);
                 captureModelParticles(ctx,build,mc,partial,rbx,rby,rbz,projection,viewRotation);
             }
+            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.fwaAnimations")) {
+                captureFancyWorldAnimations(ctx, build, rbx, rby, rbz);
+            }
             }
         } catch (RuntimeException t) {
             // A partially recorded frame may already have installed unbuilt BLAS into persistent slots.
@@ -1559,6 +1562,49 @@ public final class RtEntities {
             }
         }
     }
+
+    /**
+     * Fancy World Animations: every animating block (swinging lanterns and chains, doors, gates, levers, bells...)
+     * as one mesh in render-base-relative coordinates. Per-vertex motion against last frame's mesh while the
+     * vertex count is unchanged, so swinging geometry gets real motion vectors for RR instead of smearing.
+     */
+    private void captureFancyWorldAnimations(RtContext ctx, FrameBuild build, int rbx, int rby, int rbz) {
+        if (!dev.comfyfluffy.caustica.client.FancyWorldAnimationsCompat.present() || build.full()) {
+            fwaPrevVerts = null;
+            return;
+        }
+        capture.reset();
+        collector.begin(capture, false);
+        boolean drew;
+        try {
+            resetPoseStack(blockEntityPoseStack);
+            net.minecraft.world.phys.Vec3 origin = new net.minecraft.world.phys.Vec3(rbx, rby, rbz);
+            collector.setBlockAnimationOrigin(origin);
+            drew = dev.comfyfluffy.caustica.client.FancyWorldAnimationsCompat.render(blockEntityPoseStack, origin, collector);
+        } finally {
+            collector.setBlockAnimationOrigin(null);
+            resetPoseStack(blockEntityPoseStack);
+            collector.begin(null, false);
+        }
+        dev.comfyfluffy.caustica.client.FancyWorldAnimationsCompat.reportCaptured(drew ? capture.verts.size() / 3 : -1);
+        if (!drew || capture.isEmpty() || !hasFiniteGeometry()) {
+            fwaPrevVerts = null;
+            return;
+        }
+        int n = capture.verts.size();
+        float[] disp = null;
+        if (fwaPrevVerts != null && fwaPrevVerts.length == n && fwaPrevRbx == rbx && fwaPrevRby == rby && fwaPrevRbz == rbz) {
+            FloatArrayList d = VertexDisplacements.fill(capture.verts.elements(), n, fwaPrevVerts, fwaDispScratch);
+            disp = java.util.Arrays.copyOf(d.elements(), d.size());
+        }
+        if (fwaPrevVerts == null || fwaPrevVerts.length != n) fwaPrevVerts = new float[n];
+        System.arraycopy(capture.verts.elements(), 0, fwaPrevVerts, 0, n);
+        fwaPrevRbx = rbx; fwaPrevRby = rby; fwaPrevRbz = rbz;
+        appendCapture(ctx, build, disp, -1, ENTITY_BIT, MASK_ALL);
+    }
+    private float[] fwaPrevVerts;
+    private int fwaPrevRbx, fwaPrevRby, fwaPrevRbz;
+    private final FloatArrayList fwaDispScratch = new FloatArrayList();
 
     /** Log the first few model-particle failures without flooding: one bad group can repeat every frame. */
     private void logModelParticleFailure(RuntimeException failure) {

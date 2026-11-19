@@ -32,7 +32,7 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
     /** Push constants: see Push in display.comp (offset 52 = ACES 2.0 flag, 56/60 = LUT sizes). */
-    private static final int PUSH_BYTES = 224; // base16 + two float4 grades + sharpen (pad to 64) + night-sky mat4 + 2 float4 + previous view-projection
+    private static final int PUSH_BYTES = 240; // + ITRP extra float4; base16 + two float4 grades + sharpen (pad to 64) + night-sky mat4 + 2 float4 + previous view-projection
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -283,6 +283,9 @@ public final class RtDisplayPipeline {
             push.putFloat(144, overworld ? nightStrength : 0f).putFloat(148, time).putFloat(152, rain)
                 .putFloat(156, boundSkyView != 0L && dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.NEBULA.value() ? 1f : 0f);
             prevViewProj.get(160, push);
+            push.putFloat(224, dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.ITRP_TONE.value())
+                .putFloat(228, dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.VIGNETTE.value())
+                .putFloat(232, 0f).putFloat(236, 0f);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

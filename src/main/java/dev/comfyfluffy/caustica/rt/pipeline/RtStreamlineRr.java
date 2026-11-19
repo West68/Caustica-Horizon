@@ -273,7 +273,7 @@ public final class RtStreamlineRr {
                     throw new IllegalStateException("Streamline DLSS-RR returned invalid render size "
                             + width + "x" + height);
                 }
-                return new int[] { width, height };
+                return RtDlssRr.applyFreeScale(width, height, displayWidth, displayHeight, library.getDlssdRenderRange());
             }
         } catch (Throwable throwable) {
             failed = true;

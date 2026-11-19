@@ -26,6 +26,7 @@ public final class PerfSweep {
     // Each step turns ONE feature off (or down) relative to the user's own settings.
     private static final List<Step> STEPS = List.of(
             new Step("基准（你的设置）", null, null),
+            new Step("方块光源RIS", "lights.ris-candidates", "0"),
             new Step("视差", "material.parallax", "0"),
             new Step("ITRP 云", "clouds.mode", "0"),
             new Step("最大反弹 4→2", "composite.max-bounces", "2"),

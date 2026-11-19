@@ -19,7 +19,7 @@ public final class RtDhLods {
     // DH keeps generating distant sections for minutes, so a fixed 768 MiB slowly filled an 8 GB card past
     // its budget (DLSS-G eWarnOutOfVRAM, driver paging, FPS sinking over time). Track real headroom instead.
     private static final long MIN_BUDGET=512L*1024*1024, VRAM_RESERVE=768L*1024*1024;
-    private long budget=BUDGET, nextBudgetFrame;
+    private long budget=BUDGET, nextBudgetFrame, growHoldUntil, fgSince=-1;
     private static final int KEEP=6;
     public static final class Entry {
         public final DhLodCapture.SectionSnapshot snapshot;
@@ -32,6 +32,10 @@ public final class RtDhLods {
     private record Retired(long frame,Runnable release) {}
     private final Map<Long,Entry> cache=new HashMap<>();
     private final Map<Long,Long> retryAfter=new HashMap<>();
+    // Sections dropped for budget only come back into free headroom; they may not evict others to return.
+    // Timed retries let them push out the next-farthest ring, which then returned the same way (LOD flicker).
+    // Value: squared distance at eviction; once the player has come much closer the section may push again.
+    private final Map<Long,Double> budgetEvicted=new HashMap<>();
     private record Request(long version,int resolution) {}
     private final Map<Long,Request> retried=new HashMap<>();
     private final List<Retired> retired=new ArrayList<>();
@@ -50,16 +54,25 @@ public final class RtDhLods {
         return "totalHits="+Integer.toUnsignedLong(MemoryUtil.memGetInt(counters.mapped))+" primaryHits="+Integer.toUnsignedLong(MemoryUtil.memGetInt(counters.mapped+4))+" waterHits="+Integer.toUnsignedLong(MemoryUtil.memGetInt(counters.mapped+8))+" shadowHits="+Integer.toUnsignedLong(MemoryUtil.memGetInt(counters.mapped+12));
     }
     private long bytes,builds,evictions,meshAttempts,budgetRejects;
+    // Diagnostics only (no behaviour change): why sections leave or never get built.
+    private long evictBudget,evictUnwanted,replaced,budgetBelowBytes;
+    private long lastStatsLog;
     private int instances,buildCursor,wantedSections;
     private final DhLodOrderCache selectionOrder=new DhLodOrderCache();
     private long lastCoverageKey=Long.MIN_VALUE;
     private final DhTerrainCoverage coverage=new DhTerrainCoverage();
     public DhTerrainCoverage coverage(){return coverage;}
     public List<Entry> prepare(RtContext ctx,double x,double z) {
+        long t0=System.nanoTime();
+        try{return prepare0(ctx,x,z);}finally{long d=System.nanoTime()-t0;prepSum+=d;if(d>prepMax)prepMax=d;}
+    }
+    private long prepSum,prepMax;
+    private List<Entry> prepare0(RtContext ctx,double x,double z) {
         long frame=RtComposite.frameCounter();
+        {long now=System.nanoTime();if(lastFrameNs!=0){long d=now-lastFrameNs;perfFrames++;perfSum+=d;if(d>perfMax)perfMax=d;if(d>50_000_000L)perfHitch++;}lastFrameNs=now;}
         for(var it=retired.iterator();it.hasNext();) {var r=it.next();if(frame>=r.frame){r.release.run();it.remove();}}
         Object level=Minecraft.getInstance().level;
-        if(world!=level) {for(var e:cache.values())retire(e,frame);cache.clear();retryAfter.clear();retried.clear();buildCursor=0;world=level;selectionOrder.clear();lastCoverageKey=Long.MIN_VALUE;}
+        if(world!=level) {for(var e:cache.values())retire(e,frame);cache.clear();retryAfter.clear();budgetEvicted.clear();retried.clear();buildCursor=0;world=level;selectionOrder.clear();lastCoverageKey=Long.MIN_VALUE;}
         selected.clear();instances=0;
         if(level==null||!CausticaConfig.Rt.Visuals.DH_LODS.value())return selected;
         refreshBudget(ctx,frame);
@@ -67,8 +80,9 @@ public final class RtDhLods {
         for(int evicted=0;bytes>budget+(64L<<20) && !cache.isEmpty() && evicted<8;evicted++) {
             Map.Entry<Long,Entry> far=null;double farDistance=-1;
             for(var c:cache.entrySet()){double d=distance(c.getValue().snapshot,x,z);if(d>farDistance){farDistance=d;far=c;}}
-            retire(far.getValue(),frame);cache.remove(far.getKey());retryAfter.put(far.getKey(),frame+600);
+            retire(far.getValue(),frame);cache.remove(far.getKey());retryAfter.put(far.getKey(),frame+600);budgetEvicted.put(far.getKey(),far.getValue()==null?0.0:distance(far.getValue().snapshot,x,z));evictBudget++;
         }
+        if(bytes>budget)budgetBelowBytes++;
         var snapshots=DhLodCapture.activeSections(level);
         var mc=Minecraft.getInstance();int radius=Math.max(1,mc.options.getEffectiveRenderDistance());
         int minY=Math.floorDiv(mc.level.getMinY(),16),height=(mc.level.getHeight()+15)/16;
@@ -93,13 +107,29 @@ public final class RtDhLods {
         selectionOrder.apply(snapshots,selectionSignature,x,z);
         if(snapshots.size()>MAX_SECTIONS)snapshots.subList(MAX_SECTIONS,snapshots.size()).clear();
         wantedSections=snapshots.size();
+        if(System.nanoTime()-lastStatsLog>5_000_000_000L){lastStatsLog=System.nanoTime();
+            dev.comfyfluffy.caustica.CausticaMod.LOGGER.info("[DH-RT] {}",stats());
+            logPerf(ctx);}
         Set<Long> wanted=new HashSet<>();for(var s:snapshots)wanted.add(s.pos());
         // Retire obsolete parents only after their requested children can enter the TLAS.
         retryAfter.keySet().retainAll(wanted);
+        budgetEvicted.keySet().retainAll(wanted);
         retried.keySet().retainAll(wanted);
         // DH owns its quality/quadtree. Keep every requested rectangle unchanged.
         // Nearest missing/revised leaves first; complete old parents cover staged children.
         var work=snapshots;
+        // Stable admission: walk sections nearest-first and keep the prefix that fits the budget. Resident
+        // sections keep their place up to the full budget, new ones must fit a lower bar (hysteresis), so a
+        // standing player's set never changes. Log 2026-11-16: nearer sections evicting farther ones and the
+        // freed scratch letting those return made ~20 rebuilds/s at a full budget, seen as LOD flicker.
+        Set<Long> allowed=new HashSet<>();
+        {long cum=0;boolean open=true;long soft=budget-(96L<<20);
+         for(var s:snapshots){if(s.quads().isEmpty())continue;Entry r=cache.get(s.pos());
+             long est=(long)(DhPackedQuads.bytes(s.quads().size())*costRatio);
+             if(r!=null){long cost=Math.max(r.geometry.size+r.build.backing().size,r.snapshot.version()==s.version()?0:est);
+                 if(cum+cost<=budget){cum+=cost;allowed.add(s.pos());}}
+             else if(open && cum+est<=soft){cum+=est;allowed.add(s.pos());}
+             else open=false;}}
         int attempts=0,quads=0;
         for(var s:work) {
             Entry e=cache.get(s.pos());
@@ -107,7 +137,7 @@ public final class RtDhLods {
             int wantedResolution=64;
             Request oldRequest=retried.get(s.pos());
             if(oldRequest==null || oldRequest.version()!=s.version() || oldRequest.resolution()!=wantedResolution)retryAfter.remove(s.pos());
-            if((e==null || e.snapshot.version()!=s.version() || e.resolution!=wantedResolution) && attempts<4 && quads<65536 && frame>=retryAfter.getOrDefault(s.pos(),0L)) {
+            if((e==null || e.snapshot.version()!=s.version() || e.resolution!=wantedResolution) && allowed.contains(s.pos()) && attempts<4 && quads<65536 && frame>=retryAfter.getOrDefault(s.pos(),0L)) {
                 attempts++;meshAttempts++;retried.put(s.pos(),new Request(s.version(),wantedResolution));
                 int meshResolution=64;var mesh=s;
                 int count=mesh.quads().size();long required=DhPackedQuads.bytes(count);
@@ -117,7 +147,7 @@ public final class RtDhLods {
                     // Nearer sections outrank farther ones: a full budget must never leave the ground the player
                     // just walked off without LODs (seams that only a world reload cleared). Free farther
                     // sections; their memory returns after KEEP frames, then this section builds.
-                    makeRoomFor(s,required+buildBytes,x,z,frame);
+                    evictOutside(allowed,s,required+buildBytes,x,z,frame);
                     budgetRejects++;retryAfter.put(s.pos(),frame+KEEP+1);continue;
                 }
                 RtBuffer g=ctx.createBuffer(required,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,true,"DH section geometry");
@@ -128,9 +158,10 @@ public final class RtDhLods {
                     pb=RtAccel.prepareDhBlasBuild(ctx,g.deviceAddress,n,"DH rectangle BLAS");
                     long actual=g.size+pb.backing().size+pb.scratch().size;
                     if(bytes+actual>budget){RtAccel.destroyEntityAccel(pb.accel(),pb.backing());pb.scratch().destroy();g.destroy();budgetRejects++;retryAfter.put(s.pos(),frame+120);continue;}
-                    if(e!=null)retire(e,frame);
+                    if(e!=null){retire(e,frame);replaced++;}
+                    costRatio=costRatio*0.9+0.1*((double)(g.size+pb.backing().size)/Math.max(1L,required));
                     bytes+=actual;e=new Entry(mesh,g,pb,meshResolution);cache.put(s.pos(),e);builds++;
-                    if(meshResolution<wantedResolution)retryAfter.put(s.pos(),frame+120);else retryAfter.remove(s.pos());quads+=n;
+                    budgetEvicted.remove(s.pos());if(meshResolution<wantedResolution)retryAfter.put(s.pos(),frame+120);else retryAfter.remove(s.pos());quads+=n;
                     RtBuffer scratch=pb.scratch();
                     retired.add(new Retired(frame+KEEP,()->{scratch.destroy();bytes-=scratch.size;}));
                 } catch(Throwable failure) {if(pb!=null){RtAccel.destroyEntityAccel(pb.accel(),pb.backing());pb.scratch().destroy();}g.destroy();throw failure;}
@@ -144,7 +175,7 @@ public final class RtDhLods {
         Set<Long> keep=new HashSet<>(wanted);
         for(var s:publication)if(!s.quads().isEmpty() && selected.size()<MAX_SECTIONS){selected.add(cache.get(s.pos()));keep.add(s.pos());}
         for(var s:snapshots)if(s.quads().isEmpty())keep.remove(s.pos());
-        for(var it=cache.entrySet().iterator();it.hasNext();) {var e=it.next();if(!keep.contains(e.getKey())){retire(e.getValue(),frame);it.remove();}}
+        for(var it=cache.entrySet().iterator();it.hasNext();) {var e=it.next();if(!keep.contains(e.getKey())){retire(e.getValue(),frame);it.remove();evictUnwanted++;}}
         instances=selected.size();return selected;
     }
     private void refreshBudget(RtContext ctx,long frame) {
@@ -163,11 +194,21 @@ public final class RtDhLods {
             if(free==Long.MAX_VALUE)return;
             // Frame generation allocates its own history after we size this budget; leave it room or DLSS-G
             // reports over-budget and the driver starts paging (FPS drop) on 8 GB cards.
-            long reserve=VRAM_RESERVE+(CausticaConfig.Rt.Fg.ENABLED.value()?(512L<<20):0L);
+            // The extra frame-generation reserve only matters until DLSS-G has allocated its history. Once it runs,
+            // that memory is already in the heap usage above, so keeping the reserve counted it twice and pinned the
+            // LOD budget at its 256 MB floor (log 2026-11-14: ~240 of ~410 wanted sections fit; the rest swapped).
+            boolean fgPending=CausticaConfig.Rt.Fg.ENABLED.value() && (fgSince<0 || frame-fgSince<1200);
+            if(CausticaConfig.Rt.Fg.ENABLED.value()){if(fgSince<0)fgSince=frame;}else fgSince=-1;
+            long reserve=VRAM_RESERVE+(fgPending?(512L<<20):0L);
             long target=Math.max(MIN_BUDGET-(CausticaConfig.Rt.Fg.ENABLED.value()?(256L<<20):0L),Math.min(BUDGET,bytes+free-reserve));
             // Shrink at once under pressure, grow slowly: a budget that follows every transient allocation
             // built sections only to evict them a second later (thousands of wasted BLAS builds).
-            budget=target<budget?target:Math.min(target,budget+(32L<<20));
+            // Small dips (<32 MB) are allocation jitter: following them evicted sections every refresh.
+            // Log 2026-11-14: the budget sawed 256->288->320->256 MB every ~15 s. Each step up was filled with
+            // builds, whose transient driver memory then pushed the target back down and evicted ~100 sections
+            // (the flicker). After any shrink hold the budget for ~30 s, and grow only into clear headroom.
+            if(target<budget-(32L<<20)){budget=target;growHoldUntil=frame+1800;}
+            else if(frame>=growHoldUntil && target>budget+(64L<<20))budget=Math.min(target-(32L<<20),budget+(32L<<20));
         }
     }
     private static double distance(DhLodCapture.SectionSnapshot s,double x,double z) {
@@ -184,6 +225,16 @@ public final class RtDhLods {
     }
     /** Bytes already retired but not yet returned (they come back KEEP frames after retirement). */
     private long releasing;
+    private double costRatio=3.0;
+    /** Free room for an admitted section by evicting only residents outside the admitted set, farthest first. */
+    private void evictOutside(Set<Long> allowed,DhLodCapture.SectionSnapshot s,long need,double x,double z,long frame) {
+        for(int evicted=0;bytes-releasing+need>budget && evicted<16;evicted++) {
+            Map.Entry<Long,Entry> far=null;double farDistance=-1;
+            for(var c:cache.entrySet()){if(c.getKey()==s.pos()||allowed.contains(c.getKey()))continue;double d=distance(c.getValue().snapshot,x,z);if(d>farDistance){farDistance=d;far=c;}}
+            if(far==null)return;
+            retire(far.getValue(),frame);cache.remove(far.getKey());evictBudget++;
+        }
+    }
     /** Evict the farthest resident sections that lie farther than {@code s} until {@code need} fits. */
     private void makeRoomFor(DhLodCapture.SectionSnapshot s,long need,double x,double z,long frame) {
         // Hysteresis: only sections clearly farther (1.5x, squared distances) give way, so the budget frontier
@@ -193,7 +244,7 @@ public final class RtDhLods {
             Map.Entry<Long,Entry> far=null;double farDistance=near;
             for(var c:cache.entrySet()){if(c.getKey()==s.pos())continue;double d=distance(c.getValue().snapshot,x,z);if(d>farDistance){farDistance=d;far=c;}}
             if(far==null)return;
-            retire(far.getValue(),frame);cache.remove(far.getKey());retryAfter.put(far.getKey(),frame+600);
+            retire(far.getValue(),frame);cache.remove(far.getKey());retryAfter.put(far.getKey(),frame+600);budgetEvicted.put(far.getKey(),far.getValue()==null?0.0:distance(far.getValue().snapshot,x,z));evictBudget++;
         }
     }
     /** Caller has quiesced the context, matching all other entity cache shutdowns. */
@@ -202,7 +253,7 @@ public final class RtDhLods {
         for(var e:cache.values()){RtAccel.destroyEntityAccel(e.build.accel(),e.build.backing());e.geometry.destroy();}
         if(counters!=null){counters.destroy();counters=null;}
         DhLodMaterials.INSTANCE.shutdown();
-        cache.clear();retryAfter.clear();retried.clear();selected.clear();world=null;selectionOrder.clear();bytes=0;instances=0;buildCursor=0;wantedSections=0;
+        cache.clear();retryAfter.clear();budgetEvicted.clear();retried.clear();selected.clear();world=null;selectionOrder.clear();bytes=0;instances=0;buildCursor=0;wantedSections=0;
     }
     /** Menu ticks release LOD resources once the existing graphics timeline proves completion, without waiting. */
     public void releaseIfWorldClosed(RtContext ctx) {
@@ -211,6 +262,44 @@ public final class RtDhLods {
         if(executor.completedGraphicsValue()<executor.latestGraphicsUseValue())return;
         shutdown();DhLodCapture.clear();
     }
-    public String stats(){return "rawInstances="+selected.stream().filter(e->e.resolution==64).count()+" instances="+instances+" wanted="+wantedSections+" resident="+cache.size()+" bytes="+bytes+" builds="+builds+" evictions="+evictions+" meshAttempts="+meshAttempts+" budgetRejects="+budgetRejects+" budget="+budget;}
+    public String stats(){return "rawInstances="+selected.stream().filter(e->e.resolution==64).count()+" instances="+instances+" wanted="+wantedSections+" resident="+cache.size()+" bytes="+bytes+" builds="+builds+" evictions="+evictions+" meshAttempts="+meshAttempts+" budgetRejects="+budgetRejects+" budget="+budget
+        +" evictBudget="+evictBudget+" evictUnwanted="+evictUnwanted+" replaced="+replaced+" framesOverBudget="+budgetBelowBytes;}
+    private long lastFrameNs,perfFrames,perfSum,perfMax,perfHitch;
+    /** Diagnostics: frame pacing, VRAM heap, terrain size, server tick and Java heap every 5 s. */
+    private jdk.jfr.Recording jfr;private long jfrLastDump;
+    /** Diagnostics: continuous JFR sampling (last 15 min), dumped to <game>/perf-jfr/rec.jfr every 60 s. */
+    private void jfrTick() {
+        try {
+            if(jfr==null){jfr=new jdk.jfr.Recording(jdk.jfr.Configuration.getConfiguration("profile"));jfr.setMaxAge(java.time.Duration.ofMinutes(15));jfr.setMaxSize(400L<<20);jfr.setToDisk(true);jfr.setName("caustica-perf");jfr.start();jfrLastDump=System.nanoTime();
+                dev.comfyfluffy.caustica.CausticaMod.LOGGER.info("[PERF] JFR recording started");return;}
+            if(System.nanoTime()-jfrLastDump>60_000_000_000L){jfrLastDump=System.nanoTime();
+                var dir=net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir().resolve("perf-jfr");java.nio.file.Files.createDirectories(dir);
+                jfr.dump(dir.resolve("rec.jfr"));}
+        } catch(Throwable t){dev.comfyfluffy.caustica.CausticaMod.LOGGER.warn("[PERF] JFR failed: {}",t.toString());jfr=null;jfrLastDump=Long.MAX_VALUE/2;}
+    }
+    private void logPerf(RtContext ctx) {
+        if(Boolean.getBoolean("caustica.diag.jfr") && jfrLastDump<Long.MAX_VALUE/4)jfrTick();
+        try(var stack=org.lwjgl.system.MemoryStack.stackPush()) {
+            var pp=stack.mallocPointer(1);
+            org.lwjgl.util.vma.Vma.vmaGetMemoryProperties(ctx.vma(),pp);
+            var memory=org.lwjgl.vulkan.VkPhysicalDeviceMemoryProperties.create(pp.get(0));
+            var heaps=org.lwjgl.util.vma.VmaBudget.calloc(VK_MAX_MEMORY_HEAPS,stack);
+            org.lwjgl.util.vma.Vma.vmaGetHeapBudgets(ctx.vma(),heaps);
+            var sb=new StringBuilder("[PERF] ");
+            if(perfFrames>0)sb.append("fps=").append(String.format("%.1f",perfFrames*1e9/perfSum)).append(" maxFrameMs=").append(perfMax/1_000_000).append(" hitches50ms=").append(perfHitch);
+            for(int i=0;i<memory.memoryHeapCount();i++){var h=heaps.get(i);
+                sb.append(" heap").append(i).append((memory.memoryHeaps(i).flags()&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)!=0?"(vram)":"(sys)")
+                  .append("=").append(h.usage()>>20).append("/").append(h.budget()>>20).append("MB rt=").append(h.statistics().blockBytes()>>20).append("/alloc=").append(h.statistics().allocationBytes()>>20);}
+            sb.append(' ').append(dev.comfyfluffy.caustica.rt.terrain.RtTerrain.memoryStats());
+            var rt=Runtime.getRuntime();sb.append(" javaHeapMB=").append((rt.totalMemory()-rt.freeMemory())>>20).append("/").append(rt.maxMemory()>>20);
+            var server=Minecraft.getInstance().getSingleplayerServer();
+            if(server!=null)sb.append(" serverMspt=").append(String.format("%.1f",server.getAverageTickTimeNanos()/1e6));
+            if(perfFrames>0)sb.append(" dhPrepAvgMs=").append(String.format("%.2f",prepSum/1e6/perfFrames)).append(" dhPrepMaxMs=").append(prepMax/1_000_000);
+            sb.append(" dhBuilds=").append(builds).append(" ").append(dev.comfyfluffy.caustica.rt.EnhancedGpuTimings.summary());
+            var p=Minecraft.getInstance().player;if(p!=null)sb.append(" x=").append(p.getBlockX()).append(" z=").append(p.getBlockZ());
+            dev.comfyfluffy.caustica.CausticaMod.LOGGER.info(sb.toString());
+        } catch(Throwable t){dev.comfyfluffy.caustica.CausticaMod.LOGGER.warn("[PERF] stats failed: {}",t.toString());}
+        perfFrames=perfSum=perfMax=perfHitch=0;prepSum=prepMax=0;
+    }
     private RtDhLods() {}
 }

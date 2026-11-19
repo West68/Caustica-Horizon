@@ -173,6 +173,7 @@ public final class RtUiOverlay {
      * color+depth (cleared once per frame), matching vanilla where hand and screen effects share the main
      * target's depth without a clear between them. Must be paired with {@link #endOutputRedirect()}.
      */
+    //? if <26.3 {
     public static void beginOutputRedirect(RenderTarget main) {
         TextureTarget target = prepare(main);
         RenderSystem.outputColorTextureOverride = target.getColorTextureView();
@@ -183,6 +184,27 @@ public final class RtUiOverlay {
         RenderSystem.outputColorTextureOverride = null;
         RenderSystem.outputDepthTextureOverride = null;
     }
+    //?} else {
+    /*// 26.3 removed RenderSystem's output overrides: the caller now opens the render pass itself. While a
+    // redirect is active, GameRendererMixin swaps the views passed to those createRenderPass calls.
+    private static TextureTarget redirectTarget;
+
+    public static void beginOutputRedirect(RenderTarget main) {
+        redirectTarget = prepare(main);
+    }
+
+    public static void endOutputRedirect() {
+        redirectTarget = null;
+    }
+
+    public static com.mojang.blaze3d.textures.GpuTextureView redirectColor(com.mojang.blaze3d.textures.GpuTextureView original) {
+        return redirectTarget != null ? redirectTarget.getColorTextureView() : original;
+    }
+
+    public static com.mojang.blaze3d.textures.GpuTextureView redirectDepth(com.mojang.blaze3d.textures.GpuTextureView original) {
+        return redirectTarget != null && redirectTarget.getDepthTextureView() != null ? redirectTarget.getDepthTextureView() : original;
+    }
+    *///?}
 
     /**
      * Composite the overlay over the real main target. Called once per frame from {@code GameRendererMixin}
@@ -220,7 +242,11 @@ public final class RtUiOverlay {
 
     private static TextureTarget ensureSized(RenderTarget main) {
         if (overlay == null) {
+            //? if <26.3 {
             overlay = new TextureTarget("caustica UI overlay", main.width, main.height, true, GpuFormat.RGBA8_UNORM);
+            //?} else {
+            /*overlay = new TextureTarget("caustica UI overlay", main.width, main.height, GpuFormat.RGBA8_UNORM, GpuFormat.D32_FLOAT);
+            *///?}
         } else if (overlay.width != main.width || overlay.height != main.height) {
             overlay.resize(main.width, main.height);
         }
@@ -228,8 +254,7 @@ public final class RtUiOverlay {
     }
 
     public static void destroy() {
-        RenderSystem.outputColorTextureOverride = null;
-        RenderSystem.outputDepthTextureOverride = null;
+        endOutputRedirect();
         usedThisFrame = false;
         overlayClearedThisFrame = false;
         if (overlay != null) {

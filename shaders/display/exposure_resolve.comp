@@ -37,7 +37,10 @@ void main() {
         float sum = 0.0;
         for (int i=0;i<512;i++) sum += uintBitsToFloat(hist.bins[i]);
         float mean = max(sum/512.0,0.0);
-        float target = 9.6 / (23.9 * pow(mean,1.0/1.1) + 0.08) * exp2(pc.evBias);
+        // The key is unused by this curve otherwise; here it is ITRP's AE_CURVE (0.18 = its default 0.65):
+        // a higher curve lifts dark scenes and holds bright ones down more.
+        float curve = (1.0/1.1) * clamp(pc.key/0.18, 0.3, 2.5);
+        float target = 9.6 / (23.9 * pow(mean,curve) + 0.08) * exp2(pc.evBias);
         // Apply the existing EV bounds here too: without them a dark scene reached 120x.
         // This bounds adaptation, not scene radiance; lamps retain their physical contributions.
         float low=exp2(pc.minEv+pc.evBias),high=exp2(pc.maxEv+pc.evBias);

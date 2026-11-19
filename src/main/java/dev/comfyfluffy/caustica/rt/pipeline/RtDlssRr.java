@@ -49,7 +49,45 @@ public final class RtDlssRr {
     }
 
     public static int quality() {
-        return CausticaConfig.Rt.DlssRr.QUALITY.value();
+        int free = CausticaConfig.Rt.DlssRr.FREE_SCALE.value();
+        if (free <= 0) return CausticaConfig.Rt.DlssRr.QUALITY.value();
+        // Free resolution: DLSS-RR accepts exactly one input size per mode (its min/max range is a single
+        // point), so the mode is the one whose ratio is the smallest at or above the requested scale, and
+        // DLSS outputs to a smaller intermediate image that is then stretched to the screen.
+        return modeForScale(free / 100f);
+    }
+
+    private static int modeForScale(float s) {
+        return s <= 0.334f ? 3 : s <= 0.5f ? 0 : s <= 0.58f ? 1 : s <= 0.667f ? 2 : 5;
+    }
+
+    private static float modeRatio(int quality) {
+        return switch (quality) { case 3 -> 1f / 3f; case 0 -> 0.5f; case 1 -> 0.58f; case 2 -> 2f / 3f; default -> 1f; };
+    }
+
+    /** Key that changes whenever the render size the DLSS settings ask for changes. */
+    public static int renderSizeKey() {
+        return quality() * 1000 + Math.max(CausticaConfig.Rt.DlssRr.FREE_SCALE.value(), 0);
+    }
+
+    /**
+     * Free resolution: the DLSS output size for the requested scale (DLSS renders at mode ratio x output,
+     * which equals scale x display), or null when free resolution is off.
+     */
+    public static int[] freeOutputSize(int displayW, int displayH) {
+        int free = CausticaConfig.Rt.DlssRr.FREE_SCALE.value();
+        if (free <= 0) return null;
+        float s = free / 100f;
+        float k = Math.min(1f, s / modeRatio(modeForScale(s)));
+        int w = Math.max(64, Math.min(displayW, Math.round(displayW * k)));
+        int h = Math.max(64, Math.min(displayH, Math.round(displayH * k)));
+        dev.comfyfluffy.caustica.CausticaMod.LOGGER.info("[DLSS-FREE] scale={}% mode={} dlssOutput={}x{} display={}x{}",
+                free, quality(), w, h, displayW, displayH);
+        return new int[] { w, h };
+    }
+
+    public static int[] applyFreeScale(int optimalW, int optimalH, int displayW, int displayH, int[] range) {
+        return new int[] { optimalW, optimalH };
     }
 
     private NgxLibrary lib;

@@ -4,7 +4,9 @@ import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.comfyfluffy.caustica.CausticaMod;
 import net.fabricmc.loader.api.FabricLoader;
 import org.lwjgl.system.MemoryUtil;
+//? if <26.3 {
 import org.lwjgl.glfw.GLFWNativeWin32;
+//?}
 import org.lwjgl.vulkan.KHRSwapchain;
 import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkAllocationCallbacks;
@@ -216,12 +218,22 @@ public final class StreamlineRuntime {
 
     public static int vkCreateWin32Surface(VkInstance instance, long hwnd, VkAllocationCallbacks allocator,
             LongBuffer surfaceOut) {
+        //? if <26.3 {
         if (!useVulkanProxies()) {
             return org.lwjgl.glfw.GLFWVulkan.glfwCreateWindowSurface(instance, hwnd, allocator, surfaceOut);
         }
         long nativeHwnd = GLFWNativeWin32.glfwGetWin32Window(hwnd);
+        //?} else {
+        /*// 26.3: the window handle is an SDL_Window*; SDL creates the surface and exposes the Win32 HWND as a property.
+        if (!useVulkanProxies()) {
+            return org.lwjgl.sdl.SDLVulkan.SDL_Vulkan_CreateSurface(hwnd, instance, allocator, surfaceOut)
+                    ? VK10.VK_SUCCESS : VK10.VK_ERROR_INITIALIZATION_FAILED;
+        }
+        long nativeHwnd = org.lwjgl.sdl.SDLProperties.SDL_GetPointerProperty(
+                org.lwjgl.sdl.SDLVideo.SDL_GetWindowProperties(hwnd), org.lwjgl.sdl.SDLVideo.SDL_PROP_WINDOW_WIN32_HWND_POINTER, 0L);
+        *///?}
         if (nativeHwnd == 0L) {
-            CausticaMod.LOGGER.error("GLFW did not provide a Win32 HWND; refusing to mix a native surface with Streamline proxies");
+            CausticaMod.LOGGER.error("The window system did not provide a Win32 HWND; refusing to mix a native surface with Streamline proxies");
             return VK10.VK_ERROR_INITIALIZATION_FAILED;
         }
         return INSTANCE.library.vkCreateWin32Surface(instance.address(), nativeHwnd, address(allocator),

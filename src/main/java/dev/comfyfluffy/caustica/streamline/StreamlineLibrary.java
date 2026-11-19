@@ -50,6 +50,7 @@ public final class StreamlineLibrary {
     private final MethodHandle setDlssgOptions;
     private final MethodHandle getDlssgState;
     private final MethodHandle getDlssdOptimalSettings;
+    private final MethodHandle getDlssdRenderRange; // null with an older bridge
     private final MethodHandle getDlssOptimalSettings;
     private final MethodHandle setDlssdOptions;
     private final MethodHandle setDlssOptions;
@@ -101,6 +102,8 @@ public final class StreamlineLibrary {
         getDlssgState = handle(lookup, "slbridge_get_dlssg_state", FunctionDescriptor.of(I32, I32, I64, I64));
         getDlssdOptimalSettings = handle(lookup, "slbridge_get_dlssd_optimal_settings",
                 FunctionDescriptor.of(I32, I32, I32, I32, I64, I64, I64));
+        getDlssdRenderRange = lookup.find("slbridge_get_dlssd_render_range")
+                .map(address -> LINKER.downcallHandle(address, FunctionDescriptor.of(I32, I64))).orElse(null);
         getDlssOptimalSettings = handle(lookup, "slbridge_get_dlss_optimal_settings",
                 FunctionDescriptor.of(I32, I32, I32, I32, I64, I64, I64));
         setDlssdOptions = handle(lookup, "slbridge_set_dlssd_options",
@@ -261,6 +264,21 @@ public final class StreamlineLibrary {
             MemorySegment renderWidth, MemorySegment renderHeight, MemorySegment sharpness) {
         return invokeInt(getDlssdOptimalSettings, mode, outputWidth, outputHeight,
                 renderWidth.address(), renderHeight.address(), sharpness.address());
+    }
+
+    /** Render-size range {minW,minH,maxW,maxH} of the last DLSS-RR optimal query, or null if unavailable. */
+    public int[] getDlssdRenderRange() {
+        if (getDlssdRenderRange == null) return null;
+        try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(16);
+            int rc = (int) getDlssdRenderRange.invokeExact(out.address());
+            if (rc != 0) return null;
+            int[] range = new int[4];
+            for (int i = 0; i < 4; i++) range[i] = out.getAtIndex(java.lang.foreign.ValueLayout.JAVA_INT, i);
+            return range[0] > 0 && range[1] > 0 && range[2] >= range[0] && range[3] >= range[1] ? range : null;
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     public int getDlssOptimalSettings(int mode, int outputWidth, int outputHeight,

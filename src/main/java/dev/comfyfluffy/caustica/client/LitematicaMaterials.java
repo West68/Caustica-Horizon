@@ -45,10 +45,17 @@ final class LitematicaMaterials {
     }
     private static final class Pipeline extends RenderPipeline {
         Pipeline(RenderPipeline p) {
+            //? if <26.3 {
             super(Identifier.fromNamespaceAndPath("caustica","schematic/"+p.getLocation().getNamespace()+"/"+p.getLocation().getPath()),
                     Identifier.fromNamespaceAndPath("caustica","litematica_pbr"),Identifier.fromNamespaceAndPath("caustica","litematica_pbr"),
                     p.getShaderDefines(),groups(p),SchematicOverlayState.colors(p.getColorTargetStates()),p.getDepthStencilState(),p.getPolygonMode(),
                     p.isCull(),p.getVertexFormatBindings(),p.getPrimitiveTopology(),p.getSortKey());
+            //?} else {
+            /*super(Identifier.fromNamespaceAndPath("caustica","schematic/"+p.getLocation().getNamespace()+"/"+p.getLocation().getPath()),
+                    java.util.Map.of(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX,Identifier.fromNamespaceAndPath("caustica","litematica_pbr"),com.mojang.renderpearl.api.pipeline.ShaderType.FRAGMENT,Identifier.fromNamespaceAndPath("caustica","litematica_pbr")),
+                    p.getShaderDefines(),groups(p),SchematicOverlayState.colors(p.getColorTargetStates()),p.getDepthStencilState(),p.getPolygonMode(),
+                    p.isCull(),p.getVertexFormatBindings().toArray(new com.mojang.renderpearl.api.vertex.VertexFormat[0]),p.getPrimitiveTopology(),p.pushConstantSize(),p.getSortKey());
+            *///?}
         }
         private static List<BindGroupLayout> groups(RenderPipeline p) {
             var list=new ArrayList<>(p.getBindGroupLayouts()); list.add(EXTRA);return List.copyOf(list);
@@ -57,10 +64,17 @@ final class LitematicaMaterials {
     private static final Map<RenderPipeline,RenderPipeline> OVERLAYS=new IdentityHashMap<>();
     private static final class OverlayPipeline extends RenderPipeline {
         OverlayPipeline(RenderPipeline p) {
+            //? if <26.3 {
             super(Identifier.fromNamespaceAndPath("caustica","schematic_overlay/"+p.getLocation().getNamespace()+"/"+p.getLocation().getPath()),
                     p.getVertexShader(),p.getFragmentShader(),p.getShaderDefines(),p.getBindGroupLayouts(),
                     SchematicOverlayState.colors(p.getColorTargetStates()),p.getDepthStencilState(),p.getPolygonMode(),p.isCull(),
                     p.getVertexFormatBindings(),p.getPrimitiveTopology(),p.getSortKey());
+            //?} else {
+            /*super(Identifier.fromNamespaceAndPath("caustica","schematic_overlay/"+p.getLocation().getNamespace()+"/"+p.getLocation().getPath()),
+                    p.getShaders(),p.getShaderDefines(),p.getBindGroupLayouts(),
+                    SchematicOverlayState.colors(p.getColorTargetStates()),p.getDepthStencilState(),p.getPolygonMode(),
+                    p.isCull(),p.getVertexFormatBindings().toArray(new com.mojang.renderpearl.api.vertex.VertexFormat[0]),p.getPrimitiveTopology(),p.pushConstantSize(),p.getSortKey());
+            *///?}
         }
     }
     static RenderPipeline overlayPipeline(RenderPipeline p) {return OVERLAYS.computeIfAbsent(p,OverlayPipeline::new);}
@@ -70,14 +84,43 @@ final class LitematicaMaterials {
     /** Same vertex stage and blending as the overlay; the fragment stage adds the RT world depth test. */
     private static final class DepthOverlayPipeline extends RenderPipeline {
         DepthOverlayPipeline(RenderPipeline p) {
+            //? if <26.3 {
             super(Identifier.fromNamespaceAndPath("caustica","schematic_overlay_depth/"+p.getLocation().getNamespace()+"/"+p.getLocation().getPath()),
                     p.getVertexShader(),Identifier.fromNamespaceAndPath("caustica","schematic_overlay_depth"),p.getShaderDefines(),
                     depthGroups(p),SchematicOverlayState.colors(p.getColorTargetStates()),p.getDepthStencilState(),p.getPolygonMode(),p.isCull(),
                     p.getVertexFormatBindings(),p.getPrimitiveTopology(),p.getSortKey());
+            //?} else {
+            /*super(Identifier.fromNamespaceAndPath("caustica","schematic_overlay_depth/"+p.getLocation().getNamespace()+"/"+p.getLocation().getPath()),
+                    java.util.Map.of(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX,p.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX),com.mojang.renderpearl.api.pipeline.ShaderType.FRAGMENT,Identifier.fromNamespaceAndPath("caustica","schematic_overlay_depth")),
+                    depthDefines(p),depthGroups(p),SchematicOverlayState.colors(p.getColorTargetStates()),p.getDepthStencilState(),p.getPolygonMode(),
+                    p.isCull(),p.getVertexFormatBindings().toArray(new com.mojang.renderpearl.api.vertex.VertexFormat[0]),p.getPrimitiveTopology(),p.pushConstantSize(),p.getSortKey());
+            *///?}
         }
         private static List<BindGroupLayout> depthGroups(RenderPipeline p) {
             var list=new ArrayList<>(p.getBindGroupLayouts());list.add(DEPTH_LAYOUT);return List.copyOf(list);
         }
+        //? if >=26.3 {
+        /*// 26.3 links stage varyings by location, and vertexColor sits at a different location in different
+        // vanilla vertex shaders (position_color 0, position_tex_color 1, lines 2). Read it from the paired
+        // vertex shader's source and hand it to schematic_overlay_depth.fsh as a define.
+        private static net.minecraft.client.renderer.ShaderDefines depthDefines(RenderPipeline p) {
+            int location=0;
+            Identifier vertex=p.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX);
+            if(vertex!=null) try {
+                var resource=net.minecraft.client.Minecraft.getInstance().getResourceManager().getResource(
+                        Identifier.fromNamespaceAndPath(vertex.getNamespace(),"shaders/"+vertex.getPath()+".vsh"));
+                if(resource.isPresent()) try(var reader=resource.get().openAsReader()) {
+                    var m=java.util.regex.Pattern.compile("layout\\s*\\(\\s*location\\s*=\\s*(\\d+)\\s*\\)\\s*out\\s+vec4\\s+vertexColor\\s*;")
+                            .matcher(reader.lines().collect(java.util.stream.Collectors.joining("\n")));
+                    if(m.find())location=Integer.parseInt(m.group(1));
+                }
+            } catch(java.io.IOException|RuntimeException e) {
+                dev.comfyfluffy.caustica.CausticaMod.LOGGER.warn("Schematic overlay: could not read {}; assuming vertexColor at location 0",vertex,e);
+            }
+            return p.getShaderDefines().withOverrides(net.minecraft.client.renderer.ShaderDefines.builder()
+                    .define("CE_VERTEX_COLOR_LOCATION",location).build());
+        }
+        *///?}
     }
     static void setOverlay(RenderPass pass,RenderPipeline original) {
         if(params==null || depth==null) {pass.setPipeline(overlayPipeline(original));return;}

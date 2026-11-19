@@ -53,15 +53,17 @@ public final class RtVideoOptions {
         return new Section("caustica.enhanced.section." + name, List.of(rows));
     }
 
-    public static final List<String> PAGES = dev.comfyfluffy.caustica.CausticaBuild.RELEASE
-            ? List.of("color", "clouds", "material", "lighting", "world", "rt", "fg")
-            : List.of("color", "clouds", "material", "lighting", "world", "rt", "fg", "advanced");
+    // The advanced page only holds diagnostics (debug views, frame stats); shown in release too so
+    // players can send debug-view screenshots.
+    public static final List<String> PAGES = List.of("color", "clouds", "material", "lighting", "world", "rt", "fg", "advanced");
 
     public static List<Section> sections(String category) {
         return switch (category) {
             case "color" -> List.of(
                 section("tone",
                     row(itrpLook(), CausticaConfig.Rt.Look.ITRP),
+                    row(itrpTone(), CausticaConfig.Rt.Look.ITRP_TONE),
+                    row(scalar("vignette", CausticaConfig.Rt.Look.VIGNETTE, 0f, 1.5f), CausticaConfig.Rt.Look.VIGNETTE),
                     row(bool("caustica.options.rt.aces2", CausticaConfig.Rt.Look.ACES2), CausticaConfig.Rt.Look.ACES2),
                     row(scalar("brightness", CausticaConfig.Rt.Look.BRIGHTNESS, .25f, 2f), CausticaConfig.Rt.Look.BRIGHTNESS),
                     row(scalar("nightBrightness", CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS, .1f, 2f), CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS),
@@ -101,18 +103,45 @@ public final class RtVideoOptions {
                     row(scalar("cloudHeight", CausticaConfig.Rt.Clouds.HEIGHT, 500f, 1500f), CausticaConfig.Rt.Clouds.HEIGHT),
                     row(scalar("cloudBrightness", CausticaConfig.Rt.Clouds.BRIGHTNESS, 0.25f, 2f), CausticaConfig.Rt.Clouds.BRIGHTNESS),
                     row(scalar("cloudBottom", CausticaConfig.Rt.Clouds.BOTTOM, 0.25f, 2f), CausticaConfig.Rt.Clouds.BOTTOM),
-                    row(scalar("cloudSunlight", CausticaConfig.Rt.Clouds.SUNLIGHT, 0f, 2f), CausticaConfig.Rt.Clouds.SUNLIGHT),
+                    row(scalar("cloudSunlight", CausticaConfig.Rt.Clouds.SUNLIGHT, 0f, 5f), CausticaConfig.Rt.Clouds.SUNLIGHT),
                     row(scalar("cloudSpeed", CausticaConfig.Rt.Clouds.SPEED, 0f, 3f), CausticaConfig.Rt.Clouds.SPEED),
                     row(scalar("cloudEdge", CausticaConfig.Rt.Clouds.EDGE, 0f, 2f), CausticaConfig.Rt.Clouds.EDGE),
                     row(scalar("cloudCirrus", CausticaConfig.Rt.Clouds.CIRRUS, 0f, 2f), CausticaConfig.Rt.Clouds.CIRRUS),
                     row(scalar("cloudRain", CausticaConfig.Rt.Clouds.RAIN, 0f, 1f), CausticaConfig.Rt.Clouds.RAIN),
                     row(toggle("caustica.enhanced.cloudShadow", CausticaConfig.Rt.Look.CLOUD_SHADOW), CausticaConfig.Rt.Look.CLOUD_SHADOW)),
+                section("volumetricClouds",
+                    row(scalar("volAltitude", CausticaConfig.Rt.Clouds.VOL_ALTITUDE, 100f, 3000f), CausticaConfig.Rt.Clouds.VOL_ALTITUDE),
+                    row(scalar("volThickness", CausticaConfig.Rt.Clouds.VOL_THICKNESS, 100f, 3000f), CausticaConfig.Rt.Clouds.VOL_THICKNESS),
+                    row(scalar("volCoverage", CausticaConfig.Rt.Clouds.VOL_COVERAGE, .05f, .98f), CausticaConfig.Rt.Clouds.VOL_COVERAGE),
+                    row(scalar("volRainCoverage", CausticaConfig.Rt.Clouds.VOL_RAIN_COVERAGE, .05f, .98f), CausticaConfig.Rt.Clouds.VOL_RAIN_COVERAGE),
+                    row(scalar("volDensity", CausticaConfig.Rt.Clouds.VOL_DENSITY, .01f, 3f), CausticaConfig.Rt.Clouds.VOL_DENSITY),
+                    row(scalar("volScale", CausticaConfig.Rt.Clouds.VOL_SCALE, .1f, 3f), CausticaConfig.Rt.Clouds.VOL_SCALE),
+                    row(scalar("volSunlight", CausticaConfig.Rt.Clouds.VOL_SUNLIGHT, 0f, 8f), CausticaConfig.Rt.Clouds.VOL_SUNLIGHT),
+                    row(scalar("volRainSunlight", CausticaConfig.Rt.Clouds.VOL_RAIN_SUNLIGHT, 0f, 8f), CausticaConfig.Rt.Clouds.VOL_RAIN_SUNLIGHT),
+                    row(scalar("volRainDensity", CausticaConfig.Rt.Clouds.VOL_RAIN_DENSITY, 0f, 4f), CausticaConfig.Rt.Clouds.VOL_RAIN_DENSITY),
+                    row(scalar("volRainScale", CausticaConfig.Rt.Clouds.VOL_RAIN_SCALE, 0f, 4f), CausticaConfig.Rt.Clouds.VOL_RAIN_SCALE),
+                    row(scalar("volSkylight", CausticaConfig.Rt.Clouds.VOL_SKYLIGHT, 0f, 4f), CausticaConfig.Rt.Clouds.VOL_SKYLIGHT),
+                    row(milli("volBaseNoise", CausticaConfig.Rt.Clouds.VOL_BASE_NOISE, .0001f, .005f), CausticaConfig.Rt.Clouds.VOL_BASE_NOISE),
+                    row(milli("volDetailNoise", CausticaConfig.Rt.Clouds.VOL_DETAIL_NOISE, .001f, .05f), CausticaConfig.Rt.Clouds.VOL_DETAIL_NOISE),
+                    row(scalar("volDetailStrength", CausticaConfig.Rt.Clouds.VOL_DETAIL_STRENGTH, 0f, 3f), CausticaConfig.Rt.Clouds.VOL_DETAIL_STRENGTH),
+                    row(scalar("volCoverageOffset", CausticaConfig.Rt.Clouds.VOL_COVERAGE_OFFSET, 0f, 1f), CausticaConfig.Rt.Clouds.VOL_COVERAGE_OFFSET),
+                    row(scalar("volQuality", CausticaConfig.Rt.Clouds.VOL_QUALITY, .4f, 3f), CausticaConfig.Rt.Clouds.VOL_QUALITY)),
                 section("fog",
                     row(scalar("fogDensity", CausticaConfig.Rt.Visuals.FOG, 0f, 4f), CausticaConfig.Rt.Visuals.FOG),
                     row(scalar("fogHeight", CausticaConfig.Rt.Visuals.FOG_HEIGHT, 16f, 256f), CausticaConfig.Rt.Visuals.FOG_HEIGHT),
                     row(scalar("fogRain", CausticaConfig.Rt.Visuals.FOG_RAIN, 0f, 4f), CausticaConfig.Rt.Visuals.FOG_RAIN),
                     row(scalar("fogHaze", CausticaConfig.Rt.Visuals.FOG_HAZE, 0f, 2f), CausticaConfig.Rt.Visuals.FOG_HAZE),
-                    row(scalar("fogSun", CausticaConfig.Rt.Visuals.FOG_SUN, 0f, 8f), CausticaConfig.Rt.Visuals.FOG_SUN)));
+                    row(scalar("fogSun", CausticaConfig.Rt.Visuals.FOG_SUN, 0f, 8f), CausticaConfig.Rt.Visuals.FOG_SUN),
+                    row(scalar("fogBase", CausticaConfig.Rt.Visuals.FOG_BASE, 0f, 1f), CausticaConfig.Rt.Visuals.FOG_BASE),
+                    row(scalar("fogLayer", CausticaConfig.Rt.Visuals.FOG_LAYER, 0f, 4f), CausticaConfig.Rt.Visuals.FOG_LAYER),
+                    row(scalar("fogLayerBottom", CausticaConfig.Rt.Visuals.FOG_LAYER_BOTTOM, -64f, 320f), CausticaConfig.Rt.Visuals.FOG_LAYER_BOTTOM),
+                    row(scalar("fogLayerTop", CausticaConfig.Rt.Visuals.FOG_LAYER_TOP, -64f, 320f), CausticaConfig.Rt.Visuals.FOG_LAYER_TOP),
+                    row(scalar("fogLayerFalloff", CausticaConfig.Rt.Visuals.FOG_LAYER_FALLOFF, 1f, 100f), CausticaConfig.Rt.Visuals.FOG_LAYER_FALLOFF),
+                    row(scalar("fogLayerCoverage", CausticaConfig.Rt.Visuals.FOG_LAYER_COVERAGE, 0f, 1f), CausticaConfig.Rt.Visuals.FOG_LAYER_COVERAGE),
+                    row(scalar("fogLayerLight", CausticaConfig.Rt.Visuals.FOG_LAYER_LIGHT, 0f, 10f), CausticaConfig.Rt.Visuals.FOG_LAYER_LIGHT),
+                    row(scalar("fogLayerSun", CausticaConfig.Rt.Visuals.FOG_LAYER_SUN, 0f, 5f), CausticaConfig.Rt.Visuals.FOG_LAYER_SUN),
+                    row(scalar("fogLayerAbsorb", CausticaConfig.Rt.Visuals.FOG_LAYER_ABSORB, .1f, 10f), CausticaConfig.Rt.Visuals.FOG_LAYER_ABSORB),
+                    row(scalar("fogLayerVeil", CausticaConfig.Rt.Visuals.FOG_LAYER_VEIL, 0f, 1f), CausticaConfig.Rt.Visuals.FOG_LAYER_VEIL)));
             case "material" -> List.of(
                 section("parallax",
                     row(parallax(), CausticaConfig.Rt.Material.PARALLAX),
@@ -129,7 +158,21 @@ public final class RtVideoOptions {
                     row(scalar("snowReflectance", CausticaConfig.Rt.Look.SNOW_REFLECTANCE, .1f, 1f), CausticaConfig.Rt.Look.SNOW_REFLECTANCE)),
                 section("water",
                     row(waterWaves(), CausticaConfig.Rt.Composite.WATER_WAVES),
-                    row(scalar("waterScatter", CausticaConfig.Rt.Visuals.WATER_SCATTER, 0f, 4f), CausticaConfig.Rt.Visuals.WATER_SCATTER)),
+                    row(toggle("caustica.enhanced.waving", CausticaConfig.Rt.Composite.WAVING), CausticaConfig.Rt.Composite.WAVING),
+                    row(scalar("wavingPlants", CausticaConfig.Rt.Visuals.WAVING_PLANTS, 0f, 3f), CausticaConfig.Rt.Visuals.WAVING_PLANTS),
+                    row(scalar("wavingRange", CausticaConfig.Rt.Visuals.WAVING_RANGE, 16f, 128f), CausticaConfig.Rt.Visuals.WAVING_RANGE),
+                    row(toggle("caustica.enhanced.fwaAnimations", CausticaConfig.Rt.Composite.FWA_ANIMATIONS), CausticaConfig.Rt.Composite.FWA_ANIMATIONS),
+                    row(scalar("waterScatter", CausticaConfig.Rt.Visuals.WATER_SCATTER, 0f, 4f), CausticaConfig.Rt.Visuals.WATER_SCATTER),
+                    row(scalar("waveStrength", CausticaConfig.Rt.Visuals.WAVE_STRENGTH, 0f, 4f), CausticaConfig.Rt.Visuals.WAVE_STRENGTH),
+                    row(scalar("waveSize", CausticaConfig.Rt.Visuals.WAVE_SIZE, 0.25f, 4f), CausticaConfig.Rt.Visuals.WAVE_SIZE),
+                    row(scalar("waveSpeed", CausticaConfig.Rt.Visuals.WAVE_SPEED, 0f, 4f), CausticaConfig.Rt.Visuals.WAVE_SPEED),
+                    row(scalar("waterAbsorbR", CausticaConfig.Rt.Visuals.WATER_ABSORB_R, 0f, 1f), CausticaConfig.Rt.Visuals.WATER_ABSORB_R),
+                    row(scalar("waterAbsorbG", CausticaConfig.Rt.Visuals.WATER_ABSORB_G, 0f, 1f), CausticaConfig.Rt.Visuals.WATER_ABSORB_G),
+                    row(scalar("waterAbsorbB", CausticaConfig.Rt.Visuals.WATER_ABSORB_B, 0f, 1f), CausticaConfig.Rt.Visuals.WATER_ABSORB_B),
+                    row(scalar("waterFillR", CausticaConfig.Rt.Visuals.WATER_FILL_R, 0f, 1f), CausticaConfig.Rt.Visuals.WATER_FILL_R),
+                    row(scalar("waterFillG", CausticaConfig.Rt.Visuals.WATER_FILL_G, 0f, 1f), CausticaConfig.Rt.Visuals.WATER_FILL_G),
+                    row(scalar("waterFillB", CausticaConfig.Rt.Visuals.WATER_FILL_B, 0f, 1f), CausticaConfig.Rt.Visuals.WATER_FILL_B),
+                    row(scalar("waterFillDensity", CausticaConfig.Rt.Visuals.WATER_FILL_DENSITY, 0f, 10f), CausticaConfig.Rt.Visuals.WATER_FILL_DENSITY)),
                 section("weather",
                     row(scalar("wetness", CausticaConfig.Rt.Visuals.WETNESS, 0f, 1f), CausticaConfig.Rt.Visuals.WETNESS),
                     row(scalar("puddle", CausticaConfig.Rt.Visuals.PUDDLE, 0f, 1f), CausticaConfig.Rt.Visuals.PUDDLE),
@@ -144,6 +187,8 @@ public final class RtVideoOptions {
                     row(scalar("torchBrightness", CausticaConfig.Rt.Visuals.TORCH_BRIGHTNESS, 0f, 8f), CausticaConfig.Rt.Visuals.TORCH_BRIGHTNESS),
                     row(scalar("torchKelvin", CausticaConfig.Rt.Look.TORCH_KELVIN, 1000f, 12000f), CausticaConfig.Rt.Look.TORCH_KELVIN),
                     row(toggle("caustica.enhanced.itrpLightColors", CausticaConfig.Rt.Visuals.ITRP_LIGHT_COLORS), CausticaConfig.Rt.Visuals.ITRP_LIGHT_COLORS),
+                    row(scalar("torchG", CausticaConfig.Rt.Look.TORCH_G, 0f, 1f), CausticaConfig.Rt.Look.TORCH_G),
+                    row(scalar("torchB", CausticaConfig.Rt.Look.TORCH_B, 0f, 1f), CausticaConfig.Rt.Look.TORCH_B),
                     row(toggle("caustica.enhanced.entityEmission", CausticaConfig.Rt.Visuals.VANILLA_ENTITY_EMISSION), CausticaConfig.Rt.Visuals.VANILLA_ENTITY_EMISSION),
                     row(lightSampling(), CausticaConfig.Rt.Lights.MODE)),
                 section("heldLights",
@@ -157,6 +202,7 @@ public final class RtVideoOptions {
                     row(scalar("portal", CausticaConfig.Rt.Visuals.PORTAL, 0f, 4f), CausticaConfig.Rt.Visuals.PORTAL),
                     row(scalar("endLight", CausticaConfig.Rt.Visuals.END_LIGHT, 0f, 8f), CausticaConfig.Rt.Visuals.END_LIGHT),
                     row(scalar("endStars", CausticaConfig.Rt.Visuals.END_STARS, 0f, 10f), CausticaConfig.Rt.Visuals.END_STARS),
+                    row(toggle("caustica.enhanced.endNebula", CausticaConfig.Rt.Visuals.END_NEBULA), CausticaConfig.Rt.Visuals.END_NEBULA),
                     row(scalar("endSky", CausticaConfig.Rt.Visuals.END_SKY, 0f, 4f), CausticaConfig.Rt.Visuals.END_SKY),
                     row(scalar("endCycle", CausticaConfig.Rt.Visuals.END_CYCLE, 1f, 60f), CausticaConfig.Rt.Visuals.END_CYCLE),
                     row(scalar("endHalo", CausticaConfig.Rt.Visuals.END_HALO, 0f, 4f), CausticaConfig.Rt.Visuals.END_HALO)));
@@ -184,6 +230,7 @@ public final class RtVideoOptions {
                 section("dlss",
                     row(dlssEnabled(), CausticaConfig.Rt.DlssRr.ENABLED),
                     row(dlssQuality(), CausticaConfig.Rt.DlssRr.QUALITY),
+                    row(dlssFreeScale(), CausticaConfig.Rt.DlssRr.FREE_SCALE),
                     row(rrPreset(), CausticaConfig.Rt.DlssRr.PRESET),
                     row(srMode(), CausticaConfig.Rt.DlssRr.SR_ONLY),
                     row(srPreset(), CausticaConfig.Rt.DlssRr.SR_PRESET)),
@@ -234,6 +281,15 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(low,high),Math.clamp(Math.round(setting.value()*100),low,high),v->setting.set(v/100f));
     }
 
+    /** Slider for small noise frequencies, shown with four decimals (1/10000 steps). */
+    private static OptionInstance<Integer> milli(String name,FloatSetting setting,float min,float max) {
+        int low=Math.round(min*10000),high=Math.round(max*10000);
+        return new OptionInstance<>("caustica.enhanced.param."+name,
+            tip("caustica.enhanced.param."+name+".tooltip"),
+            (caption,value)->Options.genericValueLabel(caption,Component.literal(String.format(Locale.ROOT,"%.4f",value/10000f))),
+            new OptionInstance.IntRange(low,high),Math.clamp(Math.round(setting.value()*10000),low,high),v->setting.set(v/10000f));
+    }
+
     /** EV slider in tenths of a stop. */
     private static OptionInstance<Integer> ev(String key, FloatSetting setting, int lowTenths, int highTenths) {
         return new OptionInstance<>(key, tip(key + ".tooltip"),
@@ -251,7 +307,94 @@ public final class RtVideoOptions {
             v -> setting.set(v / (float) scale));
     }
 
+    /** One value of the "ITRP Select" preset (the user's tuned ITRP Alpha 0.8.x profile, mapped onto Caustica). */
+    private record PresetValue(RuntimeSetting<?> setting, Object value) {}
+
+    // ITRP Alpha option -> Caustica setting. Ratios are taken against the ITRP defaults; options with no
+    // counterpart (volumetric cloud thickness, waving plants, voxel lanterns, SST parallax) are left out.
+    private static final List<PresetValue> ITRP_SELECT = List.of(
+        new PresetValue(CausticaConfig.Rt.Look.ITRP_TONE, 1),                 // TONEMAP_OPERATOR=GT
+        new PresetValue(CausticaConfig.Rt.Look.VIGNETTE, .7f),                // VIGNETTE_FALLOFF=0.7
+        new PresetValue(CausticaConfig.Rt.Look.BLOOM, 1f),                    // sun glow: ITRP draws its own sun halo, Caustica needs full bloom
+        new PresetValue(CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS, .36f),       // NIGHT_BRIGHTNESS 0.0005 -> 0.0003
+        new PresetValue(CausticaConfig.Rt.Look.TORCH_G, 1f),                  // COLOR_TORCH_G=1.0
+        new PresetValue(CausticaConfig.Rt.Look.TORCH_B, .62f),                // COLOR_TORCH_B=0.62
+        new PresetValue(CausticaConfig.Rt.Look.TORCH_KELVIN, 4300f),          // same torch colour for held lights
+        new PresetValue(CausticaConfig.Rt.Exposure.KEY, .1938f),              // AE_CURVE 0.65 -> 0.7 (key is the curve in ITRP look)
+        new PresetValue(CausticaConfig.Rt.Exposure.ADAPT_UP, .171f),          // EXPOSURE_TIME 1.0 -> 0.7: adapts 1/0.7 faster
+        new PresetValue(CausticaConfig.Rt.Exposure.ADAPT_DOWN, .5f),
+        new PresetValue(CausticaConfig.Rt.Clouds.MODE, 3),                    // VOLUMETRIC_CLOUDS
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_ALTITUDE, 850f),         // CLOUD_CLEAR_ALTITUDE=850
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_THICKNESS, 1700f),       // CLOUD_CLEAR_THICKNESS=1700
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_COVERAGE, .34f),         // CLOUD_CLEAR_COVERY=0.34
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_RAIN_COVERAGE, .7f),     // CLOUD_RAIN_COVERY=0.7
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_DENSITY, .1f),           // CLOUD_CLEAR_DENSITY=0.1
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_SCALE, .4f),             // CLOUD_CLEAR_SCALE=0.4
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_SUNLIGHT, 5f),           // CLOUD_CLEAR_SUNLIGHTING=5
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_RAIN_SUNLIGHT, .5f),     // CLOUD_RAIN_SUNLIGHTING=0.5
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_RAIN_DENSITY, 1f),       // CLOUD_RAIN_DENSITY default 1.0 (10x clear)
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_RAIN_SCALE, .6f),        // CLOUD_RAIN_SCALE=0.6
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_BASE_NOISE, .0015f),     // CLOUD_BASE_NOISE_SCALE=0.0015
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_DETAIL_NOISE, .018f),    // CLOUD_DETAILED_NOISE_SCALE=0.018
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_DETAIL_STRENGTH, 2f),    // CLOUD_DETAILED_NOISE_STRENGTH=2
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_COVERAGE_OFFSET, .16f),  // CLOUD_COVERAGE_NOISE_OFFSET=0.16
+        new PresetValue(CausticaConfig.Rt.Clouds.VOL_QUALITY, 2f),            // CLOUD_QUALITY=2
+        // ITRP VFOG with NOISE_TYPE=1 (patchy) and DENSITY_BASE=0: no uniform haze, only fog patches in a band
+        // from Y30 up to Y100, densest at the top - the sea of clouds. VFOG_FOG_DENSITY is its ambient light.
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG, 1f),
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_BASE, 0f),             // VFOG_DENSITY_BASE=0: no base fog, land haze only
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER, 1f),            // VFOG_DENSITY 0.01
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER_BOTTOM, 30f),    // VFOG_HEIGHT_2=30
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER_TOP, 72f),       // lowered on request (ITRP VFOG_HEIGHT=100)
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER_FALLOFF, 16f),   // thinner band (ITRP VFOG_FALLOFF 40)
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER_COVERAGE, .6f),  // VFOG_NOISE_COVERAGE 0.6
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER_LIGHT, 3f),      // VFOG_FOG_DENSITY=3 (ambient light)
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER_SUN, .9f),       // VFOG_SUNLIGHT_DENSITY=0.9
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER_ABSORB, .1f),    // VFOG_SUNLIGHT_ABSORPTION=0.1
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_LAYER_VEIL, 0f),       // VFOG_DENSITY_BASE=0: no even fog in ITRP; far haze comes from the matched noise mean that blends the background
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_HEIGHT, 100f),          // VFOG_HEIGHT=100
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_RAIN, 2f),              // VFOG_RAIN_DENSITY_MUL 1.5 -> 3
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_HAZE, 1f),              // keep sky in-scatter: 0 left only absorption and turned far LODs black
+        new PresetValue(CausticaConfig.Rt.Visuals.FOG_SUN, 1.5f),             // VFOG_SUNLIGHT_ABSORPTION 0.1
+        new PresetValue(CausticaConfig.Rt.Visuals.NETHER_BRIGHTNESS, .3f),    // NETHER_BRIGHTNESS=0.3
+        // HELDLIGHT_BRIGHTNESS=0.1 is not carried over: ITRP's held light is far stronger than Caustica's, and a
+        // literal 0.1 left torches in hand nearly dark indoors. The held light stays at Caustica's 1.0.
+        new PresetValue(CausticaConfig.Rt.Visuals.EMISSION, 8f),              // SPHERELIGHT_BRIGHTNESS=10
+        // Sun size is NOT taken from ITRP (its disc is drawn differently); keep Caustica's default.
+        new PresetValue(CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS, CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.defaultValue()),
+        new PresetValue(CausticaConfig.Rt.Visuals.END_NEBULA, false),           // the End without the nebula
+        new PresetValue(CausticaConfig.Rt.Material.PARALLAX, 2));             // PARALLAX_MODE=2
+
+    /** Water of the ITRP-PTGI preset: iterationRP-0.8.31-ptgi defaults (the setting defaults are ITRP Alpha's). */
+    private static final List<PresetValue> PTGI_WATER = List.of(
+        new PresetValue(CausticaConfig.Rt.Visuals.WATER_ABSORB_R, .25f),       // WATER_ATTENUATION 0.25/0.04/0.01
+        new PresetValue(CausticaConfig.Rt.Visuals.WATER_ABSORB_G, .04f),
+        new PresetValue(CausticaConfig.Rt.Visuals.WATER_ABSORB_B, .01f),
+        new PresetValue(CausticaConfig.Rt.Visuals.WATER_FILL_R, .4f),          // WATER_SCATTERING 0.4/0.41/0.5
+        new PresetValue(CausticaConfig.Rt.Visuals.WATER_FILL_G, .41f),
+        new PresetValue(CausticaConfig.Rt.Visuals.WATER_FILL_B, .5f),
+        new PresetValue(CausticaConfig.Rt.Visuals.WATER_FILL_DENSITY, 0f));    // WATER_SCATTERING_DENSITY=0: clear water, light comes from the sun shafts
+
+    private static boolean same(Object a, Object b) {
+        if (a instanceof Float x && b instanceof Float y) return Math.abs(x - y) <= 1e-4f * Math.max(1f, Math.abs(y));
+        return a != null && a.equals(b);
+    }
+
+    private static boolean presetScope(RuntimeSetting<?> s) {
+        return s.tomlPath().startsWith("look.") || s.tomlPath().startsWith("clouds.") || s.tomlPath().startsWith("exposure.");
+    }
+
+    private static boolean matchesItrpSelect() {
+        if (!CausticaConfig.Rt.Look.ITRP.value()) return false;
+        java.util.Set<RuntimeSetting<?>> touched = new java.util.HashSet<>();
+        for (PresetValue p : ITRP_SELECT) { touched.add(p.setting()); if (!same(p.setting().get(), p.value())) return false; }
+        return CausticaConfig.settings().stream().filter(s -> presetScope(s) && !touched.contains(s)
+                && !s.tomlPath().equals("look.itrp") && !s.tomlPath().equals("clouds.mode"))
+            .allMatch(s -> same(s.get(), s.defaultValue()));
+    }
+
     public static String visualPresetName() {
+        if (matchesItrpSelect()) return "itrp_select";
         boolean itrp=CausticaConfig.Rt.Look.ITRP.value();
         int cloud=CausticaConfig.Rt.Clouds.MODE.value();
         boolean defaults=CausticaConfig.settings().stream().filter(s->(s.tomlPath().startsWith("look.")&&!s.tomlPath().equals("look.itrp")) || (s.tomlPath().startsWith("clouds.")&&!s.tomlPath().equals("clouds.mode"))).allMatch(s->s.get().equals(s.defaultValue()));
@@ -261,15 +404,22 @@ public final class RtVideoOptions {
 
     public static void applyVisualPreset(boolean itrp) { applyVisualPreset(itrp?"itrp":"original"); }
 
-    /** "itrp" or "original". */
+    /** "itrp", "itrp_select" or "original". */
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public static void applyVisualPreset(String preset) {
         boolean itrp=!preset.equals("original");
+        // Settings outside look/clouds/exposure that ITRP Select changes go back to default with every preset,
+        // so switching away from it really leaves its look behind.
+        for (PresetValue p : ITRP_SELECT) p.setting().set(null);
+        for (PresetValue p : PTGI_WATER) p.setting().set(null);
         // Look, cloud and exposure tuning back to defaults; a visual preset never changes the user's
         // bounce/SPP/DLSS/HDR output or FG choices.
         for (RuntimeSetting<?> s : CausticaConfig.settings())
             if (s.tomlPath().startsWith("look.") || s.tomlPath().startsWith("clouds.") || s.tomlPath().startsWith("exposure.")) s.set(null);
         CausticaConfig.Rt.Look.ITRP.set(itrp);
         CausticaConfig.Rt.Clouds.MODE.set(itrp?2:0);
+        if (preset.equals("itrp_select")) for (PresetValue p : ITRP_SELECT) ((RuntimeSetting) p.setting()).set(p.value());
+        if (preset.equals("itrp")) for (PresetValue p : PTGI_WATER) ((RuntimeSetting) p.setting()).set(p.value());
         CausticaConfig.save();
     }
 
@@ -295,8 +445,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>("caustica.options.rt.clouds", OptionInstance.cachedConstantTooltip(
             Component.translatable("caustica.options.rt.clouds.tooltip")),
             (caption, value) -> Component.translatable("caustica.options.rt.clouds." + value),
-            new OptionInstance.Enum<>(List.of(0, 1, 2), Codec.INT),
-            Math.clamp(CausticaConfig.Rt.Clouds.MODE.value(), 0, 2), CausticaConfig.Rt.Clouds.MODE::set);
+            new OptionInstance.Enum<>(List.of(0, 1, 2, 3), Codec.INT),
+            Math.clamp(CausticaConfig.Rt.Clouds.MODE.value(), 0, 3), CausticaConfig.Rt.Clouds.MODE::set);
     }
     private static OptionInstance<Integer> frameGeneration() {
         var fg = dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE;
@@ -376,6 +526,14 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(-50, 50),
             Math.clamp(Math.round(setting.value() * 10.0f), -50, 50),
             tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<Integer> itrpTone() {
+        return new OptionInstance<>("caustica.enhanced.itrpTone", OptionInstance.cachedConstantTooltip(
+            Component.translatable("caustica.enhanced.itrpTone.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, Component.translatable("caustica.enhanced.itrpTone." + value)),
+            new OptionInstance.Enum<>(List.of(0, 1), Codec.INT),
+            Math.clamp(CausticaConfig.Rt.Look.ITRP_TONE.value(), 0, 1), CausticaConfig.Rt.Look.ITRP_TONE::set);
     }
 
     private static OptionInstance<Integer> sunShape() {
@@ -506,6 +664,21 @@ public final class RtVideoOptions {
             position -> setting.set(DLSS_QUALITY_ORDER.get(position)));
     }
 
+    /** Slider 19 = off (quality mode applies); 20..100 = free render resolution in percent. */
+    private static OptionInstance<Integer> dlssFreeScale() {
+        IntSetting setting = CausticaConfig.Rt.DlssRr.FREE_SCALE;
+        int initial = setting.value() <= 0 ? 19 : Math.max(20, Math.min(100, setting.value()));
+        return new OptionInstance<>(
+            "caustica.options.rt.dlssFreeScale",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dlssFreeScale.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, value <= 19
+                    ? Component.translatable("caustica.options.rt.dlssFreeScale.off")
+                    : Component.literal(value + "%")),
+            new OptionInstance.IntRange(19, 100),
+            initial,
+            value -> setting.set(value <= 19 ? 0 : value));
+    }
+
     private static OptionInstance<Boolean> hdrEnabled() {
         return bool("caustica.options.rt.hdr", CausticaConfig.Rt.Hdr.ENABLED);
     }
@@ -544,8 +717,8 @@ public final class RtVideoOptions {
             // CycleButton (used for Enum values) already prepends "caption: " itself (DisplayState.
             // NAME_AND_VALUE), so this must return only the value's text, not caption + value again.
             (caption, value) -> Component.translatable("caustica.options.rt.debugView." + value),
-            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12), Codec.INT),
-            Math.clamp(setting.value(), 0, 12),
+            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20), Codec.INT),
+            Math.clamp(setting.value(), 0, 20),
             setting::set);
     }
 

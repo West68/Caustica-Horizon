@@ -235,6 +235,10 @@ final class RtNameTagFeature implements RtOverlayFeature {
      * quad into 2 triangles (no index buffer) as the 4th vertex of each one commits.
      */
     private final class GlyphCapture implements Font.GlyphVisitor, VertexConsumer {
+        //? if >=26.3 {
+        /*// 26.3 added a third UV channel (item glint); ray-traced captures ignore it.
+        @Override public VertexConsumer setUv3(float u, float v) { return this; }
+        *///?}
         Matrix4f pose;
         PageBuilder current;
         private final float[] qx = new float[4], qy = new float[4], qz = new float[4], qu = new float[4], qv = new float[4];

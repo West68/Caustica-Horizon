@@ -57,6 +57,7 @@ import org.spongepowered.asm.mixin.injection.ModifyVariable;
  */
 @Mixin(VulkanGpuSurface.class)
 public abstract class VulkanGpuSurfaceMixin {
+	//? if <26.3 {
 	@Redirect(method = "<init>(Lcom/mojang/blaze3d/vulkan/VulkanDevice;J)V",
 			at = @At(value = "INVOKE",
 				target = "Lorg/lwjgl/glfw/GLFWVulkan;glfwCreateWindowSurface(Lorg/lwjgl/vulkan/VkInstance;JLorg/lwjgl/vulkan/VkAllocationCallbacks;Ljava/nio/LongBuffer;)I"))
@@ -64,6 +65,16 @@ public abstract class VulkanGpuSurfaceMixin {
 			VkAllocationCallbacks allocator, LongBuffer surfaceOut) {
 		return StreamlineRuntime.vkCreateWin32Surface(instance, window, allocator, surfaceOut);
 	}
+	//?} else {
+	/*// 26.3 creates the surface through SDL (window handle first, boolean result).
+	@Redirect(method = "<init>(Lcom/mojang/blaze3d/vulkan/VulkanDevice;J)V",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/sdl/SDLVulkan;SDL_Vulkan_CreateSurface(JLorg/lwjgl/vulkan/VkInstance;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Ljava/nio/LongBuffer;)Z"))
+	private boolean caustica$createSurfaceThroughStreamline(long window, org.lwjgl.vulkan.VkInstance instance,
+			VkAllocationCallbacks allocator, LongBuffer surfaceOut) {
+		return StreamlineRuntime.vkCreateWin32Surface(instance, window, allocator, surfaceOut) == org.lwjgl.vulkan.VK10.VK_SUCCESS;
+	}
+	*///?}
 
 	@Redirect(method = "close()V",
 			at = @At(value = "INVOKE",

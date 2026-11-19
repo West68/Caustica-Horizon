@@ -1,3 +1,4 @@
+//? if <26.3 {
 package dev.comfyfluffy.caustica.mixin;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
@@ -17,3 +18,5 @@ public abstract class LitematicaBlockEntityTargetMixin {
         if (target != original) cir.setReturnValue(target);
     }
 }
+//?}
+// 26.3 removed OutputTarget; LitematicaCompat opens its own pass on the overlay there.

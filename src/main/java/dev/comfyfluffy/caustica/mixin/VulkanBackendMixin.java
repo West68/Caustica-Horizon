@@ -75,12 +75,20 @@ public abstract class VulkanBackendMixin {
 	}
 
 	/** If Vulkan creation fails and Minecraft falls back to OpenGL, release the partially initialized runtime. */
+	//? if <26.3 {
 	@WrapMethod(method = "createDevice(JLcom/mojang/blaze3d/shaders/ShaderSource;Lcom/mojang/blaze3d/shaders/GpuDebugOptions;Ljava/lang/Runnable;)Lcom/mojang/blaze3d/systems/GpuDevice;")
 	private GpuDevice caustica$createDeviceWithStreamlineCleanup(long window, ShaderSource defaultShaderSource,
 			GpuDebugOptions debugOptions, Runnable criticalShaderLoader, Operation<GpuDevice> original)
 			throws BackendCreationException {
 		try {
 			return original.call(window, defaultShaderSource, debugOptions, criticalShaderLoader);
+	//?} else {
+	/*@WrapMethod(method = "createDevice(Lcom/mojang/blaze3d/shaders/GpuDebugOptions;)Lcom/mojang/blaze3d/systems/GpuDevice;")
+	private GpuDevice caustica$createDeviceWithStreamlineCleanup(GpuDebugOptions debugOptions, Operation<GpuDevice> original)
+			throws BackendCreationException {
+		try {
+			return original.call(debugOptions);
+	*///?}
 		} catch (Throwable throwable) {
 			StreamlineRuntime.shutdown();
 			if (throwable instanceof BackendCreationException backendCreationException) {
@@ -106,7 +114,11 @@ public abstract class VulkanBackendMixin {
 	}
 
 	@org.spongepowered.asm.mixin.injection.Redirect(
+			//? if <26.3 {
 			method = "createDevice(Ljava/util/Collection;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;Ljava/util/Set;)Lorg/lwjgl/vulkan/VkDevice;",
+			//?} else {
+			/*method = "createDevice(Lcom/mojang/blaze3d/vulkan/init/FeatureSet;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;)Lorg/lwjgl/vulkan/VkDevice;",
+			*///?}
 			at = @At(value = "INVOKE",
 				target = "Lorg/lwjgl/vulkan/VK12;vkCreateDevice(Lorg/lwjgl/vulkan/VkPhysicalDevice;Lorg/lwjgl/vulkan/VkDeviceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"))
 	private static int caustica$createDeviceThroughStreamline(VkPhysicalDevice physicalDevice,
@@ -137,6 +149,7 @@ public abstract class VulkanBackendMixin {
 	private static final Set<String> loggedMissingSdkFeatures = new HashSet<>();
 
 	/** NVIDIA advertises AMD markers too, but its native diagnostic checkpoints contain better fault context. */
+	//? if <26.3 {
 	@WrapOperation(
 			method = "createDevice(JLcom/mojang/blaze3d/shaders/ShaderSource;Lcom/mojang/blaze3d/shaders/GpuDebugOptions;Ljava/lang/Runnable;)Lcom/mojang/blaze3d/systems/GpuDevice;",
 			at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;hasDeviceExtension(Ljava/lang/String;)Z"))
@@ -181,6 +194,58 @@ public abstract class VulkanBackendMixin {
 		RtDeviceBringup.addFeatures(args, physicalDevice);
 		VulkanDiagnostics.logEnabledExtensions(augmented);
 	}
+	//?} else {
+	/*@WrapOperation(
+			method = "createDevice(Lcom/mojang/blaze3d/shaders/GpuDebugOptions;)Lcom/mojang/blaze3d/systems/GpuDevice;",
+			at = @At(value = "INVOKE", target = "Ljava/util/Set;contains(Ljava/lang/Object;)Z"))
+	private boolean caustica$preferNvidiaCheckpoints(Set<?> supported, Object featureSet, Operation<Boolean> original) {
+		if (featureSet == com.mojang.renderpearl.backend.vulkan.VulkanFeatureSets.AMD_BUFFER_MARKER_FEATURESET
+				&& supported.contains(com.mojang.renderpearl.backend.vulkan.VulkanFeatureSets.NV_DIAGNOSTIC_CHECKPOINT_FEATURESET)) {
+			return false;
+		}
+		return original.call(supported, featureSet);
+	}
+
+	// 26.3 passes one composite FeatureSet. The existing helpers still work on (extensions, device, features)
+	// argument slots, so run them on a scratch Args and fold the result back into a new FeatureSet.
+	private static final class FeatureArgs extends Args {
+		FeatureArgs(Object... values) { super(values); }
+		@Override @SuppressWarnings("unchecked") public <T> void set(int index, T value) { values[index] = value; }
+		@Override public void setAll(Object... newValues) { System.arraycopy(newValues, 0, values, 0, values.length); }
+	}
+
+	@ModifyArgs(
+			method = "createDevice(Lcom/mojang/blaze3d/shaders/GpuDebugOptions;)Lcom/mojang/blaze3d/systems/GpuDevice;",
+			at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vulkan/VulkanBackend;createDevice(Lcom/mojang/blaze3d/vulkan/init/FeatureSet;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;)Lorg/lwjgl/vulkan/VkDevice;"))
+	@SuppressWarnings("unchecked")
+	private void caustica$addDeviceExtensions(Args args) {
+		com.mojang.renderpearl.backend.vulkan.init.FeatureSet requested = args.get(0);
+		VulkanPhysicalDevice physicalDevice = args.get(1);
+		var augmented = new ArrayList<>(requested.extensions());
+		for (String extension : CAUSTICA_WANTED_EXTENSIONS) {
+			if(!StreamlineRuntime.initialized() && (extension.equals("VK_KHR_swapchain_mutable_format") || extension.equals("VK_KHR_image_format_list")))continue;
+			if (augmented.contains(extension)) continue;
+			if (physicalDevice.hasDeviceExtension(extension)) {
+				augmented.add(extension);
+				CausticaMod.LOGGER.info("Enabling device extension {} for the Caustica runtime", extension);
+			} else {
+				CausticaMod.LOGGER.warn("Device extension {} not supported by {} — upscaling will be unavailable",
+						extension, physicalDevice.deviceName());
+			}
+		}
+		VulkanDiagnostics.addDeviceFaultExtension(augmented, physicalDevice);
+		RtDeviceBringup.addExtensions(augmented, physicalDevice);
+		dev.comfyfluffy.caustica.rt.RtMemoryResidency.addExtensions(augmented, physicalDevice);
+
+		Args slots = new FeatureArgs(augmented, physicalDevice, new HashSet<>(requested.features()));
+		caustica$addCoreDeviceFeatures(slots, physicalDevice);
+		VulkanDiagnostics.addDeviceFaultFeature(slots);
+		RtDeviceBringup.addFeatures(slots, physicalDevice);
+		VulkanDiagnostics.logEnabledExtensions(augmented);
+		args.set(0, new com.mojang.renderpearl.backend.vulkan.init.FeatureSet(requested.name() + "+caustica",
+				new HashSet<>(augmented), new HashSet<>((Set<VulkanFeature>) slots.get(2))));
+	}
+	*///?}
 
 	@SuppressWarnings("unchecked")
 	private void caustica$addCoreDeviceFeatures(Args args, VulkanPhysicalDevice physicalDevice) {
@@ -219,21 +284,37 @@ public abstract class VulkanBackendMixin {
 	 * points loaded and log the RT/AS limits. {@code device} is the local assigned just
 	 * before {@code createVma} runs.
 	 */
+	//? if <26.3 {
 	@Inject(
 			method = "createDevice(JLcom/mojang/blaze3d/shaders/ShaderSource;Lcom/mojang/blaze3d/shaders/GpuDebugOptions;Ljava/lang/Runnable;)Lcom/mojang/blaze3d/systems/GpuDevice;",
 			at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vulkan/VulkanBackend;createVma(Lorg/lwjgl/vulkan/VkDevice;)J"))
 	private void caustica$probeRayTracing(long window, ShaderSource defaultShaderSource, GpuDebugOptions debugOptions,
 			Runnable criticalShaderLoader, CallbackInfoReturnable<GpuDevice> cir, @Local VkDevice device) {
+	//?} else {
+	/*@Inject(
+			method = "createDevice(Lcom/mojang/blaze3d/shaders/GpuDebugOptions;)Lcom/mojang/blaze3d/systems/GpuDevice;",
+			at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vulkan/VulkanBackend;createVma(Lorg/lwjgl/vulkan/VkDevice;)J"))
+	private void caustica$probeRayTracing(GpuDebugOptions debugOptions, CallbackInfoReturnable<GpuDevice> cir,
+			@Local VkDevice device) {
+	*///?}
 		VulkanDiagnostics.probe(device);
 		RtDeviceBringup.probe(device);
 	}
 
+	//? if <26.3 {
 	@Inject(
 			method = "createDevice(Ljava/util/Collection;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;Ljava/util/Set;)Lorg/lwjgl/vulkan/VkDevice;",
 			at = @At(value = "INVOKE", target = "Lorg/lwjgl/vulkan/VK12;vkCreateDevice(Lorg/lwjgl/vulkan/VkPhysicalDevice;Lorg/lwjgl/vulkan/VkDeviceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"))
 	private static void caustica$augmentDeviceCreateInfo(Collection<String> extensions,
 			VulkanPhysicalDevice physicalDevice, Set<VulkanFeature> features,
 			CallbackInfoReturnable<VkDevice> cir, @Local VkDeviceCreateInfo deviceCreateInfo) {
+	//?} else {
+	/*@Inject(
+			method = "createDevice(Lcom/mojang/blaze3d/vulkan/init/FeatureSet;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;)Lorg/lwjgl/vulkan/VkDevice;",
+			at = @At(value = "INVOKE", target = "Lorg/lwjgl/vulkan/VK12;vkCreateDevice(Lorg/lwjgl/vulkan/VkPhysicalDevice;Lorg/lwjgl/vulkan/VkDeviceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"))
+	private static void caustica$augmentDeviceCreateInfo(com.mojang.renderpearl.backend.vulkan.init.FeatureSet featureSet,
+			VulkanPhysicalDevice physicalDevice, CallbackInfoReturnable<VkDevice> cir, @Local VkDeviceCreateInfo deviceCreateInfo) {
+	*///?}
 		RtDeviceBringup.reserveComputeQueue(deviceCreateInfo, physicalDevice, MemoryStack.stackGet());
 		VulkanDiagnostics.attachNvDiagnosticsConfig(deviceCreateInfo, MemoryStack.stackGet());
 		dev.comfyfluffy.caustica.rt.RtMemoryResidency.attachFeatures(deviceCreateInfo, MemoryStack.stackGet());

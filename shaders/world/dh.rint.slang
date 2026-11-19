@@ -16,5 +16,11 @@ void main(){
     float3 hit=origin+direction*t;
     uint a=(axis+1u)%3u,b=(axis+2u)%3u;
     if(hit[a]<lo[a]||hit[a]>hi[a]||hit[b]<lo[b]||hit[b]>hi[b])return;
+    // Coverage rejection here, not only in any-hit: rays traced with RAY_FLAG_FORCE_OPAQUE (every path
+    // continuation after a diffuse bounce) never run any-hit, so LOD boxes overlapping published terrain
+    // occluded GI and sky light inside real canopies — dark blocks in trees that vanished with DH off.
+    uint64_t coverage=uint64_t(asuint(g.rigidDisp.x))|(uint64_t(asuint(g.rigidDisp.y))<<32);
+    float3 worldHit=WorldRayOrigin()+WorldRayDirection()*t;
+    if(dhCovered(coverage,worldHit,dhPrimitive(q).normal.xyz))return;
     ReportHit(t,0u,float2(0));
 }

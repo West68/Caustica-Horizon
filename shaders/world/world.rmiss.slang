@@ -13,6 +13,7 @@ import environment_effects;
 import end_environment;
 import night_sky;
 import itrp_clouds;
+import itrp_volumetric;
 import itrp_atmosphere;
 
 [[vk::push_constant]] WorldPushConstants pc;
@@ -307,6 +308,7 @@ float3 realMoon(float2 local, float phase, bool mapped) {
 [shader("miss")]
 void main(inout Payload payload) {
     ConstPtr<WorldPush> worldPushPtr = ConstPtr<WorldPush>(pc.worldPushAddr);
+    endNebulaGain = (lookSwitches(worldPushPtr[0].torchControl.w) & LOOK_SWITCH_NO_END_NEBULA) != 0u ? 0.0 : 1.0;
     float3 dir = normalize(WorldRayDirection());
     // Diffuse continuations integrate the sky over a cosine lobe: the per-frame LUT (same miss shader,
     // evaluated per texel) replaces the per-ray atmosphere/cloud march. Camera, specular and refracted
@@ -403,6 +405,7 @@ void main(inout Payload payload) {
     float glowAndNight = lookGlowNight(worldPush.torchControl.w);
     float nightDim = floor(glowAndNight / 4.0) / 100.0;
     col *= lerp(1.0, nightDim, saturate(nightStrength));
+    float3 colNoDisc = col; // sky without the sun/moon bodies, for cloud aerial fade
     if (showCelestial) {
         bool skyReady = skyTextureReady();
         float2 local;
@@ -458,8 +461,26 @@ void main(inout Payload payload) {
             float rain=worldPush.cloudWorld.w;
             if(!referenceLook) referenceAtmosphere=itrpReferenceSky(dir,sd,rain);
             float3 cloudAmbient=itrpReferenceSky(float3(0.0,1.0,0.0),sd,rain);
+            if (cloudMode == 3u) {
+                // Volumetric deck, lit in the same reference units as the planar deck and then mapped to
+                // scene radiance with the identical ENV scale, night adaptation and brightness control.
+                VolumeParams vp = itrpVolumeParams(worldPush);
+                float3 light = worldPush.lightDir.xyz;
+                float nightAmplitude = sd.y < 0.0 ? 0.002 : 1.0;
+                float3 beam = itrpCloudBeam(light, 1.0, nightAmplitude);
+                float3 vRadiance; float vT; float vRawT;
+                itrpVolumeClouds(float3(0.0, 0.0, 0.0), dir, light, sd, beam, cloudAmbient,
+                    worldPush.cloudWorld.xyz, (payload.flags & PAYLOAD_CAMERA_MISS) != 0u, vp, vRadiance, vT, vRawT);
+                float nightFactor = saturate(-sd.y * 10.0);
+                float3 cloudScene = itrpCloudNightAdapt(vRadiance * (0.18 / 6.6), nightFactor) * 21.0 * worldPush.cloudLight.x;
+                // Aerial fade lets a distant cloud melt into the plain sky behind it, but the sun and moon
+                // discs are only ever dimmed by the cloud's real transmittance, so they never shine through.
+                col = col * vRawT + colNoDisc * max(vT - vRawT, 0.0) + cloudScene;
+                itrpCloudTransmittance = vT;
+            } else {
             col=itrpCloudPlane(worldPush.cloudNoiseAddr,col,dir,worldPush.lightDir.xyz,sd,
                 cloudAmbient,referenceAtmosphere,worldPush.cloudWorld.xyz,worldPush.waterParams.w,rain,int(cloudMode),(payload.flags & PAYLOAD_CAMERA_MISS)!=0u,worldPush.cloudShape,worldPush.cloudLight,worldPush.cloudDetail);
+            }
         }
     }
     float skyTransmittance = itrpCloudTransmittance; // read before the payload reset below

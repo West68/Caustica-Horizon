@@ -1,0 +1,64 @@
+#version 460
+// Free-resolution stretch: DLSS-RR output (smaller than the screen) -> display-size RT image.
+// Separable Lanczos-2 (4x4 taps) with the result clamped to the four nearest source texels, which keeps
+// the sharpness of the kernel without its ringing on HDR edges, then a light contrast-limited sharpen
+// that restores the little detail the resample spreads out. Linear HDR radiance in, linear HDR out.
+layout(local_size_x=16,local_size_y=16) in;
+layout(set=0,binding=0,rgba16f) uniform writeonly image2D outputImage;
+layout(set=0,binding=1,rgba16f) uniform readonly image2D inputImage;
+layout(push_constant) uniform Push { float sharpen; } pc;
+
+const float PI=3.14159265358979;
+
+float lanczos2(float x) {
+    x=abs(x);
+    if(x<1e-5)return 1.0;
+    if(x>=2.0)return 0.0;
+    float px=PI*x;
+    return 2.0*sin(px)*sin(px*0.5)/(px*px);
+}
+
+vec4 fetch(ivec2 q,ivec2 size) {
+    return imageLoad(inputImage,clamp(q,ivec2(0),size-1));
+}
+
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy),outSize=imageSize(outputImage);
+    if(any(greaterThanEqual(p,outSize)))return;
+    ivec2 inSize=imageSize(inputImage);
+    vec2 src=(vec2(p)+0.5)*vec2(inSize)/vec2(outSize)-0.5;
+    ivec2 base=ivec2(floor(src));
+    vec2 f=src-vec2(base);
+
+    float wx[4],wy[4];
+    float sx=0.0,sy=0.0;
+    for(int i=0;i<4;i++) {
+        wx[i]=lanczos2(float(i-1)-f.x); sx+=wx[i];
+        wy[i]=lanczos2(float(i-1)-f.y); sy+=wy[i];
+    }
+    vec3 sum=vec3(0.0);
+    for(int j=0;j<4;j++) {
+        vec3 row=vec3(0.0);
+        for(int i=0;i<4;i++) row+=fetch(base+ivec2(i-1,j-1),inSize).rgb*wx[i];
+        sum+=row*wy[j];
+    }
+    sum/=max(sx*sy,1e-6);
+
+    // Four nearest texels: anti-ringing bounds and the smooth (bilinear) reference for the sharpen.
+    vec4 a=fetch(base,inSize),b=fetch(base+ivec2(1,0),inSize);
+    vec4 c=fetch(base+ivec2(0,1),inSize),d=fetch(base+ivec2(1,1),inSize);
+    vec3 lo=min(min(a.rgb,b.rgb),min(c.rgb,d.rgb));
+    vec3 hi=max(max(a.rgb,b.rgb),max(c.rgb,d.rgb));
+    vec3 smooth3=mix(mix(a.rgb,b.rgb,f.x),mix(c.rgb,d.rgb,f.x),f.y);
+
+    vec3 col=clamp(sum,lo,hi);
+    // Contrast-limited sharpen: less where the neighbourhood already has strong contrast (edges stay clean),
+    // and bounded by the same local range so it never adds halos.
+    float lmin=dot(lo,vec3(0.2126,0.7152,0.0722)),lmax=dot(hi,vec3(0.2126,0.7152,0.0722));
+    float contrast=(lmax-lmin)/max(lmax,1e-4);
+    float amount=pc.sharpen*(1.0-clamp(contrast,0.0,1.0));
+    col=clamp(col+(col-smooth3)*amount,lo,hi);
+
+    float alpha=(f.x<0.5?(f.y<0.5?a.a:c.a):(f.y<0.5?b.a:d.a));
+    imageStore(outputImage,p,vec4(max(col,vec3(0.0)),alpha));
+}

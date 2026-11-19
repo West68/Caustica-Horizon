@@ -160,7 +160,8 @@ public final class RtPipeline {
             // Sky rewrite: the vanilla celestials atlas (sun + moon phases), sampled by world.rmiss to
             // draw the sun/moon discs. Canonical material pages live in the bindless set, not set 0.
             int skyBinding = skyAtlas ? materialBase : -1;
-            int skySamplers = skyAtlas ? 1 : 0;
+            // Volumetric clouds (mode 3): tileable 3D shape + detail noise right after the sky atlas.
+            int skySamplers = skyAtlas ? 3 : 0;
             int bindingCount = firstExtraBinding + extraStorageImages + skySamplers;
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(bindingCount, stack);
             binds.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
@@ -179,6 +180,10 @@ public final class RtPipeline {
             if (skyAtlas) {
                 binds.get(skyBinding).binding(skyBinding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                         .descriptorCount(1).stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR);
+                for (int c = 1; c <= 2; c++) {
+                    binds.get(skyBinding + c).binding(skyBinding + c).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                            .descriptorCount(1).stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+                }
             }
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
@@ -449,6 +454,13 @@ public final class RtPipeline {
     /** Bind the vanilla celestials atlas (sun + moon phases), sampled by world.rmiss for the discs. */
     public void setSkyAtlas(long imageView, long sampler) {
         writeAtlasBinding(skyAtlasBinding, imageView, sampler);
+    }
+
+    /** Bind the volumetric cloud shape and detail noise (bindings sky+1, sky+2). Call before the first trace. */
+    public void setCloudVolume(long shapeView, long shapeSampler, long detailView, long detailSampler) {
+        if (skyAtlasBinding < 0) return;
+        writeAtlasBinding(skyAtlasBinding + 1, shapeView, shapeSampler);
+        writeAtlasBinding(skyAtlasBinding + 2, detailView, detailSampler);
     }
 
     public boolean hasSkyAtlas() {

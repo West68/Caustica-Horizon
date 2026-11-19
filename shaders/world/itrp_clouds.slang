@@ -25,6 +25,7 @@
 
 import world_common;
 import itrp_atmosphere;
+import itrp_volumetric;
 
 // ---- pack defaults ---------------------------------------------------------------------------------
 static const float CLOUD_PLANE_ALTITUDE = 940.0;
@@ -249,7 +250,7 @@ float4 itrpCloudColor(uint64_t noiseAddr, float3 pos, float3 dir, float3 sunDir,
 
 // Exponential column-density integrals in reference radiance units. Work is local to a sky miss;
 // no new images, frame uploads or passes are required. Night amplitude is applied before exposure.
-float3 itrpCloudBeam(float3 activeLight, float altitude, float nightAmplitude) {
+public float3 itrpCloudBeam(float3 activeLight, float altitude, float nightAmplitude) {
     float elevation=max(activeLight.y,1e-6);
     float column=0.28*exp(-0.5*altitude)/elevation;
     float horizonTail=column*exp(-500.0*elevation);
@@ -261,9 +262,9 @@ float3 itrpCloudTransmission(float elevation,float distance,float rain) {
     float column=0.14*distance*itrpExprel(-k*distance);
     return exp(-(float3(0.17,0.40,0.99)+0.05+rain*0.5)*max(column,0.0));
 }
-float itrpCirrusDensity(uint64_t noiseAddr,float3 pos,float3 camera,float time,float size) {
-    float2 anchor=camera.xz*float2(1.0,0.5);
-    float2 delta=pos.xz*float2(1.0,0.5)-anchor;
+float itrpCirrusAt(uint64_t noiseAddr,float2 cam,float2 rel,float time,float size) {
+    float2 anchor=cam*float2(1.0,0.5);
+    float2 delta=rel*float2(1.0,0.5);
     float distance=length(delta);
     float2 uv=(anchor+delta/(1.0+distance*0.00005))*(0.001/size);
     float sum=0.0,weight=1.0,norm=0.0;
@@ -275,6 +276,21 @@ float itrpCirrusDensity(uint64_t noiseAddr,float3 pos,float3 camera,float time,f
         uv*=2.52;weight*=0.43;
     }
     return saturate((sum/norm+distance*0.00004)*1.5-0.25);
+}
+// The cirrus warp shears by the absolute uv, so its drift grows with distance from the origin. Fold the
+// camera into one 32000*size period (the extent of normal play around spawn) and cross-fade to the
+// neighbouring fold over the last tenth of it, so the deck neither speeds up far out nor jumps at a seam.
+float itrpCirrusDensity(uint64_t noiseAddr,float3 pos,float3 camera,float time,float size) {
+    float period=32000.0*size;
+    float2 rel=pos.xz-camera.xz;
+    float2 c=camera.xz-period*round(camera.xz/period);
+    float2 w=0.5*smoothstep(period*0.4,period*0.5,abs(c));
+    float2 alt=c-sign(c)*period;
+    float r=itrpCirrusAt(noiseAddr,c,rel,time,size)*(1.0-w.x)*(1.0-w.y);
+    if(w.x>0.0) r+=itrpCirrusAt(noiseAddr,float2(alt.x,c.y),rel,time,size)*w.x*(1.0-w.y);
+    if(w.y>0.0) r+=itrpCirrusAt(noiseAddr,float2(c.x,alt.y),rel,time,size)*(1.0-w.x)*w.y;
+    if(w.x>0.0&&w.y>0.0) r+=itrpCirrusAt(noiseAddr,alt,rel,time,size)*w.x*w.y;
+    return r;
 }
 float4 itrpCirrusColor(uint64_t noiseAddr,float3 pos,float3 camera,float3 view,float3 light,
         float3 beam,float3 skyUp,float3 atmosphereColor,float time,bool cameraDetail,float4 shape) {
@@ -299,7 +315,7 @@ float4 itrpCirrusColor(uint64_t noiseAddr,float3 pos,float3 camera,float3 view,f
         +lerp(skyUp,atmosphereColor,exp2(-12.0*density));
     return float4(radiance,itrpCloudOpacity(4.0*density*density,shape.y));
 }
-float3 itrpCloudNightAdapt(float3 color,float nightFactor) {
+public float3 itrpCloudNightAdapt(float3 color,float nightFactor) {
     // Rod adaptation expects reference ENV-scaled units, not the native 21-unit scene source.
     float l=dot(color,float3(0.2126,0.7152,0.0722));
     return lerp(color,l*float3(0.3,0.6,1.35),0.6*nightFactor/(1000.0*l+1.0));
@@ -346,6 +362,7 @@ public float itrpCloudShadow(WorldPush w,float3 receiver,float3 light) {
     uint mode=(w.flags >> 7u)&3u;
     if(mode==0u || w.environment.x!=0.0 || light.y<=0.001)return 1.0;
     float3 origin=receiver-w.camOffset+w.cloudWorld.xyz;
+    if(mode==3u)return itrpVolumeShadow(w,origin,w.cloudWorld.xyz,light);
     float t=(w.cloudShape.w-origin.y)/light.y;
     if(t<=0.0 || t>1e7)return 1.0;
     float3 pos=origin+light*t;

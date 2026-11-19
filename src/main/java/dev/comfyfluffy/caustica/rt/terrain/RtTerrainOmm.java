@@ -81,6 +81,18 @@ final class RtTerrainOmm {
      */
     static RtAccel.OpacityMicromapInput buildInput(int triCount, float[] cornerUv,
                                                    TextureAtlasSprite[] ommSprites, int ommSpriteCount) {
+        return buildInput(triCount, cornerUv, ommSprites, ommSpriteCount, null);
+    }
+
+    /**
+     * @param prim per-triangle TerrainPrim lanes (12 floats/triangle) or null. Triangles flagged one-sided
+     *             (flags bit 2, see RtTerrainMesher.markTwoSidedPair) keep their transparent micro-states, so
+     *             force-opaque bounce rays still pass through the blade gaps, but opaque micro-states become
+     *             unknown-opaque so other rays still run world.rahit's facing test.
+     */
+    static RtAccel.OpacityMicromapInput buildInput(int triCount, float[] cornerUv,
+                                                   TextureAtlasSprite[] ommSprites, int ommSpriteCount,
+                                                   float[] prim) {
         if (!RtDeviceBringup.ommEnabled()) {
             recordOmmStatsDisabled();
             return null;
@@ -121,6 +133,13 @@ final class RtTerrainOmm {
             }
             OmmTriangleResult result = classifyTriangleCached(level, bytesPerTriangle, sprite, cornerUv, t);
             System.arraycopy(result.data(), 0, data, t * bytesPerTriangle, bytesPerTriangle);
+            if (prim != null && (Float.floatToRawIntBits(prim[t * 12 + 9]) & RtTerrainMesher.TERRAIN_PRIM_ONE_SIDED) != 0) {
+                for (int m = 0; m < microCount; m++) {
+                    if (readOmmValue(data, t, bytesPerTriangle, m) == OMM_FULLY_OPAQUE) {
+                        writeOmmValue(data, t, bytesPerTriangle, m, OMM_UNKNOWN_OPAQUE);
+                    }
+                }
+            }
             OmmMicroCounts counts = result.counts();
             opaqueMicroTriangles += counts.opaque();
             transparentMicroTriangles += counts.transparent();
@@ -399,6 +418,11 @@ final class RtTerrainOmm {
 
     private static float clamp01(float v) {
         return Math.max(0.0f, Math.min(1.0f, v));
+    }
+
+    private static int readOmmValue(byte[] data, int triangle, int bytesPerTriangle, int microIndex) {
+        int bit = (triangle * bytesPerTriangle << 3) + microIndex * 2;
+        return ((data[bit >>> 3] & 0xFF) >>> (bit & 7)) & 0x3;
     }
 
     private static void writeOmmValue(byte[] data, int triangle, int bytesPerTriangle, int microIndex, int value) {

@@ -137,7 +137,8 @@ public final class CausticaPerfLog {
     public static void tick() {
         // Console appenders can synchronously backpressure the render thread (confirmed in JFR).
         // Keep transition diagnostics, but continuous benchmark output must be explicitly requested.
-        if (!Boolean.getBoolean("caustica.rt.perfLog")) return;
+        // The in-game GPU timings toggle also turns this log on, so players need no JVM flag to send timings.
+        if (!Boolean.getBoolean("caustica.rt.perfLog") && !EnhancedGpuTimings.enabled()) return;
         long now = System.nanoTime();
         realFramesInWindow++;
         if (windowStartNanos == 0L) {

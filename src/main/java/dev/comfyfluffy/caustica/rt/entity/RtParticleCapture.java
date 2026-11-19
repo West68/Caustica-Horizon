@@ -17,6 +17,10 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
  * the caller).
  */
 public final class RtParticleCapture implements VertexConsumer {
+    //? if >=26.3 {
+    /*// 26.3 added a third UV channel (item glint); ray-traced captures ignore it.
+    @Override public VertexConsumer setUv3(float u, float v) { return this; }
+    *///?}
     private final RtEntityCapture out;
     private float ox, oy, oz;
 

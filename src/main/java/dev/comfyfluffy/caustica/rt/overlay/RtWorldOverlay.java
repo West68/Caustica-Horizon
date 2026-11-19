@@ -57,7 +57,8 @@ public final class RtWorldOverlay {
 
     private final RtOverlayFramePool framePool = new RtOverlayFramePool();
     private final List<RtOverlayFeature> features =
-            List.of(new RtGlowOutlineFeature(), new RtNameTagFeature(), new RtBlockOutlineFeature());
+            List.of(new RtGlowOutlineFeature(), new RtNameTagFeature(), new RtBlockOutlineFeature(),
+                    new RtDebugLinesFeature());
     private boolean failed;
 
     // Shared world-overlay buffer every feature composites into (lazily sized to main's width/height, same

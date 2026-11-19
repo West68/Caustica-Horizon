@@ -27,6 +27,7 @@ static const float ENTITY_ALPHA_CUTOFF = 0.1; // entities: only discard near-ful
 // tinted pane still absorbs its own color on top of this.
 static const float TRANSLUCENT_NEUTRAL_EXTINCTION = 0.15;
 static const float WATER_SHADOW_TINT = 0.5;
+static const float SSS_FOLIAGE_OPEN = 0.33; // back-light share of one vanilla leaf face (its hole fraction)
 
 // Progressive 8x8 blue-noise-style alpha threshold pattern, with a golden-ratio temporal rotation. This keeps
 // translucent entity hits stochastic, but trades per-pixel white noise for a stable spatial distribution
@@ -266,9 +267,34 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
 
     // Cutout geometry: alpha from the atlas. PrimitiveIndex() restarts at 0 per geometry, so re-add this
     // bucket's triangle base to index the section's packed corner-UV array (3 UVs per triangle).
+    // One-sided cutout face (a cross plant's front/back pair, RtTerrainMesher.markTwoSidedPair): like raster
+    // back-face culling, only the face pointing at the ray counts, else the mirrored back face doubles the blades.
+    TerrainPrim cpr = terrainPrimitive(sec.primAddr, tri);
+    if ((cpr.flags & TERRAIN_PRIM_ONE_SIDED) != 0u && dot(cpr.normal.xyz, WorldRayDirection()) > 0.0
+            && (ConstPtr<WorldPush>(pc.worldPushAddr)[0].flags & (1u << 21)) == 0u) {
+        IgnoreHit();
+        return;
+    }
     ConstPtr<float2> uvs = ConstPtr<float2>(terrainUvTriangleAddress(sec.uvAddr,tri));
     float2 uv = bary.x * uvs[0] + bary.y * uvs[1] + bary.z * uvs[2];
-    if (blockAlbedoAtlas.SampleLevel(uv, 0.0).a < ALPHA_CUTOFF) {
+    float4 cutTexel = blockAlbedoAtlas.SampleLevel(uv, 0.0);
+    if (cutTexel.a < ALPHA_CUTOFF) {
         IgnoreHit();
+        return;
+    }
+    // Back-light transmission ray (world.rgen visibilitySss). Vanilla-style leaves are about a third holes, which
+    // is what lets backlit canopies glow. Denser leaf sprites (modded packs, ~10% holes) blocked nearly all of it
+    // and read as dark solid cubes. Their solid texels pass the deficit so every leaf face transmits at least the
+    // vanilla share; sprites already that open are unchanged.
+    if (payload.roughMetal == SSS_QUERY_MARK && (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u
+            && (cpr.flags & TERRAIN_PRIM_FOLIAGE) != 0u) {
+        float coverage = ConstPtr<MaterialHeader>(pc.materialTableAddr)[cpr.materialId].average.a;
+        float pass = coverage > 1.0e-3 ? saturate((SSS_FOLIAGE_OPEN - (1.0 - coverage)) / coverage) : 0.0;
+        if (pass > 0.0) {
+            float3 leaf = srgbToLinear(cutTexel.rgb) * cpr.tint.rgb;
+            leaf /= max(max(leaf.r, max(leaf.g, leaf.b)), 1.0e-3);
+            payload.albedo *= pass * leaf;
+            if (max(payload.albedo.r, max(payload.albedo.g, payload.albedo.b)) > 1.0e-3) IgnoreHit();
+        }
     }
 }

@@ -28,7 +28,7 @@ loom {
 			client()
 			setConfigName("Fabric Client")
 			ideConfigGenerated = true
-			runDir = "run"
+			runDir = "../../run" // shared across Stonecutter versions
 			// java.lang.foreign restricted methods (FFM bindings to amd_fidelityfx_vk.dll)
 			vmArg "--enable-native-access=ALL-UNNAMED"
 
@@ -49,7 +49,7 @@ loom {
 			server()
 			setConfigName("Fabric Server")
 			ideConfigGenerated = true
-			runDir = "run"
+			runDir = "../../run" // shared across Stonecutter versions
 		}
 	}
 }
@@ -69,9 +69,19 @@ dependencies {
 
 processResources {
 	inputs.property "version", project.version
+	inputs.property "minecraft_compat", project.minecraft_compat
+
+	// Per-version mixin removal (classes compiled out by Stonecutter for that version).
+	def mixinExclude = (findProperty("mixin_exclude") ?: "").toString().split(",").collect { it.trim() }.findAll { it }
+	inputs.property "mixinExclude", mixinExclude.join(",")
+	if (!mixinExclude.isEmpty()) {
+		filesMatching("caustica*.mixins.json") {
+			filter { String line -> mixinExclude.any { line.contains("\"${it}\"") } ? null : line }
+		}
+	}
 
 	filesMatching("fabric.mod.json") {
-		expand "version": inputs.properties.version
+		expand "version": inputs.properties.version, "minecraft_compat": inputs.properties.minecraft_compat
 	}
 }
 
@@ -198,7 +208,7 @@ abstract class CompileShaders extends DefaultTask {
 def compileShaders = tasks.register("compileShaders", CompileShaders) {
 	group = "build"
 	description = "Compiles shaders/** shader sources to SPIR-V and validates them."
-	srcDir = file("shaders")
+	srcDir = rootProject.file("shaders")
 	outDir = layout.buildDirectory.dir("generated/shaders/caustica/rt")
 	glslang = resolveVulkanTool("glslangValidator")
 	spirvVal = resolveVulkanTool("spirv-val")
@@ -209,8 +219,8 @@ def compileShaders = tasks.register("compileShaders", CompileShaders) {
 def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShaderRecords) {
 	group = "build"
 	description = "Generates typed Java shader records and serializers from Slang reflection."
-	worldSourceDir = file("shaders/world")
-	probeSource = file("shaders/world/world_layout_probe.slang")
+	worldSourceDir = rootProject.file("shaders/world")
+	probeSource = rootProject.file("shaders/world/world_layout_probe.slang")
 	slangc = resolveVulkanTool("slangc")
 	spirvVal = resolveVulkanTool("spirv-val")
 	outDir = layout.buildDirectory.dir("generated/sources/shaderRecords")
@@ -246,7 +256,7 @@ def normalizeNgxVendorConfig = { String config ->
 }
 def ngxVendorConfig = normalizeNgxVendorConfig(
 		(findProperty("ngxVendorConfig") ?: (isRunClientInvocation ? "dev" : "rel")).toString())
-def ngxNativeRoot = layout.buildDirectory.dir("native/ngx_shim").get().asFile
+def ngxNativeRoot = rootProject.layout.buildDirectory.dir("native/ngx_shim").get().asFile
 def ngxShimOutDir = new File(ngxNativeRoot, ngxShimConfig)
 def currentNgxPlatform = {
 	def os = org.gradle.internal.os.OperatingSystem.current()
@@ -416,7 +426,7 @@ tasks.register("releaseJar", Jar) {
     reproducibleFileOrder = true
     from({ zipTree(tasks.named("jar", Jar).get().archiveFile.get().asFile) }) {
         exclude "fabric.mod.json", "caustica.dev.mixins.json"
-        exclude { entry -> entry.path ==~ /dev\/comfyfluffy\/caustica\/(client\/(CinematicDirector|TestMapShots|PunchyScenario|ContinuityScenario|DhLodProgress|PerfSweep|PerfAutoBench)|mixin\/(CinematicInputMixin|CinematicMouseMixin|DhGenerationQueueMixin))(\$.*)?\.class/ }
+        exclude { entry -> entry.path ==~ /dev\/comfyfluffy\/caustica\/(client\/(CinematicDirector|TestMapShots|PunchyScenario|ContinuityScenario|DhLodProgress|PerfAutoBench)|mixin\/(CinematicInputMixin|CinematicMouseMixin|DhGenerationQueueMixin))(\$.*)?\.class/ }
     }
     from(layout.buildDirectory.dir("generated/release-metadata"))
 }
@@ -462,13 +472,13 @@ tasks.named("sourcesJar", Jar).configure {
 // made the jar report "natives are not bundled" and silently fall back to the older NGX frame generator on
 // the user's machine, which is why the Streamline work never ran there. The opt-in block below only
 // refreshes that copy when the SDK is available.
-def slPrebuilt = file("native/prebuilt/streamline-natives")
+def slPrebuilt = rootProject.file("native/prebuilt/streamline-natives")
 def verifyStreamlineBundle = tasks.register("verifyStreamlineBundle") {
     doLast {
         def required = ["sl.dlss.dll", "nvngx_dlss.dll", "streamlinebridge.dll", "sl.interposer.dll", "sl.common.dll", "sl.dlss_d.dll",
             "sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll", "nvngx_dlssd.dll",
             "NvLowLatencyVk.dll"]
-        def dir = file("native/prebuilt/streamline-natives/caustica/streamline-natives/windows-x64")
+        def dir = rootProject.file("native/prebuilt/streamline-natives/caustica/streamline-natives/windows-x64")
         def missing = required.findAll { !new File(dir, it).isFile() }
         if (!missing.isEmpty()) {
             throw new GradleException("Streamline natives are missing from the bundle: " + missing)
@@ -482,22 +492,22 @@ if (!(findProperty("withStreamline") ?: "false").toString().toBoolean()) {
 // Optional Streamline backend for external RTXMFG. Never change the live backend without restart.
 if ((findProperty("withStreamline") ?: "false").toString().toBoolean()) {
     def slSdk = providers.environmentVariable("STREAMLINE_SDK")
-    def slCmake = layout.buildDirectory.dir("native/streamline_bridge-cmake")
-    def slDll = layout.buildDirectory.file("native/streamline_bridge/release/streamlinebridge.dll")
+    def slCmake = rootProject.layout.buildDirectory.dir("native/streamline_bridge-cmake")
+    def slDll = rootProject.layout.buildDirectory.file("native/streamline_bridge/release/streamlinebridge.dll")
     def slGenerated = layout.buildDirectory.dir("generated/streamline-natives")
     def slConfigure = tasks.register("configureEnhancedStreamline", Exec) {
-        inputs.files(fileTree("native/streamline_bridge") { include "*.h", "CMakeLists.txt" })
+        inputs.files(fileTree(rootProject.file("native/streamline_bridge")) { include "*.h", "CMakeLists.txt" })
         inputs.property("sdk", slSdk.orElse(""))
         outputs.file(slCmake.map { it.file("CMakeCache.txt") })
         doFirst {
             if (!slSdk.isPresent()) throw new GradleException("Set STREAMLINE_SDK to the verified Streamline 2.14.16 SDK")
-            commandLine "cmake", "-S", file("native/streamline_bridge"), "-B", slCmake.get().asFile, "-A", "x64",
+            commandLine "cmake", "-S", rootProject.file("native/streamline_bridge"), "-B", slCmake.get().asFile, "-A", "x64",
                 "-DSTREAMLINE_SDK=${slSdk.get()}", "-DVULKAN_SDK=${System.getenv('VULKAN_SDK')}"
         }
     }
     def slBuild = tasks.register("buildEnhancedStreamline", Exec) {
         dependsOn slConfigure
-        inputs.files(fileTree("native/streamline_bridge") { include "*.cpp", "*.h", "CMakeLists.txt" })
+        inputs.files(fileTree(rootProject.file("native/streamline_bridge")) { include "*.cpp", "*.h", "CMakeLists.txt" })
         outputs.file(slDll)
         commandLine "cmake", "--build", slCmake.get().asFile, "--config", "Release", "--parallel"
     }
@@ -526,13 +536,113 @@ if ((findProperty("withStreamline") ?: "false").toString().toBoolean()) {
 // Bundle our loader only; import the hash-pinned third-party ASI/Core locally.
 def mfgLoaderDir = layout.buildDirectory.dir("generated/mfg-bootstrap")
 def mfgLoaderBuild = tasks.register("buildMfgBootstrap", Exec) {
-    inputs.files(fileTree("native/mfg_agent") { include "*.cpp", "CMakeLists.txt" }, "tools/build-mfg-agent.ps1")
-    outputs.file(layout.buildDirectory.file("native/mfg_agent-cmake/Release/caustica_mfg_agent.dll"))
-    commandLine "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file("tools/build-mfg-agent.ps1")
+    inputs.files(fileTree(rootProject.file("native/mfg_agent")) { include "*.cpp", "CMakeLists.txt" }, rootProject.file("tools/build-mfg-agent.ps1"))
+    outputs.file(rootProject.layout.buildDirectory.file("native/mfg_agent-cmake/Release/caustica_mfg_agent.dll"))
+    commandLine "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", rootProject.file("tools/build-mfg-agent.ps1")
+    // The agent is version-independent and lands in the shared root build/native: build it once (first
+    // version), the others wait for it instead of running a second cmake into the same directory.
+    def nativeOwner = rootProject.childProjects.keySet().sort().first()
+    if (project.name != nativeOwner) {
+        dependsOn(":${nativeOwner}:buildMfgBootstrap")
+        onlyIf { false }
+    }
 }
 def bundleMfgLoader = tasks.register("bundleMfgBootstrap", Sync) {
     dependsOn mfgLoaderBuild
-    from(layout.buildDirectory.file("native/mfg_agent-cmake/Release/caustica_mfg_agent.dll"))
+    from(rootProject.layout.buildDirectory.file("native/mfg_agent-cmake/Release/caustica_mfg_agent.dll"))
     into(mfgLoaderDir.map { it.dir("caustica/bootstrap/windows-x64") })
 }
 sourceSets.main.resources.srcDir(files(mfgLoaderDir).builtBy(bundleMfgLoader))
+
+// ---- Stonecutter: 26.3 moved Blaze3D into com.mojang.renderpearl (pure package moves) ----
+// Source stays written against 26.2 names; these rewrite the generated 26.3 sources only.
+def renderpearlMoves = [
+	"import com.mojang.blaze3d.pipeline.*;": "import com.mojang.blaze3d.pipeline.*; import com.mojang.renderpearl.api.pipeline.*;",
+	"import com.mojang.blaze3d.systems.*;": "import com.mojang.blaze3d.systems.*; import com.mojang.renderpearl.api.commands.*; import com.mojang.renderpearl.api.device.*;",
+	"import com.mojang.blaze3d.textures.*;": "import com.mojang.renderpearl.api.textures.*;",
+	"VulkanBackend.VK10_FEATURES_STRUCT": "com.mojang.renderpearl.backend.vulkan.VulkanFeatureSets.VK10_FEATURES_STRUCT",
+	"VulkanBackend.VK12_FEATURES_STRUCT": "com.mojang.renderpearl.backend.vulkan.VulkanFeatureSets.VK12_FEATURES_STRUCT",
+	"player.swing(InteractionHand.MAIN_HAND);": "player.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);",
+	"player.swinging": "player.isSwinging()",
+	"InputConstants.Type.KEYSYM": "InputConstants.Type.KEYBOARD",
+	"VkDeviceFaultAddressInfoEXT": "VkDeviceFaultAddressInfoKHR",
+	"VkDeviceFaultVendorInfoEXT": "VkDeviceFaultVendorInfoKHR",
+	"@Mixin(GpuDevice.class)": "@Mixin(com.mojang.renderpearl.frontend.FrontendGpuDevice.class)",
+	"@Mixin(CommandEncoder.class)": "@Mixin(com.mojang.renderpearl.frontend.FrontendCommandEncoder.class)",
+	"@Invoker(\"renderInstances\")": "@Invoker(\"prepareInstances\")",
+	"com.mojang.blaze3d.platform.CompareOp": "com.mojang.renderpearl.api.pipeline.CompareOp",
+	"com.mojang.blaze3d.vulkan.init.": "com.mojang.renderpearl.backend.vulkan.init.",
+	"com.mojang.blaze3d.vulkan.": "com.mojang.renderpearl.backend.vulkan.",
+	"com.mojang.blaze3d.opengl.GlStateManager": "com.mojang.renderpearl.backend.opengl.GlStateManager",
+	"com.mojang.blaze3d.GpuFormat": "com.mojang.renderpearl.api.GpuFormat",
+	"com.mojang.blaze3d.PrimitiveTopology": "com.mojang.renderpearl.api.pipeline.PrimitiveTopology",
+	"com.mojang.blaze3d.buffers.GpuBufferSlice": "com.mojang.renderpearl.api.buffers.GpuBufferSlice",
+	"com.mojang.blaze3d.buffers.GpuBuffer ": "com.mojang.renderpearl.api.buffers.GpuBuffer ",
+	"com.mojang.blaze3d.buffers.GpuBuffer;": "com.mojang.renderpearl.api.buffers.GpuBuffer;",
+	"com.mojang.blaze3d.buffers.GpuFence": "com.mojang.renderpearl.api.commands.GpuFence",
+	"com.mojang.blaze3d.pipeline.BlendFunction": "com.mojang.renderpearl.api.pipeline.BlendFunction",
+	"com.mojang.blaze3d.pipeline.ColorTargetState": "com.mojang.renderpearl.api.pipeline.ColorTargetState",
+	"com.mojang.blaze3d.pipeline.CompiledRenderPipeline": "com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline",
+	"com.mojang.blaze3d.pipeline.RenderPipeline": "com.mojang.renderpearl.api.pipeline.RenderPipeline",
+	"com.mojang.blaze3d.shaders.GpuDebugOptions": "com.mojang.renderpearl.api.device.GpuDebugOptions",
+	"com.mojang.blaze3d.shaders.ShaderSource": "com.mojang.renderpearl.api.pipeline.ShaderSource",
+	"com.mojang.blaze3d.shaders.UniformType": "com.mojang.renderpearl.api.pipeline.UniformType",
+	"com.mojang.blaze3d.systems.BackendCreationException": "com.mojang.renderpearl.api.device.BackendCreationException",
+	"com.mojang.blaze3d.systems.CommandEncoderBackend": "com.mojang.renderpearl.backend.api.CommandEncoderBackend",
+	"com.mojang.blaze3d.systems.CommandEncoder ": "com.mojang.renderpearl.api.commands.CommandEncoder ",
+	"com.mojang.blaze3d.systems.CommandEncoder;": "com.mojang.renderpearl.api.commands.CommandEncoder;",
+	"com.mojang.blaze3d.systems.GpuDeviceBackend": "com.mojang.renderpearl.backend.api.GpuDeviceBackend",
+	"com.mojang.blaze3d.systems.GpuDevice;": "com.mojang.renderpearl.api.device.GpuDevice;",
+	"com.mojang.blaze3d.systems.GpuSurface": "com.mojang.renderpearl.api.device.GpuSurface",
+	"com.mojang.blaze3d.systems.RenderPass": "com.mojang.renderpearl.api.commands.RenderPass",
+	"com.mojang.blaze3d.textures.FilterMode": "com.mojang.renderpearl.api.textures.FilterMode",
+	"com.mojang.blaze3d.textures.GpuTextureView": "com.mojang.renderpearl.api.textures.GpuTextureView",
+	"com.mojang.blaze3d.textures.GpuTexture;": "com.mojang.renderpearl.api.textures.GpuTexture;",
+]
+def atLeast263 = stonecutter.eval(stonecutter.current.version, ">=26.3")
+stonecutter.replacements {
+	renderpearlMoves.each { from, to ->
+		string(atLeast263) { replace(from, to) }
+	}
+	// The same moves in JVM descriptor form, for mixin method/target strings ("Lcom/mojang/blaze3d/vulkan/...;").
+	renderpearlMoves.findAll { from, to -> from.startsWith("com.mojang.blaze3d.") }.each { from, to ->
+		def slashFrom = from.replace('.', '/').replace(';', '')
+		def slashTo = to.replace('.', '/').replace(';', '')
+		if (from.endsWith(";")) { slashFrom += ";"; slashTo += ";" } // exact class, not a prefix of a longer name
+		string(atLeast263) { replace("L" + slashFrom, "L" + slashTo) }
+	}
+	// 26.3: VulkanPNextStruct(sType, size) -> VulkanPNextStruct(StructClass.class, sType, size)
+	regex(atLeast263) {
+		replace(/new VulkanPNextStruct\((\s*)([\w.]+),(\s*)(\w+)\.SIZEOF\)/, 'new VulkanPNextStruct($4.class,$1$2,$3$4.SIZEOF)',
+			/new VulkanPNextStruct\((\w+)\.class,(\s*)([\w.]+),(\s*)\1\.SIZEOF\)/, 'new VulkanPNextStruct($2$3,$4$1.SIZEOF)')
+	}
+	// 26.3: render passes take a compiled pipeline; textures bind through setUniform.
+	regex(atLeast263) {
+		replace(/\bpass\.setPipeline\((.+?)\);/, 'pass.setPipeline(com.mojang.blaze3d.systems.RenderSystem.getCompiledPipeline($1));',
+			/\bpass\.setPipeline\(com\.mojang\.blaze3d\.systems\.RenderSystem\.getCompiledPipeline\((.+?)\)\);/, 'pass.setPipeline($1);')
+	}
+	string(atLeast263) { replace("pass.bindTexture(", "pass.setUniform(") }
+	// 26.3: bind-group samplers are declared as combined image samplers.
+	regex(atLeast263) {
+		replace(/\.withSampler\(("[^"]*"(?:\+\w+)*)\)/, '.withUniform($1,com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)',
+			/\.withUniform\(("[^"]*"(?:\+\w+)*),com\.mojang\.renderpearl\.api\.pipeline\.UniformType\.COMBINED_IMAGE_SAMPLER\)/, '.withSampler($1)')
+	}
+	string(atLeast263) { replace(".useDepth", ".hasDepth()") }
+}
+
+// ---- Per-version resource overrides: src/main/resources-<mc>/ replaces same-path files from src/main/resources ----
+// Used for GLSL that must follow each version's shader dialect (see tools/port/make_263_shaders.py).
+def resourceOverride = rootProject.file("src/main/resources-${project.minecraft_version}")
+if (resourceOverride.isDirectory()) {
+	def overridden = fileTree(resourceOverride).files.collect {
+		resourceOverride.toPath().relativize(it.toPath()).toString().replace(File.separator, '/')
+	} as Set
+	processResources {
+		inputs.dir(resourceOverride)
+		eachFile { details ->
+			if (overridden.contains(details.relativePath.pathString)
+					&& !details.file.toPath().startsWith(resourceOverride.toPath())) details.exclude()
+		}
+		from(resourceOverride)
+	}
+}

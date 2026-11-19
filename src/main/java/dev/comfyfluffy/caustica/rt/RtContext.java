@@ -300,7 +300,11 @@ public final class RtContext {
             VmaAllocationInfo info = VmaAllocationInfo.calloc(stack);
             int createResult = addressAlignment == 0L
                     ? Vma.vmaCreateBuffer(vma, bci, aci, pBuf, pAlloc, info)
+                    //? if <26.3 {
                     : Vma.vmaCreateBufferWithAlignment(vma, bci, aci, addressAlignment, pBuf, pAlloc, info);
+                    //?} else {
+                    /*: createBufferWithAlignment(stack, bci, aci, addressAlignment, pBuf, pAlloc, info);
+                    *///?}
             check(createResult, addressAlignment == 0L ? "vmaCreateBuffer" : "vmaCreateBufferWithAlignment");
             handle = pBuf.get(0);
             allocation = pAlloc.get(0);
@@ -324,6 +328,39 @@ public final class RtContext {
             throw t;
         }
     }
+
+    //? if >=26.3 {
+    /*// LWJGL 3.4.3's VMA binding dropped vmaCreateBufferWithAlignment. Same result by hand: pick the memory type
+    // VMA would choose, raise the buffer's alignment requirement, allocate, then bind. vmaDestroyBuffer frees it.
+    private int createBufferWithAlignment(MemoryStack stack, VkBufferCreateInfo bci, VmaAllocationCreateInfo aci,
+            long alignment, LongBuffer pBuf, PointerBuffer pAlloc, VmaAllocationInfo info) {
+        java.nio.IntBuffer typeIndex = stack.mallocInt(1);
+        int result = Vma.vmaFindMemoryTypeIndexForBufferInfo(vma, bci, aci, typeIndex);
+        if (result != VK10.VK_SUCCESS) return result;
+        result = VK10.vkCreateBuffer(vk, bci, null, pBuf);
+        if (result != VK10.VK_SUCCESS) return result;
+        long buffer = pBuf.get(0);
+        org.lwjgl.vulkan.VkMemoryRequirements req = org.lwjgl.vulkan.VkMemoryRequirements.calloc(stack);
+        VK10.vkGetBufferMemoryRequirements(vk, buffer, req);
+        int typeBit = 1 << typeIndex.get(0);
+        org.lwjgl.system.MemoryUtil.memPutLong(req.address() + org.lwjgl.vulkan.VkMemoryRequirements.ALIGNMENT,
+                Math.max(req.alignment(), alignment));
+        org.lwjgl.system.MemoryUtil.memPutInt(req.address() + org.lwjgl.vulkan.VkMemoryRequirements.MEMORYTYPEBITS,
+                req.memoryTypeBits() & typeBit);
+        VmaAllocationCreateInfo exact = VmaAllocationCreateInfo.calloc(stack).set(aci)
+                .usage(Vma.VMA_MEMORY_USAGE_UNKNOWN).memoryTypeBits(typeBit)
+                .flags(aci.flags() & ~(Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                        | Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT));
+        result = Vma.vmaAllocateMemory(vma, req, exact, pAlloc, info);
+        if (result != VK10.VK_SUCCESS) { VK10.vkDestroyBuffer(vk, buffer, null); return result; }
+        result = Vma.vmaBindBufferMemory(vma, pAlloc.get(0), buffer);
+        if (result != VK10.VK_SUCCESS) {
+            Vma.vmaFreeMemory(vma, pAlloc.get(0));
+            VK10.vkDestroyBuffer(vk, buffer, null);
+        }
+        return result;
+    }
+    *///?}
 
     /** Create an R8G8B8A8_UNORM storage image (STORAGE + TRANSFER_SRC/DST) already transitioned to GENERAL. */
     public RtImage createStorageImage(int width, int height) {

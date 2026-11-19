@@ -43,6 +43,8 @@ final class RtSectionBuilder {
         RtBuffer material = null;
         RtBuffer upload = null;
         RtAccel.PreparedBlas blas = null;
+        WaveBuffers wave = null;
+        float[] waveWeights = packed.wave();
         TerrainPrimitiveStorage.Encoded primitives=TerrainPrimitiveStorage.encode(packed.material());
         TerrainPrimitiveStorage.Encoded textureCoordinates=TerrainPrimitiveStorage.encodeUvs(packed.uvs());
         try {
@@ -52,13 +54,22 @@ final class RtSectionBuilder {
             long materialBytes = primitives.byteSize();
             int transferDst = VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-            positions = ctx.createAsyncBuffer(positionsBytes, asInput | transferDst, false,
+            // Waving sections: the GPU rewrites positions every frame from the rest copy, then refits.
+            positions = ctx.createAsyncBuffer(positionsBytes, asInput | transferDst | (waveWeights != null ? storage : 0), false,
                     label + " positions");
             indices = ctx.createAsyncBuffer(indicesBytes, asInput | transferDst, false,
                     label + " indices");
             uvs = ctx.createAsyncBuffer(uvsBytes, storage | transferDst, false, label + " uvs");
             material = ctx.createAsyncBuffer(materialBytes, storage | transferDst, false, label + " material");
-            upload = ctx.createUploadBuffer(positionsBytes + indicesBytes + uvsBytes + materialBytes,
+            long waveBytes = waveWeights != null ? (long) waveWeights.length * Float.BYTES : 0L;
+            if (waveWeights != null) {
+                if (waveWeights.length != vertCount) throw new IllegalStateException("wave weights per vertex");
+                RtBuffer rest = ctx.createAsyncBuffer(positionsBytes, storage | transferDst, false, label + " rest positions");
+                RtBuffer weights = ctx.createAsyncBuffer(waveBytes, storage | transferDst, false, label + " wave weights");
+                RtBuffer disp = ctx.createAsyncBuffer((long) vertCount * 16L, storage | transferDst, false, label + " wave motion");
+                wave = new WaveBuffers(rest, weights, disp, new RtBuffer[1], vertCount);
+            }
+            upload = ctx.createUploadBuffer(positionsBytes + indicesBytes + uvsBytes + materialBytes + waveBytes,
                     label + " upload");
 
             long cursor = upload.mapped;
@@ -71,18 +82,21 @@ final class RtSectionBuilder {
             cursor += uvsBytes;
             if(primitives.usesIndex()) MemoryUtil.memByteBuffer(cursor,primitives.byteSize()).put(primitives.indexed());
             else MemoryUtil.memFloatBuffer(cursor, packed.material().length).put(packed.material());
+            cursor += materialBytes;
+            if (waveWeights != null) MemoryUtil.memFloatBuffer(cursor, waveWeights.length).put(waveWeights);
             if((material.deviceAddress&1L)!=0)throw new IllegalStateException("Unaligned material buffer address");
             upload.flush();
 
             blas = RtAccel.prepareTerrainBlas(ctx, positions, vertCount, indices,
-                    packed.bucketTris(), ommInput, compactBlas, label + " BLAS");
+                    packed.bucketTris(), ommInput, compactBlas, label + " BLAS", wave != null ? wave.refitScratch() : null);
             return new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                    packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex(), packed.lights());
+                    packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex(), packed.lights(), wave);
         } catch (Throwable t) {
             if (blas != null) {
                 destroy(new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                        packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex(), packed.lights()));
+                        packed.triBase(), packed.torchCenters(), sox, soy, soz, primitives.usesIndex(),textureCoordinates.usesIndex(), packed.lights(), wave));
             } else {
+                if (wave != null) wave.destroy();
                 if (upload != null) upload.destroy();
                 if (material != null) material.destroy();
                 if (uvs != null) uvs.destroy();
@@ -105,6 +119,12 @@ final class RtSectionBuilder {
             copy(cmd, prepared.upload, prepared.uvs, srcOffset, region);
             srcOffset += prepared.uvs.size;
             copy(cmd, prepared.upload, prepared.material, srcOffset, region);
+            if (prepared.wave != null) {
+                srcOffset += prepared.material.size;
+                copy(cmd, prepared.upload, prepared.wave.weights(), srcOffset, region);
+                copy(cmd, prepared.upload, prepared.wave.rest(), 0L, region); // rest = the meshed positions
+                VK10.vkCmdFillBuffer(cmd, prepared.wave.disp().handle, 0L, VK10.VK_WHOLE_SIZE, 0);
+            }
 
             VkMemoryBarrier2.Buffer barrier = VkMemoryBarrier2.calloc(1, stack);
             barrier.get(0).sType$Default()
@@ -126,6 +146,7 @@ final class RtSectionBuilder {
     }
 
     static void destroy(PreparedSection prepared) {
+        if (prepared.wave != null) prepared.wave.destroy();
         RtAccel.freeBlasScratch(java.util.List.of(prepared.blas));
         prepared.blas.accel.destroy();
         prepared.upload.destroy();
@@ -139,19 +160,32 @@ final class RtSectionBuilder {
      *  section-local RIS light records (CPU-side, flattened into the global buffer at publish). */
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
                            RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas, int[] triBase, float[] torchCenters,
-                           int sx, int sy, int sz, boolean indexedMaterials, boolean indexedUvs, float[] lights) {
+                           int sx, int sy, int sz, boolean indexedMaterials, boolean indexedUvs, float[] lights,
+                           WaveBuffers wave) {
         void releaseUpload() {
             upload.destroy();
         }
 
+        /** Build inputs are dropped after the BLAS build, except for waving sections, which refit from them. */
         void releaseBuildInputs() {
+            if (wave != null) return;
             indices.destroy();
             positions.destroy();
         }
 
         PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
             return new PreparedSection(key, positions, indices, uvs, material, upload, replacement,
-                    triBase, torchCenters, sx, sy, sz, indexedMaterials, indexedUvs, lights);
+                    triBase, torchCenters, sx, sy, sz, indexedMaterials, indexedUvs, lights, wave);
+        }
+    }
+
+    /** Per-vertex rest positions, waving weights and frame-to-frame motion of a waving section. */
+    record WaveBuffers(RtBuffer rest, RtBuffer weights, RtBuffer disp, RtBuffer[] refitScratch, int vertexCount) {
+        void destroy() {
+            rest.destroy();
+            weights.destroy();
+            disp.destroy();
+            if (refitScratch[0] != null) refitScratch[0].destroy();
         }
     }
 }

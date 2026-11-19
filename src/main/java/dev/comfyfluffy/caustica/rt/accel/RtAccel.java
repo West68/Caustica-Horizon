@@ -104,6 +104,8 @@ public final class RtAccel {
 
     public final long handle;
     public final long deviceAddress;
+    /** Diagnostics: bytes of the backing buffer (0 when unknown). */
+    public long backingBytes() { return backing == null ? 0L : backing.size; }
 
     private final RtBuffer backing;
     private final boolean ownsBacking;
@@ -324,6 +326,30 @@ public final class RtAccel {
                     total, false, label, false, false, true, terrainTris, false, null, opacityMicromap);
         }
 
+        /** Updatable terrain BLAS (waving foliage): ALLOW_UPDATE build, refit every frame in place. */
+        static PreparedBlas terrainUpdatable(RtAccel accel, RtBuffer scratch, long vertexAddr, long indexAddr, int maxVertex,
+                                             int[] terrainTris, OpacityMicromap opacityMicromap, String label, boolean update) {
+            int total = 0;
+            for (int t : terrainTris) total += t;
+            return new PreparedBlas(accel, scratch, null, vertexAddr, indexAddr, maxVertex,
+                    total, false, label, true, update, true, terrainTris, false, null, opacityMicromap);
+        }
+
+        /**
+         * In-place refit of this updatable terrain BLAS from the same vertex/index buffers (rewritten on the
+         * GPU since the build). The returned op shares the persistent refit scratch; never pass it to
+         * {@link #freeBlasScratch}.
+         */
+        public PreparedBlas terrainRefit(RtBuffer refitScratch) {
+            if (!terrainSplit || !updatable) throw new IllegalStateException("not an updatable terrain BLAS");
+            return terrainUpdatable(accel, refitScratch, vertexAddr, indexAddr, maxVertex, terrainTris,
+                    opacityMicromap, label, true);
+        }
+
+        public boolean updatable() {
+            return updatable;
+        }
+
         static PreparedBlas entity(RtAccel accel, RtBuffer scratch, RtBuffer externalBacking, long vertexAddr,
                                    long indexAddr, int maxVertex, int[] entityTris, String label,
                                    boolean updatable, boolean update) {
@@ -410,6 +436,18 @@ public final class RtAccel {
     public static PreparedBlas prepareTerrainBlas(RtContext ctx, RtBuffer positions, int vertexCount,
                                                   RtBuffer indices, int[] bucketTris, OpacityMicromapInput opacityMicromapInput,
                                                   boolean compact, String label) {
+        return prepareTerrainBlas(ctx, positions, vertexCount, indices, bucketTris, opacityMicromapInput, compact, label, null);
+    }
+
+    /**
+     * {@code refitScratchOut} non-null builds the BLAS with ALLOW_UPDATE (never compacted) and stores a
+     * persistent update-sized scratch in slot 0, for per-frame in-place refits of waving foliage.
+     */
+    public static PreparedBlas prepareTerrainBlas(RtContext ctx, RtBuffer positions, int vertexCount,
+                                                  RtBuffer indices, int[] bucketTris, OpacityMicromapInput opacityMicromapInput,
+                                                  boolean compact, String label, RtBuffer[] refitScratchOut) {
+        boolean updatable = refitScratchOut != null;
+        if (updatable) compact = false;
         VkDevice vk = ctx.vk();
         String debugLabel = labelOr(label, "terrain BLAS");
         OpacityMicromap opacityMicromap = null;
@@ -419,7 +457,7 @@ public final class RtAccel {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             opacityMicromap = prepareOpacityMicromap(ctx, opacityMicromapInput, debugLabel);
             VkAccelerationStructureBuildSizesInfoKHR sizes = queryTerrainBlasSizes(vk, stack, positions, indices,
-                    vertexCount, bucketTris, opacityMicromap, compact);
+                    vertexCount, bucketTris, opacityMicromap, compact, updatable);
             backing = ctx.createAsyncBuffer(sizes.accelerationStructureSize(), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false,
                     debugLabel + " backing");
             scratch = createScratchBuffer(ctx, sizes.buildScratchSize(), debugLabel + " build scratch");
@@ -433,6 +471,11 @@ public final class RtAccel {
                 accel.compactionQueryPool = pQueryPool.get(0);
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_QUERY_POOL, accel.compactionQueryPool,
                         debugLabel + " compacted-size query");
+            }
+            if (updatable) {
+                refitScratchOut[0] = createScratchBuffer(ctx, Math.max(sizes.updateScratchSize(), 256L), debugLabel + " refit scratch");
+                return PreparedBlas.terrainUpdatable(accel, scratch, positions.deviceAddress, indices.deviceAddress,
+                        vertexCount - 1, bucketTris, opacityMicromap, debugLabel, false);
             }
             return PreparedBlas.terrain(accel, scratch, null, positions.deviceAddress, indices.deviceAddress, vertexCount - 1,
                     bucketTris, opacityMicromap, debugLabel);
@@ -939,12 +982,13 @@ public final class RtAccel {
 
     private static VkAccelerationStructureBuildSizesInfoKHR queryTerrainBlasSizes(VkDevice vk, MemoryStack stack, RtBuffer positions,
                                                                                   RtBuffer indices, int vertexCount, int[] bucketTris,
-                                                                                  OpacityMicromap opacityMicromap, boolean compact) {
+                                                                                  OpacityMicromap opacityMicromap, boolean compact,
+                                                                                  boolean updatable) {
         VkAccelerationStructureGeometryKHR.Buffer geom = terrainGeometries(stack, positions.deviceAddress, indices.deviceAddress,
                 vertexCount, bucketTris, opacityMicromap);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                .flags(buildFlags(false) | (compact ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0))
+                .flags(buildFlags(updatable) | (compact ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0))
                 .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(geom.capacity()).pGeometries(geom);
         java.nio.IntBuffer maxPrims = stack.mallocInt(geom.capacity());
         for (int tris : bucketTris) {
@@ -1275,11 +1319,11 @@ public final class RtAccel {
     /** Record a terrain section's two-geometry (opaque + alpha) BUILD. Always a fresh BUILD — terrain
      *  sections are never refit in place (re-extraction allocates a new BLAS), so no UPDATE branch. */
     private static void recordTerrainBlasBuild(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, PreparedBlas b) {
-        boolean compact = b.requestsCompaction();
+        boolean compact = !b.update && b.requestsCompaction();
         if (compact) {
             VK10.vkCmdResetQueryPool(cmd, b.accel.compactionQueryPool, 0, 1);
         }
-        if (b.opacityMicromap != null) {
+        if (b.opacityMicromap != null && !b.update) { // a refit keeps the micromap built with the BLAS
             recordMicromapBuild(cmd, stack, b.opacityMicromap);
             micromapBuildBarrier(cmd, stack);
         }
@@ -1287,10 +1331,11 @@ public final class RtAccel {
                 b.maxVertex + 1, b.terrainTris, b.opacityMicromap);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                .flags(buildFlags(false) | (compact ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0))
-                .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+                .flags(buildFlags(b.updatable) | (compact ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0))
+                .mode(b.update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
                 .geometryCount(geom.capacity()).pGeometries(geom)
                 .dstAccelerationStructure(b.accel.handle);
+        if (b.update) build.get(0).srcAccelerationStructure(b.accel.handle);
         build.get(0).scratchData().deviceAddress(scratchAddress(ctx, b.scratch));
         VkAccelerationStructureBuildRangeInfoKHR.Buffer range = terrainBuildRanges(stack, b.terrainTris);
         PointerBuffer ppRange = stack.mallocPointer(1).put(0, range.address());

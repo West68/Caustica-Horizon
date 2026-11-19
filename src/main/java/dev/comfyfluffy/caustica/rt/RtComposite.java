@@ -91,12 +91,23 @@ public final class RtComposite {
     // WorldPushData and its serializer are generated from Slang's reflected Std430DataLayout. Java never
     // owns or calculates a shader byte offset, struct size, array stride, or fixed-array capacity.
     private final ItrpCloudNoise cloudNoise = new ItrpCloudNoise();
+    private final ItrpVolumeNoise volumeNoise = new ItrpVolumeNoise();
     private static final long ANIMATION_START_NANOS=System.nanoTime();
     /** Seconds the shaders animate by (water, clouds, stars, meteors); the cinematic capture pins it per output frame. */
     public static volatile double animationOverride=Double.NaN;
     private static double animationSeconds() {
         double o=animationOverride;
         return Double.isNaN(o)?(System.nanoTime()-ANIMATION_START_NANOS)/1.0e9:o;
+    }
+    /**
+     * Absolute camera x/z for the cloud/fog shaders, reduced in double precision. As a float the raw coordinate
+     * loses whole blocks far from spawn (4 blocks at 33M), and the cloud octaves multiply that error, so clouds
+     * jumped and raced. The period is 32x the low-cloud tile (64 noise texels / CLOUD_SCALE 0.002 * size), so the
+     * cloud field is seamless; cirrus folds itself further in the shader (itrpCirrusDensity).
+     */
+    static float cloudWrap(double v) {
+        double period = 32.0 * 32000.0 * Math.max(CausticaConfig.Rt.Clouds.SIZE.value(), 1.0e-3);
+        return (float) (v - Math.floor(v / period + 0.5) * period);
     }
     private final RtTorchGuidance torchGuidance = new RtTorchGuidance();
     private static final int WORLD_PUSH_SIZE = WorldPushData.BYTE_SIZE;
@@ -276,6 +287,10 @@ public final class RtComposite {
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
+    // Free resolution: DLSS-RR writes here (smaller than the display), then it is stretched into rrOutput.
+    private RtImage rrMid;
+    private dev.comfyfluffy.caustica.rt.pipeline.RtFreeResUpscalePipeline freeResUpscale;
+    private int midW = -1, midH = -1;
     private final RtExposure exposure = new RtExposure();
     private final WetnessHistory wetnessHistory = new WetnessHistory();
 
@@ -695,6 +710,11 @@ public final class RtComposite {
         long celView = celestialsAtlasView();
         if (worldPipeline.hasSkyAtlas()) {
             worldPipeline.setSkyAtlas(celView != 0L ? celView : atlasView, sampler);
+            volumeNoise.ensure(ctx);
+            if (volumeNoise.shape() != null && volumeNoise.detail() != null) {
+                worldPipeline.setCloudVolume(volumeNoise.shape().view(), volumeNoise.shape().sampler(),
+                        volumeNoise.detail().view(), volumeNoise.detail().sampler());
+            }
         }
         setCelestialUvAtlas(celView);
         // Atlas UVs and material IDs are one resource epoch. Drop old terrain as a unit rather than
@@ -768,6 +788,7 @@ public final class RtComposite {
                 bindlessTextureCapacity = 0;
             }
             cloudNoise.destroy();
+            volumeNoise.destroy();
             torchGuidance.destroy();
             RtMaterialRegistry.INSTANCE.destroy();
         }
@@ -816,12 +837,20 @@ public final class RtComposite {
             rrOutput.destroy();
             rrOutput = null;
         }
+        if (rrMid != null) {
+            rrMid.destroy();
+            rrMid = null;
+        }
+        if (freeResUpscale != null) {
+            freeResUpscale.destroy();
+            freeResUpscale = null;
+        }
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
         boolean rrEnabled = RtDlssRr.enabled();
         boolean hdrEnabled = CausticaConfig.Rt.Hdr.enabled();
-        int rrQuality = rrEnabled ? RtDlssRr.quality() : Integer.MIN_VALUE;
+        int rrQuality = rrEnabled ? RtDlssRr.renderSizeKey() : Integer.MIN_VALUE;
         if (targetsReady && output != null && displayImage != null && hdrDisplayImage != null && rrOutput != null && exposure.ready()
                 && displayW == width && displayH == height
                 && renderSizeRrEnabled == rrEnabled && renderSizeSrMode == RtDlssRr.srOnly() && renderSizeRrQuality == rrQuality
@@ -868,7 +897,10 @@ public final class RtComposite {
         // With RR on, ask NGX what render resolution its chosen quality mode actually expects rather
         // than assuming a fixed ratio: different quality modes (and driver versions) use different
         // ratios, and DLSSD's own optimal-settings query is the source of truth for what it will accept.
-        int[] optimal = rrEnabled ? RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height) : null;
+        int[] freeOut = rrEnabled ? RtDlssRr.freeOutputSize(width, height) : null;
+        midW = freeOut != null ? freeOut[0] : width;
+        midH = freeOut != null ? freeOut[1] : height;
+        int[] optimal = rrEnabled ? RtDlssRr.INSTANCE.queryOptimalRenderSize(midW, midH) : null;
         renderW = optimal != null ? optimal[0] : width;
         renderH = optimal != null ? optimal[1] : height;
         renderSizeRrEnabled = rrEnabled;
@@ -897,6 +929,9 @@ public final class RtComposite {
         gSpecMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion " + renderW + "x" + renderH);
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
+        rrMid = midW != width || midH != height
+                ? ctx.createStorageImage(midW, midH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR free-res output " + midW + "x" + midH)
+                : null;
         exposure.ensureResources(ctx);
 
         CausticaPerfLog.targetsRebuilt(width, height, renderW, renderH, rrEnabled, rrQuality);
@@ -955,12 +990,12 @@ public final class RtComposite {
         // Jitter is suppressed for the no-RR reference and for the debug guide views (raw inspection).
         int debugView = debugView();
         // Views 1-9 inspect raw guide buffers; 10+ are lighting breakdowns that keep the normal RR/cache path.
-        boolean guideView = debugView != 0 && debugView < 10;
+        boolean guideView = debugView != 0 && (debugView < 10 || (debugView >= 13 && debugView <= 16) || debugView == 20);
         boolean rrPath = RtDlssRr.enabled() && !guideView;
         float jitterX = 0f;
         float jitterY = 0f;
         if (rrPath) {
-            CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW);
+            CausticaJitter.INSTANCE.prepare(renderW, renderH, rrMid != null ? midW : displayW);
             jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
             jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
         }
@@ -1055,6 +1090,7 @@ public final class RtComposite {
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
             frameEntities = fe;
             if (RtEntities.INSTANCE.rainVeilActive()) flags |= 1 << 20; // world.rgen: run the rain-veil transmittance query
+            if (!CausticaConfig.Rt.Diagnostics.ONE_SIDED_PLANTS.value()) flags |= 1 << 21; // world.rahit: A/B off
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
@@ -1130,7 +1166,7 @@ public final class RtComposite {
                     mvCurProjView,
                     breaking.length,
                     CausticaConfig.Rt.Clouds.MODE.value() == 0 && dimension!=2 ? 0L : cloudNoise.address(ctx),
-                    new Float4((float)camX, (float)camY, (float)camZ, level==null?0f:level.getRainLevel(Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false))),
+                    new Float4(cloudWrap(camX), (float)camY, cloudWrap(camZ), level==null?0f:level.getRainLevel(Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false))),
                     new Float4(CausticaConfig.Rt.Clouds.COVERAGE.value(),CausticaConfig.Rt.Clouds.DENSITY.value(),CausticaConfig.Rt.Clouds.SIZE.value(),CausticaConfig.Rt.Clouds.HEIGHT.value()),
                     new Float4(CausticaConfig.Rt.Clouds.BRIGHTNESS.value(),CausticaConfig.Rt.Clouds.BOTTOM.value(),CausticaConfig.Rt.Clouds.SUNLIGHT.value(),CausticaConfig.Rt.Clouds.SPEED.value()),
                     new Float4(CausticaConfig.Rt.Clouds.EDGE.value(),CausticaConfig.Rt.Clouds.CIRRUS.value(),CausticaConfig.Rt.Clouds.RAIN.value(),CausticaConfig.Rt.Visuals.ZERO_F0_FALLBACK.value()),
@@ -1148,7 +1184,8 @@ public final class RtComposite {
                             CausticaConfig.Rt.Look.SUN_GLOW.value() + 4f * Math.round(CausticaConfig.Rt.Look.NIGHT_BRIGHTNESS.value() * 100f)
                                     + 4000f * ((CausticaConfig.Rt.Look.NEBULA.value() ? 0 : 1) + (CausticaConfig.Rt.Look.CLOUD_SHADOW.value() ? 0 : 2)
                                     + (CausticaConfig.Rt.Entities.ARMOR_SKIN_LIT.value() ? 4 : 0)
-                                    + (CausticaConfig.Rt.Entities.WATER_SELF_REFLECTION.value() ? 0 : 8))), // see lookSwitches
+                                    + (CausticaConfig.Rt.Entities.WATER_SELF_REFLECTION.value() ? 0 : 8)
+                                    + (CausticaConfig.Rt.Visuals.END_NEBULA.value() ? 0 : 16))), // see lookSwitches
                     torchGuideAddress,
                     new Float4(torchGuidance.originX() - terrain.blockX, torchGuidance.originY() - terrain.blockY,
                             torchGuidance.originZ() - terrain.blockZ, TorchGuidanceGrid.CELL_SIZE),
@@ -1181,11 +1218,41 @@ public final class RtComposite {
                     risPush(),
                     new Float4(CausticaConfig.Rt.Visuals.FOG_HEIGHT.value(), CausticaConfig.Rt.Visuals.FOG_RAIN.value(),
                             CausticaConfig.Rt.Visuals.FOG_HAZE.value(), CausticaConfig.Rt.Visuals.FOG_SUN.value()),
-                    new Float4(nightVision(), 0f, 0f, 0f)
+                    effectControl(),
+                    // ITRP warm emitter colour (COLOR_TORCH_G/B, R fixed at 1), sRGB -> linear like the pack.
+                    new Float4(1f, (float) Math.pow(CausticaConfig.Rt.Look.TORCH_G.value(), 2.2),
+                            (float) Math.pow(CausticaConfig.Rt.Look.TORCH_B.value(), 2.2), 0f),
+                    new Float4(CausticaConfig.Rt.Clouds.VOL_ALTITUDE.value(), CausticaConfig.Rt.Clouds.VOL_THICKNESS.value(),
+                            CausticaConfig.Rt.Clouds.VOL_COVERAGE.value(), CausticaConfig.Rt.Clouds.VOL_RAIN_COVERAGE.value()),
+                    new Float4(CausticaConfig.Rt.Clouds.VOL_DENSITY.value(), CausticaConfig.Rt.Clouds.VOL_SCALE.value(),
+                            CausticaConfig.Rt.Clouds.VOL_SUNLIGHT.value(), CausticaConfig.Rt.Clouds.VOL_RAIN_SUNLIGHT.value()),
+                    new Float4(CausticaConfig.Rt.Clouds.VOL_SKYLIGHT.value(), CausticaConfig.Rt.Clouds.VOL_BASE_NOISE.value(),
+                            CausticaConfig.Rt.Clouds.VOL_DETAIL_NOISE.value(), CausticaConfig.Rt.Clouds.VOL_DETAIL_STRENGTH.value()),
+                    new Float4(CausticaConfig.Rt.Clouds.VOL_COVERAGE_OFFSET.value(), CausticaConfig.Rt.Clouds.VOL_QUALITY.value(),
+                            CausticaConfig.Rt.Clouds.VOL_RAIN_DENSITY.value(), CausticaConfig.Rt.Clouds.VOL_RAIN_SCALE.value()),
+                    new Float4(CausticaConfig.Rt.Visuals.FOG_LAYER_BOTTOM.value(),
+                            Math.max(CausticaConfig.Rt.Visuals.FOG_LAYER_TOP.value(), CausticaConfig.Rt.Visuals.FOG_LAYER_BOTTOM.value() + 1f),
+                            CausticaConfig.Rt.Visuals.FOG_LAYER_FALLOFF.value(), CausticaConfig.Rt.Visuals.FOG_LAYER.value()),
+                    new Float4(CausticaConfig.Rt.Visuals.FOG_LAYER_COVERAGE.value(), CausticaConfig.Rt.Visuals.FOG_LAYER_LIGHT.value(),
+                            CausticaConfig.Rt.Visuals.FOG_LAYER_SUN.value(), CausticaConfig.Rt.Visuals.FOG_LAYER_ABSORB.value()),
+                    new Float4(CausticaConfig.Rt.Visuals.WATER_ABSORB_R.value(), CausticaConfig.Rt.Visuals.WATER_ABSORB_G.value(),
+                            CausticaConfig.Rt.Visuals.WATER_ABSORB_B.value(), CausticaConfig.Rt.Visuals.WATER_FILL_DENSITY.value()),
+                    new Float4(CausticaConfig.Rt.Visuals.WATER_FILL_R.value(), CausticaConfig.Rt.Visuals.WATER_FILL_G.value(),
+                            CausticaConfig.Rt.Visuals.WATER_FILL_B.value(), 0f),
+                    new Float4(CausticaConfig.Rt.Visuals.WAVE_STRENGTH.value(), CausticaConfig.Rt.Visuals.WAVE_SIZE.value(),
+                            CausticaConfig.Rt.Visuals.WAVE_SPEED.value(), CausticaConfig.Rt.Visuals.FOG_BASE.value()),
+                    // ITRP marches sky-pixel fog only to max(LOD distance, far) * 1.4.
+                    new Float4(Math.max(net.minecraft.client.Minecraft.getInstance().options.getEffectiveRenderDistance() * 16f, 512f) * 1.4f,
+                            CausticaConfig.Rt.Visuals.FOG_LAYER_VEIL.value(), 0f, 0f)
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             // Upload any entity textures registered this frame into the bindless set before the trace.
             RtEntityTextures.INSTANCE.uploadPending(active, atlasSampler(ctx));
+            // Waving foliage: deform nearby foliage sections and refit their BLAS before the TLAS build.
+            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.waving")) {
+                RtFrameStats.FRAME.count("wavingSections",
+                        dev.comfyfluffy.caustica.rt.terrain.RtWavingPass.record(ctx, cmd, terrain, camX, camY, camZ, rain));
+            }
             // Build the entity BLAS, the TLAS that references it and the terrain BLAS, then the trace.
             // Barriers separate each stage; the graphics-use timeline guards resource reuse.
             if (!fe.blas().isEmpty()) {
@@ -1269,21 +1336,30 @@ public final class RtComposite {
             }
             // DLSS-RR denoise + upscale. The RT pass wrote noisy color (render res) + guides;
             // RR reads them and writes the display-res denoised result straight into rrOutput.
-            if (rrPath && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
+            RtImage rrTarget = rrMid != null ? rrMid : rrOutput;
+            int rrOutW = rrTarget.width, rrOutH = rrTarget.height;
+            if (rrPath && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, rrOutW, rrOutH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
                     if(RtDlssRr.srOnly()) {
-                        rrDone=dev.comfyfluffy.caustica.rt.pipeline.RtStreamlineSr.INSTANCE.evaluate(cmd.address(),output,gDepth,gMotion,gAlbedo,gSpecAlbedo,gNormal,gSpecMotion,null,null,rrOutput,
-                            renderW,renderH,displayW,displayH,jitterX,jitterY,frameProjection,mvCurProjView,mvPrevProjView,frameViewRotation,camX,camY,camZ,mvCamDeltaX,mvCamDeltaY,mvCamDeltaZ,false);
+                        rrDone=dev.comfyfluffy.caustica.rt.pipeline.RtStreamlineSr.INSTANCE.evaluate(cmd.address(),output,gDepth,gMotion,gAlbedo,gSpecAlbedo,gNormal,gSpecMotion,null,null,rrTarget,
+                            renderW,renderH,rrOutW,rrOutH,jitterX,jitterY,frameProjection,mvCurProjView,mvPrevProjView,frameViewRotation,camX,camY,camZ,mvCamDeltaX,mvCamDeltaY,mvCamDeltaZ,false);
                     } else if(dev.comfyfluffy.caustica.streamline.StreamlineRuntime.initialized()) {
-                        rrDone=dev.comfyfluffy.caustica.rt.pipeline.RtStreamlineRr.INSTANCE.evaluate(cmd.address(),output,gDepth,gMotion,gAlbedo,gSpecAlbedo,gNormal,gSpecMotion,null,null,rrOutput,
-                            renderW,renderH,displayW,displayH,jitterX,jitterY,frameProjection,mvCurProjView,mvPrevProjView,frameViewRotation,camX,camY,camZ,mvCamDeltaX,mvCamDeltaY,mvCamDeltaZ,false);
+                        rrDone=dev.comfyfluffy.caustica.rt.pipeline.RtStreamlineRr.INSTANCE.evaluate(cmd.address(),output,gDepth,gMotion,gAlbedo,gSpecAlbedo,gNormal,gSpecMotion,null,null,rrTarget,
+                            renderW,renderH,rrOutW,rrOutH,jitterX,jitterY,frameProjection,mvCurProjView,mvPrevProjView,frameViewRotation,camX,camY,camZ,mvCamDeltaX,mvCamDeltaY,mvCamDeltaZ,false);
                     } else rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, gSpecMotion, rrOutput, renderW, renderH, displayW, displayH,
+                            gSpecAlbedo, gNormal, gSpecMotion, rrTarget, renderW, renderH, rrOutW, rrOutH,
                             -jitterX, -jitterY, frameViewRotation, frameProjection);
                 }
             }
 
+            if (rrDone && rrMid != null) {
+                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                // Free resolution: Lanczos-2 + contrast-limited sharpen stretch of the DLSS output to the screen.
+                if (freeResUpscale == null) freeResUpscale = dev.comfyfluffy.caustica.rt.pipeline.RtFreeResUpscalePipeline.create(ctx);
+                freeResUpscale.setImages(rrOutput.view, rrMid.view);
+                freeResUpscale.dispatch(cmd, displayW, displayH, 0.35f);
+            }
             // When DLSS-RR did not produce the display-res image (disabled, debug view, or a runtime
             // failure), bring the render-res trace up to display res with a linear blit so the display mapper
             // always has a display-res RT image. With RR off render == display, so this is a 1:1 copy.
@@ -1657,6 +1733,7 @@ public final class RtComposite {
         materialBindingsReady = false;
         materialEpochTraceGate = false;
         cloudNoise.destroy();
+        volumeNoise.destroy();
         torchGuidance.destroy();
         RtMaterialRegistry.INSTANCE.destroy();
         if (pushRing != null) {
@@ -2306,6 +2383,43 @@ public final class RtComposite {
         b.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
         b.get(0).srcOffsets(1).set(w,h,1);b.get(0).dstOffsets(0).set(0,dst.height,0);b.get(0).dstOffsets(1).set(dst.width,0,1);
         VK10.vkCmdBlitImage(cmd,src,VK10.VK_IMAGE_LAYOUT_GENERAL,dst.image,VK10.VK_IMAGE_LAYOUT_GENERAL,b,VK10.VK_FILTER_NEAREST);
+    }
+
+    /** Night vision plus lightning flash ambient, and vanilla's view-limiting fogs as a distance veil. */
+    private static Float4 effectControl() {
+        var mc = net.minecraft.client.Minecraft.getInstance();
+        float ambient = nightVision();
+        float end = 0f, start = 0f, white = 0f;
+        var level = mc.level;
+        var camera = mc.gameRenderer.mainCamera();
+        if (level != null && camera != null) {
+            float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+            if (((dev.comfyfluffy.caustica.mixin.ClientLevelAccessor) level).caustica$skyFlashTime() > 0
+                    && !mc.options.hideLightningFlash().get()) {
+                // Vanilla brightens the sky and everything sky-lit; here the sky-lit share of a flat ambient.
+                float sky = level.getBrightness(net.minecraft.world.level.LightLayer.SKY,
+                        net.minecraft.core.BlockPos.containing(camera.position())) / 15f;
+                ambient = Math.min(1f, ambient + sky);
+            }
+            float far = mc.options.getEffectiveRenderDistance() * 16f;
+            if (camera.getFluidInCamera() == net.minecraft.world.level.material.FogType.POWDER_SNOW) {
+                boolean spectator = mc.player != null && mc.player.isSpectator();
+                end = spectator ? far * 0.5f : 2f;
+                white = 1f;
+            } else if (mc.getCameraEntity() instanceof net.minecraft.world.entity.LivingEntity living) {
+                var blind = living.getEffect(net.minecraft.world.effect.MobEffects.BLINDNESS);
+                var dark = living.getEffect(net.minecraft.world.effect.MobEffects.DARKNESS);
+                if (blind != null) {
+                    end = blind.isInfiniteDuration() ? 5f
+                            : net.minecraft.util.Mth.lerp(Math.min(1f, blind.getDuration() / 20f), far, 5f);
+                    start = end * 0.25f;
+                } else if (dark != null) {
+                    end = net.minecraft.util.Mth.lerp(dark.getBlendFactor(living, partial), far, 15f);
+                    start = end * 0.75f;
+                }
+            }
+        }
+        return new Float4(ambient, end, start, white);
     }
 
     /** Vanilla night-vision strength, including its fade-out flicker in the last 10 seconds. */

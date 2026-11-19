@@ -78,6 +78,8 @@ float endFbm(float3 p) {
     for(uint i=0;i<5;i++) {s+=a*endNoise(p);p=p*2.11+float3(1.7,9.2,4.4);a*=.5;}
     return s/.96875;
 }
+// 0 hides the End nebula (look switch); set by the entry points from the frame's look switches.
+public static float endNebulaGain = 1.0;
 float3 endNebula(float3 dir,float time) {
     float3 d=endRotateY(dir,time*.001);
     float3 warp=float3(endFbm(d*1.8+3.1),endFbm(d*1.8+11.7),endFbm(d*1.8+23.3))-.5;
@@ -101,7 +103,11 @@ float3 endAccretion(inout float3 ray,float time,uint64_t noiseAddr,float starGai
     float3 position=-light*8.0+ray*3.0;
     float trans=1.0;float3 radiance=float3(0);
     const float dt=.2;
-    position+=ray*.1; // midpoint quadrature; the reference uses temporal sub-step jitter.
+    // Per-pixel, per-frame sub-step jitter, as in the reference. A fixed midpoint offset sampled every pixel
+    // on the same 50 planes; zoomed in, the disc showed those planes as soft stair-step blocks. Jittered,
+    // the planes land differently each frame and RR integrates them into a continuous volume.
+    float jitter=frac(endHash(ray*4096.0+float3(17.0,31.0,7.0))+frac(time*7.0)*.6180339887);
+    position+=ray*(dt*jitter);
     for(uint i=0;i<50;i++) {
         float3 disc=endRotateX(endRotateZ(position,-.265-.14835299),.1);
         float r=length(disc),height=disc.y;
@@ -138,7 +144,7 @@ float3 endAccretion(inout float3 ray,float time,uint64_t noiseAddr,float starGai
         ray=bent/max(length(bent),1e-6);position+=ray*dt;
         if(trans<.0001)break;
     }
-    return max(radiance,float3(0))+(endStarfield(ray,time)+endNebula(ray,time))*trans*starGain;
+    return max(radiance,float3(0))+(endStarfield(ray,time)+endNebula(ray,time)*endNebulaGain)*trans*starGain;
 }
 // ITRP PlanetEnd2 ring optical depth: CurveToLinear(saturate(accum - offset) * scale), faded in over
 // the inner 10% of the ring (the smoothstep sits inside the exponent, as in the reference).

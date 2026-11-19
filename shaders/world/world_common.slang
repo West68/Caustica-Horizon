@@ -100,7 +100,20 @@ public struct WorldPush {
     public uint     lightCount;       // packed Light records in pc.lightBufAddr
     public uint     risCandidates;    // RIS candidate count M per diffuse vertex (0 = emitter NEE off)
     public float4   fogControl;       // x height falloff (blocks), y rain fog gain, z far haze strength, w sun in-scatter gain
-    public float4   effectControl;    // x night-vision strength (0..1, vanilla fade flicker); yzw reserved
+    public float4   effectControl;    // x night vision + lightning flash ambient (0..1); y view-veil end distance (0 off), z start, w 0 black / 1 snow white
+    public float4   warmLightTint;    // ITRP light colours: linear warm (torch) emitter colour; w unused
+    // Volumetric clouds (cloud mode 3, itrp_volumetric.slang).
+    public float4   cloudVolume0;     // base altitude (abs Y), thickness, coverage clear, coverage rain
+    public float4   cloudVolume1;     // density, scale, sunlight clear, sunlight rain
+    public float4   cloudVolume2;     // skylight, base noise scale, detail noise scale, detail strength
+    public float4   cloudVolume3;     // coverage noise offset, quality, rain density (0 = clear), rain scale (0 = clear)
+    // Patchy fog layer ("sea of clouds"): 0 strength = off.
+    public float4   fogLayer0;        // bottom abs Y, top abs Y (densest), falloff above top (blocks), strength
+    public float4   fogLayer1;        // patch coverage, ambient light gain, sunlight gain, sunlight absorption
+    public float4   waterLook0;       // ITRP-look water absorption RGB (log2 per block), in-scatter fill rate
+    public float4   waterLook1;       // ITRP-look water in-scatter colour RGB, sun share of the in-scatter
+    public float4   waterLook2;       // wave slope gain, wave size (>1 larger), wave speed, base-fog multiplier
+    public float4   waterLook3;       // x fog-layer ray cap for sky pixels (blocks), y fog-layer even veil, zw unused
 };
 
 public static const uint FRAME_FLAG_DISABLE_ORE_EMISSION = 65536u;
@@ -143,6 +156,9 @@ public struct LightGridSpan {
 
 // TerrainPrim.flags bit 1: this emissive quad is in the light buffer (bit 0 is the sky-access marker).
 public static const uint TERRAIN_PRIM_IN_LIGHT_BUFFER = 2u;
+// Cutout face with a coincident back face: any-hit accepts it only from the side it faces (RtTerrainMesher).
+public static const uint TERRAIN_PRIM_ONE_SIDED = 4u;
+public static const uint TERRAIN_PRIM_FOLIAGE = 8u;
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.
 public struct Payload {
@@ -165,12 +181,16 @@ public static const uint PAYLOAD_RELIEF_QUERY = 0x20000000u;
 // Rain-veil transmittance query (world.rgen rainVeilTransmittance): payload.hitT carries this sentinel in,
 // albedo.x accumulates the product of (1 - streak opacity), albedo.y carries the per-frame opacity scale.
 public static const float RAIN_VEIL_QUERY = -7.0;
+// Shadow payload roughMetal marker for the back-light (SSS) transmission ray: tagged foliage dims it instead of
+// blocking it, so canopies of fully opaque leaf textures still pass light through their depth.
+public static const uint SSS_QUERY_MARK = 0x55C0FFEEu;
 // Flat block glass (including block-item geometry) supplies RR guides from the optical continuation.
 // The legacy name describes the slab model, not whether its entity has a motion vector.
 public static const uint PAYLOAD_STATIC_GLASS = 0x40000000u;
 // torchControl.w packs, low to high: sun glow (below 4), night brightness * 4 in hundredths (below 4000), switches * 4000.
 public static const uint LOOK_SWITCH_NO_NEBULA = 1u;
 public static const uint LOOK_SWITCH_NO_CLOUD_SHADOW = 2u;
+public static const uint LOOK_SWITCH_NO_END_NEBULA = 16u;
 // Armour self-shadowing: an armour piece sits a couple of texels off the body, so the body's own light ray
 // hits it first and the skin goes black. This bit makes entity surfaces start their light rays outside it.
 public static const uint LOOK_SWITCH_ARMOR_SKIN_LIT = 4u;
@@ -313,6 +333,8 @@ public struct Section {
     public uint64_t primAddr;
     public uint64_t uvAddr;
     public uint triBase[4]; // fixed bucket order: solid/cutout/translucent/water
+    public uint64_t idxAddr;  // waving sections only: kept index buffer (0 = static section)
+    public uint64_t dispAddr; // waving sections only: float4 per-vertex motion this frame
 };
 
 // Entity geometry record: packed buffer addresses, motion, and per-geometry triangle bases. Entity BLAS

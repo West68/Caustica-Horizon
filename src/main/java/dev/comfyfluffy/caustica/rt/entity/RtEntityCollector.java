@@ -103,7 +103,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     private float emittedBlockOffsetX, emittedBlockOffsetY, emittedBlockOffsetZ;
     private final RandomSource emittedBlockRandom = RandomSource.create();
     private static final boolean CATHARSIS_LOADED = net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("catharsis");
-    private boolean playerOnRealPath; // per entity capture; see submitModel
+    private boolean entityOnRealPath; // per entity capture; see submitModel
     // Set by order(int) for the very next submitModel call (banner/shield pattern-layer stacking), then
     // consumed. Baked-quad paths (addQuad) don't use ordering and always reset the capture's order to 0.
     private int pendingOrder;
@@ -148,7 +148,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     boolean suppressTextShadows;
 
     public void begin(RtEntityCapture capture, boolean profileDynamicEntity) {
-        playerOnRealPath = false;
+        entityOnRealPath = false;
         // Submissions that arrive before the RT material snapshot exists cannot be consumed later; their
         // sprites/atlases would also fail material resolution mid-frame. Modded first-person layers (Punchy
         // submits translucent arm overlays and the held item this early) hit exactly that window, so drop the
@@ -175,10 +175,30 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         blockQuadEmitter = null;
     }
 
+    //? if <26.3 {
     @Override
     public <S> void submitModel(Model<? super S> model, S state, PoseStack poseStack, RenderType renderType,
                                 int lightCoords, int overlayCoords, int tintedColor, TextureAtlasSprite sprite,
                                 int outlineColor, ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
+    //?} else {
+    /*// 26.3 split block-breaking overlays into submitCrumblingOverlay and passes a UvMapping (sprites implement it).
+    @Override
+    public <S> void submitCrumblingOverlay(Model<? super S> model, S state, PoseStack poseStack, RenderType renderType,
+                                int lightCoords, int overlayCoords, int outlineColor,
+                                ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
+    }
+
+    @Override
+    public void submitTextBackground(PoseStack poseStack, float x0, float y0, float x1, float y1, int color,
+                                Font.DisplayMode displayMode, int lightCoords) {
+    }
+
+    @Override
+    public <S> void submitModel(Model<? super S> model, S state, PoseStack poseStack, RenderType renderType,
+                                int lightCoords, int overlayCoords, int tintedColor,
+                                net.minecraft.client.renderer.texture.UvMapping uvMapping, int outlineColor) {
+        TextureAtlasSprite sprite = uvMapping instanceof TextureAtlasSprite atlasSprite ? atlasSprite : null;
+    *///?}
         if (probeHand && RtFirstPerson.probe()) {
             probeModel++;
             int cubes = countVisibleCuboids(model.root());
@@ -279,9 +299,15 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // Catharsis applies per-equipment visibility during humanoid pose setup.
         boolean catharsisHumanoid = CATHARSIS_LOADED
                 && state instanceof net.minecraft.client.renderer.entity.state.HumanoidRenderState;
-        RtCuboidEmitter.ModelTemplate directTemplate = catharsisHumanoid || (playerModel && (playerOnRealPath
-                || FirstPersonModelCompat.rendering() || FirstPersonModelCompat.cameraCapture())) || glintPass ? null : cuboidEmitter.prepare(model);
-        if (playerModel && directTemplate == null) playerOnRealPath = true;
+        // The same holds for every mob: when EMF/Fresh Animations replaced the body, its armour, heads and other
+        // layer models must take the real (replay) path too. EMF syncs a layer to the animated body only there;
+        // on the cuboid shortcut the armour kept vanilla setupAnim (zombie arms raised, helmet off the head).
+        boolean livingModel = state instanceof net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
+        RtCuboidEmitter.ModelTemplate directTemplate = catharsisHumanoid || (livingModel && entityOnRealPath)
+                || (playerModel && (FirstPersonModelCompat.rendering() || FirstPersonModelCompat.cameraCapture()))
+                || glintPass ? null : cuboidEmitter.prepare(model);
+        if (playerModel && directTemplate == null) entityOnRealPath = true;
+        else if (livingModel && directTemplate == null && !glintPass && !catharsisHumanoid) entityOnRealPath = true;
         boolean replayModel = directTemplate == null && RtModelCompat.enabled() && !FirstPersonModelCompat.cameraCapture();
         long setupStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {
@@ -440,11 +466,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                 || q.materialInfo().tintIndex() >= 0);
         if(itemFoil) {
             int baseSlot=capture.currentTexSlot,baseMaterial=capture.currentMaterialId;
-            var foil=RenderTypes.glint();
-            capture.clearUvRemap();capture.currentTexSlot=RtEntityTextures.INSTANCE.slotFor(foil);
+            capture.clearUvRemap();capture.currentTexSlot=foilSlot();
             capture.currentMaterialId=baseMaterial;
             capture.currentAlphaBucket=RtAccel.ENTITY_BUCKET_ANY_HIT;capture.currentOrder=1;
-            capture.textureTransform=textureMatrix(foil);
+            capture.textureTransform=foilMatrix();
             capture.addFoilQuad(pose,q,sprite,baseSlot,tintColor(q.materialInfo().tintIndex(),tintLayers));capture.clearUvRemap();
         }
     }
@@ -490,6 +515,20 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         }
     }
 
+    // Item enchantment glint layer. 26.3 folded glint into the base item render types (no standalone
+    // glint() type), so the glint texture is resolved directly there.
+    //? if <26.3 {
+    private static int foilSlot() { return RtEntityTextures.INSTANCE.slotFor(RenderTypes.glint()); }
+    private static Matrix4f foilMatrix() { return textureMatrix(RenderTypes.glint()); }
+    //?} else {
+    /*private static final net.minecraft.resources.Identifier GLINT_ITEM =
+            net.minecraft.resources.Identifier.withDefaultNamespace("textures/misc/enchanted_glint_item.png");
+    private static int foilSlot() { return RtEntityTextures.INSTANCE.slotForAtlas(GLINT_ITEM); }
+    private static Matrix4f foilMatrix() {
+        return RtGlintTransform.matrix(net.minecraft.util.Util.getMillis(),Minecraft.getInstance().options.glintSpeed().get(),8f);
+    }
+    *///?}
+
     private static Matrix4f textureMatrix(RenderType type) {
         if(type==null)return null;
         Object state=((RenderTypeAccessor)type).caustica$state();
@@ -514,8 +553,18 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // runtime), mirroring RtEntityTextures#textureLocation.
         Object setup = ((RenderTypeAccessor) renderType).caustica$state();
         RenderPipeline pipeline = ((RenderSetupAccessor) setup).caustica$pipeline();
+        return blends(pipeline);
+    }
+
+    private static boolean blends(RenderPipeline pipeline) {
+        //? if <26.3 {
         ColorTargetState cts = pipeline.getColorTargetState();
         return cts != null && cts.blendFunction().isPresent();
+        //?} else {
+        /*for (ColorTargetState cts : pipeline.getColorTargetStates())
+            if (cts != null && cts.blendFunction().isPresent()) return true;
+        return false;
+        *///?}
     }
 
     /** A "hat" part near the root: the inflated, mostly transparent humanoid head overlay. */
@@ -571,8 +620,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         }
         Object setup = ((RenderTypeAccessor) renderType).caustica$state();
         RenderPipeline pipeline = ((RenderSetupAccessor) setup).caustica$pipeline();
-        ColorTargetState cts = pipeline.getColorTargetState();
-        if (cts != null && cts.blendFunction().isPresent()) {
+        if (blends(pipeline)) {
             return RtAccel.ENTITY_BUCKET_ANY_HIT;
         }
         // Vanilla's cutout pipelines carry the exact ALPHA_CUTOUT shader define.
@@ -721,6 +769,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
      * per vertex in {@code BakedSheetGlyph}, so committing there is safe — no vertex is ever left pending.
      */
     private final class RtTextVertexConsumer implements VertexConsumer {
+        //? if >=26.3 {
+        /*// 26.3 added a third UV channel (item glint); ray-traced captures ignore it.
+        @Override public VertexConsumer setUv3(float u, float v) { return this; }
+        *///?}
         private float vx, vy, vz;
         private int vColor = -1;
         private float vu, vv;
@@ -1006,9 +1058,17 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     /** Fabric item models can carry a mesh besides (or instead of) vanilla baked quads; the injected
      *  default drops it the same way the block-model overload does. */
     @Override
+    //? if <26.3 {
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords,
                            int overlayCoords, int outlineColor, int[] tintLayers, List<BakedQuad> quads,
                            MeshView mesh, ItemStackRenderState.FoilType foilType) {
+    //?} else {
+    /*public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords,
+                           int overlayCoords, int outlineColor, int[] tintLayers,
+                           net.minecraft.client.resources.model.geometry.ItemQuads itemQuads,
+                           MeshView mesh, ItemStackRenderState.FoilType foilType) {
+        List<BakedQuad> quads = itemQuads.all();
+    *///?}
         if (probeHand && RtFirstPerson.probe()) probeItem++;
         if (capture == null || cameraHidesItem(displayContext)) {
             return;
@@ -1096,10 +1156,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         bakedLayers.record(capture, quad.chunkLayer() != ChunkSectionLayer.SOLID || quad.tintIndex() >= 0);
         if(itemMesh && itemFoil) {
             int baseMaterial=capture.currentMaterialId,baseSlot=capture.currentTexSlot,primStart=capture.prim.size(),vertexStart=capture.verts.size()/3;
-            var foil=RenderTypes.glint();capture.currentTexSlot=RtEntityTextures.INSTANCE.slotFor(foil);
+            capture.currentTexSlot=foilSlot();
             capture.currentMaterialId=baseMaterial;
             capture.currentAlphaBucket=RtAccel.ENTITY_BUCKET_ANY_HIT;capture.currentOrder=1;
-            capture.textureTransform=textureMatrix(foil);
+            capture.textureTransform=foilMatrix();
             for(int i=0;i<4;i++) {
                 meshU[i]=(meshU[i]-sprite.getU0())/(sprite.getU1()-sprite.getU0());
                 meshV[i]=(meshV[i]-sprite.getV0())/(sprite.getV1()-sprite.getV0());
@@ -1124,7 +1184,12 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     }
 
     @Override
+    //? if <26.3 {
     public void submitBreakingBlockModel(PoseStack poseStack, List<BlockStateModelPart> parts, int progress) {
+    //?} else {
+    /*public void submitBreakingBlockModel(PoseStack poseStack, List<BlockStateModelPart> parts, int progress,
+                                         boolean flag) {
+    *///?}
     }
 
     @Override
@@ -1136,8 +1201,16 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     // Held weapons/tools (via the in-hand layer) + dropped items (ItemEntity) render here as baked
     // quads on the block atlas. Capture them block-atlas textured (slot 0).
     @Override
+    //? if <26.3 {
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords, int overlayCoords,
                            int outlineColor, int[] tintLayers, List<BakedQuad> quads, ItemStackRenderState.FoilType foilType) {
+    //?} else {
+    /*public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords, int overlayCoords,
+                           int outlineColor, int[] tintLayers,
+                           net.minecraft.client.resources.model.geometry.ItemQuads itemQuads,
+                           ItemStackRenderState.FoilType foilType) {
+        List<BakedQuad> quads = itemQuads.all();
+    *///?}
         if (capture == null || cameraHidesItem(displayContext)) {
             return;
         }
@@ -1153,6 +1226,13 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         if(context==ItemDisplayContext.THIRD_PERSON_RIGHT_HAND || context==ItemDisplayContext.THIRD_PERSON_LEFT_HAND)
             dev.comfyfluffy.caustica.rt.RtHeldLights.recordHeldItem(net.minecraft.client.Minecraft.getInstance(),
                     context==ItemDisplayContext.THIRD_PERSON_RIGHT_HAND, capture.verts.elements(), from, capture.verts.size(),itemPose);
+    }
+
+    /** World position the current block-animation replay is relative to (null outside that replay). */
+    private net.minecraft.world.phys.Vec3 blockAnimationOrigin;
+
+    public void setBlockAnimationOrigin(net.minecraft.world.phys.Vec3 origin) {
+        blockAnimationOrigin = origin;
     }
 
     @Override
@@ -1212,11 +1292,57 @@ public final class RtEntityCollector implements SubmitNodeCollector {
      * explicit endVertex call; {@link #finish()} commits the final vertex after the callback returns.
      */
     private final class RtCustomQuadVertexConsumer implements VertexConsumer {
+        //? if >=26.3 {
+        /*// 26.3 added a third UV channel (item glint); ray-traced captures ignore it.
+        @Override public VertexConsumer setUv3(float u, float v) { return this; }
+        *///?}
         private float x, y, z, u, v, nx, ny, nz;
         private int color;
         private boolean pending;
 
         private PrimitiveTopology topology;
+        private final Vector3f bakedCenter = new Vector3f();
+        private final BlockPos.MutableBlockPos bakedPos = new BlockPos.MutableBlockPos();
+
+        /**
+         * Animated block models (Fancy World Animations) arrive as baked quads inside custom geometry. The
+         * render type alone only gives the plain block-atlas colour; resolve each quad like terrain instead —
+         * per-sprite PBR (normal/specular/emission) and the block state's profile, so a swinging lantern still
+         * glows and a door keeps its material. The state is the world block under the quad's centre.
+         */
+        @Override
+        public void putBakedQuad(PoseStack.Pose pose, BakedQuad q, com.mojang.blaze3d.vertex.QuadInstance instance) {
+            if (blockAnimationOrigin == null) {
+                VertexConsumer.super.putBakedQuad(pose, q, instance);
+                return;
+            }
+            commit();
+            pending = false;
+            int slot = capture.currentTexSlot, material = capture.currentMaterialId, bucket = capture.currentAlphaBucket;
+            TextureAtlasSprite sprite = q.materialInfo().sprite();
+            bakedCenter.zero();
+            for (int i = 0; i < 4; i++) bakedCenter.add(q.position(i));
+            bakedCenter.mul(.25f);
+            pose.pose().transformPosition(bakedCenter);
+            bakedPos.set(Mth.floor(blockAnimationOrigin.x + bakedCenter.x), Mth.floor(blockAnimationOrigin.y + bakedCenter.y),
+                    Mth.floor(blockAnimationOrigin.z + bakedCenter.z));
+            var level = Minecraft.getInstance().level;
+            BlockState state = level == null ? null : level.getBlockState(bakedPos);
+            if (state != null && state.isAir()) state = null;
+            boolean translucent = q.materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT;
+            if (sprite != null) capture.currentTexSlot = RtEntityTextures.INSTANCE.slotForAtlas(sprite.atlasLocation());
+            if (state != null) setBlockSpriteMaterial(sprite, state, translucent, false);
+            else setSpriteMaterial(sprite, RtMaterials.Profile.DEFAULT, translucent, false);
+            capture.currentAlphaBucket = translucent || spriteHasHoles(sprite) ? RtAccel.ENTITY_BUCKET_ANY_HIT
+                    : alphaBucket(q.materialInfo().layer(), false);
+            VertexConsumer.super.putBakedQuad(pose, q, instance);
+            commit(); // the quad's last vertex completes with this quad's material
+            pending = false;
+            capture.currentTexSlot = slot;
+            capture.currentMaterialId = material;
+            capture.currentAlphaBucket = bucket;
+        }
+
         private final float[][] triangleData=new float[3][8];
         private final int[] triangleColors=new int[3];
         private int triangleVertices, triangleParity;
@@ -1306,6 +1432,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
 
     /** Expands each raster line segment into two crossed, camera-independent RT ribbons. */
     private final class RtLineVertexConsumer implements VertexConsumer {
+        //? if >=26.3 {
+        /*// 26.3 added a third UV channel (item glint); ray-traced captures ignore it.
+        @Override public VertexConsumer setUv3(float u, float v) { return this; }
+        *///?}
         private static final float WORLD_UNITS_PER_PIXEL = 0.0025f;
         private final float[] ax = new float[4], ay = new float[4], az = new float[4];
         private float x, y, z, width;

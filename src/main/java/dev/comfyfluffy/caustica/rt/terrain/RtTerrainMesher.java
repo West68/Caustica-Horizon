@@ -43,6 +43,7 @@ import net.minecraft.client.model.geom.builders.UVPair;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.block.Block;
@@ -98,10 +99,11 @@ final class RtTerrainMesher {
                                               int scx, int scy, int scz) {
         capture.materials = materials;
         fluidCapture.materials = materials;
+        mesh.waveData = RtWaving.wantsData(scx, scy, scz);
         tessellate(region, modelSet, blockEmitter, blockRandom, capture,
                 fluidRenderer, fluidCapture, mesh, m, scx, scy, scz);
         if (mesh.isEmpty()) {
-            return new CpuSection(null, null);
+            return new CpuSection(null, null, mesh.waveCandidates);
         }
         // RIS emitter-NEE light collection — BEFORE packing: it also stamps NEE membership into the prim
         // records, which packSection then copies out. Only opaque + cutout can emit (glass is shaded
@@ -119,11 +121,14 @@ final class RtTerrainMesher {
         Geom cutout = mesh.cutoutOrEmpty();
         RtAccel.OpacityMicromapInput ommInput =
                 RtTerrainOmm.buildInput(cutout.triCount(), cutout.cornerUv.elements(),
-                        cutout.ommSprites.elements(), cutout.ommSprites.size());
-        return new CpuSection(packSection(mesh, lights), ommInput);
+                        cutout.ommSprites.elements(), cutout.ommSprites.size(), cutout.prim.elements());
+        return new CpuSection(packSection(mesh, lights), ommInput, mesh.waveCandidates);
     }
 
     private static final float[] EMPTY_LIGHTS = new float[0];
+    /** TerrainPrim.flags bit: cutout face with a coincident back face (world_common TERRAIN_PRIM_ONE_SIDED). */
+    static final int TERRAIN_PRIM_ONE_SIDED = 4;
+    static final int TERRAIN_PRIM_FOLIAGE = 8; // leaves/flowers by tag: SSS fallback when the pack has no specular map
 
     private static void collectLights(FloatArrayList out, Geom geom,
                                       RtMaterialRegistry.Snapshot materials, float minFillRatio) {
@@ -151,6 +156,8 @@ final class RtTerrainMesher {
         int[] indices = new int[idxCount];
         float[] uvs = new float[uvFloats];
         float[] material = new float[primFloats];
+        float[] wave = mesh.waveData && mesh.anyWave ? new float[vertFloats / 3] : null;
+        int waveOff = 0;
         int[] triBase = new int[buckets.length];
         int posOff = 0, idxOff = 0, uvOff = 0, matOff = 0, vertBase = 0, triAcc = 0;
         for (int b = 0; b < buckets.length; b++) {
@@ -158,6 +165,11 @@ final class RtTerrainMesher {
             triBase[b] = triAcc;
             int vertSize = geom.verts.size();
             System.arraycopy(geom.verts.elements(), 0, positions, posOff, vertSize);
+            if (wave != null) {
+                if (geom.wave.size() != vertSize / 3) throw new IllegalStateException("wave/vertex count mismatch");
+                System.arraycopy(geom.wave.elements(), 0, wave, waveOff, vertSize / 3);
+                waveOff += vertSize / 3;
+            }
             int idxSize = geom.idx.size();
             int[] gi = geom.idx.elements();
             if (vertBase == 0) {
@@ -178,7 +190,7 @@ final class RtTerrainMesher {
             vertBase += vertSize / 3;
             triAcc += bucketTris[b];
         }
-        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, mesh.torchCenters.toFloatArray(), lights);
+        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, mesh.torchCenters.toFloatArray(), lights, wave);
     }
 
     private static void tessellate(BlockAndTintGetter region, BlockStateModelSet modelSet,
@@ -232,6 +244,14 @@ final class RtTerrainMesher {
                     }
                     capture.state = state;
                     capture.pos = m;
+                    int waveKind = RtWaving.kind(state);
+                    if (waveKind != RtWaving.NONE) mesh.waveCandidates = true;
+                    if (waveKind != RtWaving.NONE && mesh.waveData) {
+                        capture.waveKind = waveKind;
+                        capture.waveLight = RtWaving.lightWeight(region.getBrightness(net.minecraft.world.level.LightLayer.SKY, m));
+                    } else {
+                        capture.waveKind = RtWaving.NONE;
+                    }
                     Vec3 offset = state.getOffset(m);
                     capture.originX = lx + (float) offset.x;
                     capture.originY = ly + (float) offset.y;
@@ -246,13 +266,13 @@ final class RtTerrainMesher {
 
 
     /** Pure-CPU worker result: tessellated mesh plus optional opacity micromap input for its cutout bucket. */
-    record CpuSection(PackedSection packed, RtAccel.OpacityMicromapInput opacityMicromap) {
+    record CpuSection(PackedSection packed, RtAccel.OpacityMicromapInput opacityMicromap, boolean waveCandidates) {
     }
 
     /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays.
      *  {@code lights} = packed section-local RIS light records (possibly empty), CPU-side only. */
     record PackedSection(float[] positions, int[] indices, float[] uvs, float[] material,
-                         int[] bucketTris, int[] triBase, float[] torchCenters, float[] lights) {
+                         int[] bucketTris, int[] triBase, float[] torchCenters, float[] lights, float[] wave) {
     }
 
 
@@ -265,6 +285,9 @@ final class RtTerrainMesher {
      */
     private static final class SectionMesh {
         final FloatArrayList torchCenters = new FloatArrayList();
+        boolean waveData;       // emit per-vertex waving weights for this section (near the player)
+        boolean waveCandidates; // the section contains blocks that wave (it must re-mesh on entering range)
+        boolean anyWave;        // at least one nonzero weight was emitted
         // Conservative worker-side starting capacities. These trade a little transient RAM for avoiding the
         // repeated grow/copy ladder on normal terrain sections.
         private static final int OPAQUE_TRI_CAP = 768;
@@ -321,6 +344,9 @@ final class RtTerrainMesher {
         /** Empty the buckets keeping their backing arrays — the mesh is reused across jobs per worker thread. */
         void reset() {
             torchCenters.clear();
+            waveData = false;
+            waveCandidates = false;
+            anyWave = false;
             resetGeom(opaque);
             resetGeom(cutout);
             resetGeom(translucent);
@@ -346,6 +372,8 @@ final class RtTerrainMesher {
         final FloatArrayList prim;
         // One sprite per triangle for opacity micromap classification.
         final SpriteList ommSprites;
+        // One waving weight per vertex (see RtWaving), kept in step with verts on every emit path.
+        final FloatArrayList wave;
 
         Geom(int triCapacity) {
             int cap = Math.max(2, triCapacity);
@@ -355,6 +383,7 @@ final class RtTerrainMesher {
             cornerUv = new FloatArrayList(cap * 6);
             prim = new FloatArrayList(cap * 12);
             ommSprites = new SpriteList(cap);
+            wave = new FloatArrayList(quadCapacity * 4);
         }
 
         int triCount() {
@@ -367,6 +396,7 @@ final class RtTerrainMesher {
             cornerUv.clear();
             prim.clear();
             ommSprites.clear();
+            wave.clear();
         }
     }
 
@@ -420,6 +450,8 @@ final class RtTerrainMesher {
         BlockState state;
         BlockPos pos;
         float originX, originY, originZ;
+        int waveKind;     // RtWaving kind of the current block (NONE when this section carries no wave data)
+        float waveLight;  // ITRP skylight weight of the current block
         private final BlockPos.MutableBlockPos cullPos = new BlockPos.MutableBlockPos();
         private final java.util.function.Predicate<Direction> cullTest = this::isCulled;
 
@@ -456,6 +488,7 @@ final class RtTerrainMesher {
 
             ChunkSectionLayer layer = quad.chunkLayer();
             q.cutout = layer != ChunkSectionLayer.SOLID;
+            q.foliage = state.is(BlockTags.LEAVES) || state.is(BlockTags.FLOWERS);
             q.translucent = layer == ChunkSectionLayer.TRANSLUCENT
                     || (layer != ChunkSectionLayer.SOLID && dev.comfyfluffy.caustica.rt.material.RtMaterials.clearGlass(state));
 
@@ -494,6 +527,16 @@ final class RtTerrainMesher {
             // was drawn as a solid slab. The game precomputes this per sprite, so it costs nothing here.
             if (sprite != null && !sprite.contents().transparency().isOpaque()) q.cutout = true;
             q.materialId = materials.resolve(sprite, state, dev.comfyfluffy.caustica.rt.material.RtMaterials.refractive(state,q.translucent));
+            if (waveKind == RtWaving.NONE) {
+                java.util.Arrays.fill(q.wave, 0f);
+            } else {
+                // Bend weight from the vertex height in the block (0 at the root, 1 at the top). ITRP derives it
+                // per quad from its texture (top half moves); that only holds for vanilla's single cross quads.
+                // Resource-pack 3D grass is built from many small pixel faces: per-quad weights pinned each
+                // face's own bottom, so stacked faces sheared apart and the bush tore into two layers. A
+                // position-based weight gives every face sharing a point the same motion.
+                for (int i = 0; i < 4; i++) q.wave[i] = RtWaving.encode(waveKind, waveLight, Math.clamp(quad.y(i), 0f, 1f));
+            }
         }
 
         /** Fabric's cull predicate returns true when the nominal face should be discarded. */
@@ -518,17 +561,51 @@ final class RtTerrainMesher {
             pendingCount = 0;
         }
 
+        /**
+         * Diagnostics for the "two layers of grass" report: dump the final quads of the first few plant blocks
+         * meshed (bucket, normal, extent, UV rect, sprite, material, wave weights) so duplicated or misfiled
+         * faces are visible in the log.
+         */
+        private void debugPlantQuads(int n) {
+            if (state == null || PLANT_DEBUG.get() >= 6) return;
+            net.minecraft.world.level.block.Block b = state.getBlock();
+            if (b != net.minecraft.world.level.block.Blocks.BUSH && b != net.minecraft.world.level.block.Blocks.SHORT_GRASS) return;
+            if (PLANT_DEBUG.incrementAndGet() > 6) return;
+            StringBuilder sb = new StringBuilder();
+            sb.append("[GRASS-DBG] ").append(state).append(" at ").append(pos).append(" quads=").append(n)
+                    .append(" waveKind=").append(waveKind).append(" waveLight=").append(waveLight);
+            for (int i = 0; i < n; i++) {
+                PendingQuad q = pending.get(i);
+                float x0 = Math.min(Math.min(q.x[0], q.x[1]), Math.min(q.x[2], q.x[3])), x1 = Math.max(Math.max(q.x[0], q.x[1]), Math.max(q.x[2], q.x[3]));
+                float y0 = Math.min(Math.min(q.y[0], q.y[1]), Math.min(q.y[2], q.y[3])), y1 = Math.max(Math.max(q.y[0], q.y[1]), Math.max(q.y[2], q.y[3]));
+                float z0 = Math.min(Math.min(q.z[0], q.z[1]), Math.min(q.z[2], q.z[3])), z1 = Math.max(Math.max(q.z[0], q.z[1]), Math.max(q.z[2], q.z[3]));
+                float u0 = 1, u1 = 0, v0 = 1, v1 = 0;
+                for (int k = 0; k < 4; k++) {
+                    float u = UVPair.unpackU(q.uv[k]), v = UVPair.unpackV(q.uv[k]);
+                    u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+                }
+                sb.append(String.format(java.util.Locale.ROOT,
+                        "%n  q%d %s n=(%.2f,%.2f,%.2f) x[%.3f..%.3f] y[%.3f..%.3f] z[%.3f..%.3f] uv[%.5f..%.5f, %.5f..%.5f] sprite=%s mat=%d tint=%b wave=[%.3f %.3f %.3f %.3f]",
+                        i, q.translucent ? "TRANSLUCENT" : q.cutout ? "CUTOUT" : "SOLID", q.nx, q.ny, q.nz, x0, x1, y0, y1, z0, z1,
+                        u0, u1, v0, v1, q.sprite == null ? "null" : q.sprite.contents().name(), q.materialId, q.tinted,
+                        q.wave[0], q.wave[1], q.wave[2], q.wave[3]));
+            }
+            dev.comfyfluffy.caustica.CausticaMod.LOGGER.info(sb.toString());
+        }
+
         /** Resolve coplanar ties among the current block's quads, then emit them into the section buckets. */
         void flushBlock() {
             int n = pendingCount;
             if (n == 0) {
                 return;
             }
+            for (int i = 0; i < n; i++) { pending.get(i).oneSided = false; pending.get(i).dropped = false; }
             if (n >= 2 && n <= RESOLVE_CAP) {
                 resolveCoplanar(n);
             }
+            debugPlantQuads(n);
             for (int i = 0; i < n; i++) {
-                emit(pending.get(i));
+                if (!pending.get(i).dropped) emit(pending.get(i));
             }
             pendingCount = 0;
         }
@@ -552,6 +629,7 @@ final class RtTerrainMesher {
                 for (int j = i + 1; j < n; j++) {
                     if (gid[j] == -1 && coincident(pending.get(i), pending.get(j))) {
                         gid[j] = i;
+                        markTwoSidedPair(pending.get(i), pending.get(j));
                     }
                 }
             }
@@ -581,6 +659,24 @@ final class RtTerrainMesher {
                     }
                 }
             }
+        }
+
+        /**
+         * A cutout face and its back face (cross plants, two-sided model planes): raster culls whichever faces
+         * away, but a ray hits both, and the back face's UVs are mirrored, so its texels showed through the
+         * front face's holes as a second, mirrored layer of blades. Mark both one-sided; world.rahit drops
+         * the hit on the side a face points away from.
+         */
+        private static void markTwoSidedPair(PendingQuad a, PendingQuad b) {
+            if (!a.cutout || !b.cutout || a.translucent || b.translucent) return;
+            if (a.nx * b.nx + a.ny * b.ny + a.nz * b.nz > -0.99f) return;
+            if (!dev.comfyfluffy.caustica.CausticaConfig.Rt.Diagnostics.ONE_SIDED_PLANTS.value()) return;
+            // Same sprite on both sides (cross plants): keep only the front face as a two-sided card. The
+            // any-hit facing test this replaces darkened the middle of grass clumps, and one card needs no
+            // per-ray test at all, keeps its fully-opaque micromap states and halves the triangles.
+            if (a.sprite == b.sprite) { b.dropped = true; return; }
+            a.oneSided = true;
+            b.oneSided = true;
         }
 
         /** True if every corner of {@code a} coincides with a corner of {@code b} (same quad, any winding). */
@@ -626,6 +722,8 @@ final class RtTerrainMesher {
                 g.verts.add(q.x[k]);
                 g.verts.add(q.y[k]);
                 g.verts.add(q.z[k]);
+                g.wave.add(q.wave[k]);
+                if (q.wave[k] != 0f) cur.anyWave = true;
             }
             IntArrayList idx = g.idx;
             idx.add(base);
@@ -650,7 +748,8 @@ final class RtTerrainMesher {
                 prim.add(q.tb);
                 prim.add(0f);
                 prim.add(Float.intBitsToFloat(q.materialId)); // TerrainPrim.materialId uint bits
-                prim.add(Float.intBitsToFloat(1)); // flags: interpolated sky-access bytes
+                // flags: bit 0 interpolated sky-access bytes; bit 1 light buffer (RtLightCollector); bit 2 one-sided (world.rahit)
+                prim.add(Float.intBitsToFloat((q.oneSided ? 1 | TERRAIN_PRIM_ONE_SIDED : 1) | (q.foliage ? TERRAIN_PRIM_FOLIAGE : 0)));
                 int b=t==0?1:2,c=t==0?2:3;
                 prim.add(Float.intBitsToFloat(q.rainSky[0]|q.rainSky[b]<<8|q.rainSky[c]<<16));
                 prim.add(0f); // aux1
@@ -682,6 +781,8 @@ final class RtTerrainMesher {
         }
     }
 
+    private static final java.util.concurrent.atomic.AtomicInteger PLANT_DEBUG = new java.util.concurrent.atomic.AtomicInteger();
+
     /** One block's buffered quad, awaiting coplanar resolution before it is emitted into a section bucket. */
     private static final class PendingQuad {
         final float[] x = new float[4], y = new float[4], z = new float[4];
@@ -690,9 +791,13 @@ final class RtTerrainMesher {
         boolean cutout; // non-SOLID render layer (alpha-tested) — also an overlay candidate
         boolean translucent; // TRANSLUCENT layer (stained glass / ice): colored-transmission dielectric
         boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
+        boolean foliage; // leaves/flowers tag (TERRAIN_PRIM_FOLIAGE)
+        boolean oneSided; // cutout face with a coincident back face: hit only from the side it faces
+        boolean dropped;  // back face of a same-sprite two-sided pair: not emitted (the front card stands for both)
         float tr, tg, tb, emission;
         int materialId;
         final int[] rainSky=new int[4];
+        final float[] wave = new float[4];
         TextureAtlasSprite sprite;
     }
 
@@ -733,6 +838,10 @@ final class RtTerrainMesher {
      * absorption). Lava keeps {@code tint.w == 0.0} and stays an opaque emitter.
      */
     private static final class FluidCapture implements VertexConsumer, FluidRenderer.Output {
+        //? if >=26.3 {
+        /*// 26.3 added a third UV channel (item glint); ray-traced captures ignore it.
+        @Override public VertexConsumer setUv3(float u, float v) { return this; }
+        *///?}
         int skyLight;
         SectionMesh cur;     // set before each section
         RtMaterialRegistry.Snapshot materials;
@@ -774,6 +883,7 @@ final class RtTerrainMesher {
                 verts.add(qx[i]);
                 verts.add(qy[i]);
                 verts.add(qz[i]);
+                g.wave.add(0f);
             }
             idx.add(base);
             idx.add(base + 1);

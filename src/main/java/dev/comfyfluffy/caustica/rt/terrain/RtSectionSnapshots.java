@@ -151,7 +151,14 @@ final class RtSectionSnapshots {
             if (section == AIR) {
                 return Blocks.AIR.defaultBlockState();
             }
-            return ((PalettedContainer<BlockState>) section).get(x & 15, y & 15, z & 15);
+            BlockState state = ((PalettedContainer<BlockState>) section).get(x & 15, y & 15, z & 15);
+            // Fancy World Animations draws this block as a moving model (captured by RtEntities); drop the
+            // static copy exactly as FWA's own RenderSectionRegion mixin does for vanilla/Sodium meshing.
+            if (dev.comfyfluffy.caustica.client.FancyWorldAnimationsCompat.active()
+                    && dev.comfyfluffy.caustica.client.FancyWorldAnimationsCompat.hides(state, x, y, z)) {
+                return Blocks.AIR.defaultBlockState();
+            }
+            return state;
         }
 
         @Override

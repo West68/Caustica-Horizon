@@ -20,6 +20,10 @@ import org.joml.Vector3fc;
  * share the terrain upload + BLAS path verbatim.
  */
 public final class RtEntityCapture implements VertexConsumer {
+    //? if >=26.3 {
+    /*// 26.3 added a third UV channel (item glint); ray-traced captures ignore it.
+    @Override public VertexConsumer setUv3(float u, float v) { return this; }
+    *///?}
     private static final int DEFAULT_VERTEX_CAPACITY = 1024;
     // Same magnitude as RtTerrain.QuadCapture.OFFSET (2e-4 blocks) — proven large enough to break a BVH
     // depth tie without a visible gap at terrain/entity scale.

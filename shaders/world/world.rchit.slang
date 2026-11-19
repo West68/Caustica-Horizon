@@ -338,6 +338,9 @@ Surface evaluateMaterial(MaterialHeader header, float2 atlasUv, float lod, float
                 surface.porosity=surface1.a;
             surface.roughness = surface0.r;
             surface.metalness = surface0.g;
+            // Packs author polished metals (gold/iron blocks) with a few near-mirror texels: each one showed a
+            // sharp, sparkling copy of the scene among glossier neighbours. Floor metals so they read as one sheen.
+            surface.roughness = max(surface.roughness, 0.15 * saturate(surface.metalness));
             // LabPBR emission is baked from frame 0; gate it by the live atlas texel so animated emitters
             // (campfire/fire flames) follow the current frame instead of a frozen glowing silhouette.
             surface.emission = surface0.b * smoothstep(0.02, 0.25, dot(albedo, float3(0.2126, 0.7152, 0.0722)));
@@ -427,6 +430,16 @@ float3 applyBreaking(float3 albedo, uint rayCone, float3 rayOrigin, float3 rayDi
         }
     }
     return albedo;
+}
+
+
+// Debug views 13/14 (diagnostics): replace the albedo with an ID colour so overlapping geometry is visible.
+// 13 = one colour per quad (instance + triangle pair), 14 = one colour per BLAS instance (entities red).
+float3 debugIdColor(uint a) {
+    a = a * 747796405u + 2891336453u;
+    a = ((a >> ((a >> 28u) + 4u)) ^ a) * 277803737u;
+    a = (a >> 22u) ^ a;
+    return float3(float(a & 255u), float((a >> 8u) & 255u), float((a >> 16u) & 255u)) / 255.0 * 0.8 + 0.2;
 }
 
 [shader("closesthit")]
@@ -641,6 +654,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             }
         }
         payload.albedo = material==MATERIAL_GLASS?albedo:albedo*surface.ao;
+        if (pc.debugView == 13u) payload.albedo = debugIdColor(InstanceID() * 65599u + pid / 2u) * float3(1.0, 0.35, 0.35);
+        else if (pc.debugView == 14u) payload.albedo = float3(1.0, 0.1, 0.1);
         payload.normal = n;
         payload.hitT = RayTCurrent();
         // Per-vertex motion vector: interpolate the captured per-vertex displacement with the same
@@ -691,9 +706,20 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     uint pid = PrimitiveIndex() + sec.triBase[GeometryIndex()];
     TerrainPrim pr = terrainPrimitive(sec.primAddr,pid);
     MaterialHeader materialHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[pr.materialId];
+    // Waving foliage sections carry per-vertex motion (RtWavingPass); everything else is static.
+    float3 terrainMotion = float3(0.0, 0.0, 0.0);
+    if (sec.dispAddr != 0uL) {
+        ConstPtr<uint> wIdx = ConstPtr<uint>(sec.idxAddr);
+        ConstPtr<float4> wDisp = ConstPtr<float4>(sec.dispAddr);
+        float3 wb = float3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+        terrainMotion = wb.x * wDisp[wIdx[3u * pid]].xyz + wb.y * wDisp[wIdx[3u * pid + 1u]].xyz
+                + wb.z * wDisp[wIdx[3u * pid + 2u]].xyz;
+        // Waving moves a vertex well under 0.5 block per frame; anything else (NaN, stale data) is not motion.
+        if (!(dot(terrainMotion, terrainMotion) < 0.25)) terrainMotion = float3(0.0, 0.0, 0.0);
+    }
     if ((payload.flags & PAYLOAD_REFLECTION_GUIDE) != 0u) {
         payload.hitT = RayTCurrent();
-        payload.motionPrev = float3(0);
+        payload.motionPrev = terrainMotion;
         payload.flags = materialHeader.model == MATERIAL_WATER ? MATERIAL_WATER : MATERIAL_OPAQUE;
         return;
     }
@@ -790,10 +816,14 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     // Water (tint.w == 1) carries the pure biome water tint (no grey water-texture multiply): raygen
     // shades the surface as a clear dielectric and only needs the tint to derive the per-channel
     // Beer–Lambert absorption. Opaque terrain uses textured albedo.
+    // Cutout prims (normal.w >= 1.5): any-hit accepts the texel by its mip-0 alpha, so read the colour there
+    // too. Vanilla leaves use the "dark_cutout" mipmap strategy, whose lower mips pull the hole colour toward
+    // black; sampling those behind a mip-0 alpha test turned distant leaves into black cubes.
+    if (pr.normal.w >= 1.5) blockLod = 0.0;
     payload.albedo = materialHeader.model == MATERIAL_WATER
             ? tint : srgbToLinear(blockAlbedoAtlas.SampleLevel(uv, blockLod).rgb) * tint;
     payload.hitT = RayTCurrent();
-    payload.motionPrev = float3(0.0, 0.0, 0.0); // static terrain: camera-only motion vector
+    payload.motionPrev = terrainMotion; // static terrain: camera-only motion vector; waving foliage: its sway
     uint material = materialHeader.model == MATERIAL_WATER ? MATERIAL_WATER : MATERIAL_OPAQUE;
 
     // normal.w packs the 0..1 block-light level plus a +2 offset flag for non-SOLID (cutout /
@@ -801,9 +831,16 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     float ew = pr.normal.w;
     bool nonSolid = ew >= 1.5;
     float emission = nonSolid ? ew - 2.0 : ew; // heuristic emission source (block light level)
+    // No parallax on cutout layers (grass, flowers, leaves, crops...): a single-sided alpha-tested card
+    // has no volume to march into, and a pack height map made each blade show a second, displaced copy
+    // of itself — the "two layers of grass". Solid blocks keep their relief.
     Surface surface = evaluateMaterial(materialHeader, uv, blockLod, payload.albedo, n,
             tp0, tp1, tp2, uv0, uv1, uv2, vdir,
-            materialHeader.params.x, materialHeader.params.y, emission, nonSolid, true, (payload.flags & PAYLOAD_CAMERA_MISS)!=0u, false);
+            materialHeader.params.x, materialHeader.params.y, emission, nonSolid, !nonSolid, (payload.flags & PAYLOAD_CAMERA_MISS)!=0u, false);
+    // Modded leaves/flowers usually have no LabPBR specular map, so they got no subsurface light and read as
+    // flat opaque blocks next to the pack's vanilla foliage. Give tagged foliage a typical foliage SSS instead.
+    if((pr.flags&TERRAIN_PRIM_FOLIAGE)!=0u && nonSolid && (materialHeader.features&MATERIAL_FEATURE_SPEC)==0u)
+        surface.sss=max(surface.sss,.6);
     if(reliefQuery) { payload.albedo=float3(surface.reliefVisibility); return; }
     n = surface.normal;
     if (surface.displaced) {
@@ -818,6 +855,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     if (material != MATERIAL_WATER) {
         payload.albedo = applyBreaking(payload.albedo, rayCone, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), n);
     }
+    if (pc.debugView == 13u) payload.albedo = debugIdColor(InstanceID() * 65599u + pid / 2u);
+    else if (pc.debugView == 14u) payload.albedo = debugIdColor(InstanceID() * 2654435761u);
     ConstPtr<WorldPush> weatherPtr=ConstPtr<WorldPush>(pc.worldPushAddr); // only the fields used below, not the whole struct
     if ((materialHeader.features & MATERIAL_FEATURE_SNOW) != 0u) {
         float snowReflectance = asfloat(weatherPtr[0].lightGridDims.w);
@@ -852,6 +891,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             film=saturate(film*(1.8-surface.porosity)-surface.porosity*.2);
             film*=saturate(dot(n,float3(0,1,0))*.5+.5);
             payload.albedo*=1.0-film*sqrt(surface.porosity)*.4;
+            // ITRP Terrain_FS: the normal map is blended to the flat face as wetness passes 0.5, so soaked
+            // ground is a level mirror rather than bumpy glints.
+            n=normalize(lerp(n,geometricUp,saturate(film*2.0-1.0)));
         }
         surface.roughness=max(.02,surface.roughness*(1.0-film));
         // Thin film follows relief; only pools gently level the material normal.

@@ -131,6 +131,7 @@ public final class CausticaConfig {
             LOGGER.warn("Failed to read Caustica config {}: {}", path, e.toString());
         }
         migrateLegacyFrameGenerationBackend(config);
+        migrateItrpSelectHeldLight(config);
         return config;
     }
 
@@ -141,6 +142,26 @@ public final class CausticaConfig {
    * backend can. A config that still holds the old default is upgraded once; the marker makes the
    * choice permanent so a user who later selects NGX keeps it.
    */
+  /**
+   * Older ITRP Select presets copied ITRP's HELDLIGHT_BRIGHTNESS=0.1 literally, which left a torch in hand
+   * nearly dark (ITRP's held light is far stronger than Caustica's). A saved 0.1 is lifted once to 1.0.
+   */
+  private static void migrateItrpSelectHeldLight(CommentedFileConfig config) {
+  final String marker="visuals.held-brightness-version";
+  if (config.contains(marker)) return;
+  try {
+  Object v=config.contains("visuals.held-brightness")?config.get("visuals.held-brightness"):null;
+  if (v instanceof Number n && Math.abs(n.doubleValue()-0.1)<1e-3) {
+  config.set("visuals.held-brightness",1.0);
+  LOGGER.info("Caustica config: held-light brightness 0.1 (old ITRP Select) raised to 1.0");
+  }
+  config.set(marker,2);
+  config.save();
+  } catch (Exception e) {
+  LOGGER.warn("Could not migrate held-light brightness: {}",e.toString());
+  }
+  }
+
   private static void migrateLegacyFrameGenerationBackend(CommentedFileConfig config) {
   final String marker="frame-generation.backend-version";
   if (config.contains(marker)) return;
@@ -562,6 +583,12 @@ public final class CausticaConfig {
                     clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 4, 2, 8);
             public static final BooleanSetting WATER_WAVES =
                     bool("caustica.rt.waterWaves", "composite.water-waves", true);
+            /** ITRP-style waving leaves/grass/crops (amplitude: Visuals.WAVING_PLANTS). */
+            public static final BooleanSetting WAVING =
+                    bool("caustica.rt.waving", "composite.waving", true);
+            /** Show Fancy World Animations' moving blocks (lanterns, chains, doors...) in the RT image. */
+            public static final BooleanSetting FWA_ANIMATIONS =
+                    bool("caustica.rt.fwaAnimations", "composite.fwa-animations", true);
             /** World radiance cache (SHaRC-style) terminating eligible indirect paths with cached radiance. */
             public static final BooleanSetting RADIANCE_CACHE =
                     bool("caustica.rt.radianceCache", "composite.radiance-cache", true);
@@ -642,6 +669,7 @@ public final class CausticaConfig {
             public static final FloatSetting EMISSION=clampedFloat("caustica.rt.emissionBrightness","visuals.emission",4f,0f,16f);
             public static final BooleanSetting ORE_EMISSION=bool("caustica.rt.oreEmission","visuals.ore-emission",true);
             public static final FloatSetting END_LIGHT=clampedFloat("caustica.rt.endLight","visuals.end-light",1.5f,0f,8f);
+            public static final BooleanSetting END_NEBULA=bool("caustica.rt.endNebula","visuals.end-nebula",true);
             public static final FloatSetting END_STARS=clampedFloat("caustica.rt.endStars","visuals.end-stars",3f,0f,10f);
             public static final FloatSetting END_SKY=clampedFloat("caustica.rt.endSky","visuals.end-sky",1f,0f,4f);
             public static final FloatSetting SPECULAR=clampedFloat("caustica.rt.specular","visuals.specular",1f,0f,1f);
@@ -665,6 +693,29 @@ public final class CausticaConfig {
             public static final FloatSetting FOG_RAIN=clampedFloat("caustica.rt.fogRain","visuals.fog-rain",1f,0f,4f);
             public static final FloatSetting FOG_HAZE=clampedFloat("caustica.rt.fogHaze","visuals.fog-haze",1f,0f,2f);
             public static final FloatSetting FOG_SUN=clampedFloat("caustica.rt.fogSun","visuals.fog-sun",1f,0f,8f);
+            /** Patchy fog layer between two heights, densest at the top ("sea of clouds"); 0 strength = off. */
+            public static final FloatSetting FOG_LAYER=clampedFloat("caustica.rt.fogLayer","visuals.fog-layer",0f,0f,4f);
+            public static final FloatSetting FOG_LAYER_BOTTOM=clampedFloat("caustica.rt.fogLayerBottom","visuals.fog-layer-bottom",30f,-64f,320f);
+            public static final FloatSetting FOG_LAYER_TOP=clampedFloat("caustica.rt.fogLayerTop","visuals.fog-layer-top",100f,-64f,320f);
+            public static final FloatSetting FOG_LAYER_FALLOFF=clampedFloat("caustica.rt.fogLayerFalloff","visuals.fog-layer-falloff",40f,1f,100f);
+            public static final FloatSetting FOG_LAYER_COVERAGE=clampedFloat("caustica.rt.fogLayerCoverage","visuals.fog-layer-coverage",.6f,0f,1f);
+            public static final FloatSetting FOG_LAYER_LIGHT=clampedFloat("caustica.rt.fogLayerLight","visuals.fog-layer-light",1f,0f,10f);
+            public static final FloatSetting FOG_LAYER_SUN=clampedFloat("caustica.rt.fogLayerSun","visuals.fog-layer-sun",1f,0f,5f);
+            public static final FloatSetting FOG_LAYER_ABSORB=clampedFloat("caustica.rt.fogLayerAbsorb","visuals.fog-layer-absorb",1f,.1f,10f);
+            public static final FloatSetting WAVING_PLANTS=clampedFloat("caustica.rt.wavingPlants","visuals.waving-plants",1f,0f,3f);
+            public static final FloatSetting WAVING_RANGE=clampedFloat("caustica.rt.wavingRange","visuals.waving-range",64f,16f,128f);
+            public static final FloatSetting FOG_LAYER_VEIL=clampedFloat("caustica.rt.fogLayerVeil","visuals.fog-layer-veil",0f,0f,1f);
+            public static final FloatSetting FOG_BASE=clampedFloat("caustica.rt.fogBase","visuals.fog-base",1f,0f,1f);
+            public static final FloatSetting WATER_ABSORB_R=clampedFloat("caustica.rt.waterAbsorbR","visuals.water-absorb-r",.35f,0f,1f);
+            public static final FloatSetting WATER_ABSORB_G=clampedFloat("caustica.rt.waterAbsorbG","visuals.water-absorb-g",.13f,0f,1f);
+            public static final FloatSetting WATER_ABSORB_B=clampedFloat("caustica.rt.waterAbsorbB","visuals.water-absorb-b",.11f,0f,1f);
+            public static final FloatSetting WATER_FILL_R=clampedFloat("caustica.rt.waterFillR","visuals.water-fill-r",.1f,0f,1f);
+            public static final FloatSetting WATER_FILL_G=clampedFloat("caustica.rt.waterFillG","visuals.water-fill-g",.6f,0f,1f);
+            public static final FloatSetting WATER_FILL_B=clampedFloat("caustica.rt.waterFillB","visuals.water-fill-b",1f,0f,1f);
+            public static final FloatSetting WATER_FILL_DENSITY=clampedFloat("caustica.rt.waterFillDensity","visuals.water-fill-density",1f,0f,10f);
+            public static final FloatSetting WAVE_STRENGTH=clampedFloat("caustica.rt.waveStrength","visuals.wave-strength",1f,0f,4f);
+            public static final FloatSetting WAVE_SIZE=clampedFloat("caustica.rt.waveSize","visuals.wave-size",1f,.25f,4f);
+            public static final FloatSetting WAVE_SPEED=clampedFloat("caustica.rt.waveSpeed","visuals.wave-speed",1f,0f,4f);
             public static final FloatSetting WATER_SCATTER=clampedFloat("caustica.rt.waterScatter","visuals.water-scatter",1f,0f,4f);
         }
 
@@ -776,6 +827,8 @@ public final class CausticaConfig {
             public static final BooleanSetting SR_ONLY = bool("caustica.rt.dlssSr", "dlss-sr.enabled", false);
             public static final IntSetting SR_PRESET = intValue("caustica.rt.dlssSr.preset", "dlss-sr.preset", 0);
             public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
+            /** Free render resolution in percent of the display (20..100); 0 = use the quality mode. */
+            public static final IntSetting FREE_SCALE = intValue("caustica.rt.dlssRr.freeScale", "dlss-rr.free-scale", 0);
 
             private DlssRr() {
             }
@@ -824,17 +877,36 @@ public final class CausticaConfig {
             public static final int ITRP_PERFORMANCE = 1;
             /** Same shape and colours, denser light marches for softer interiors and edges. */
             public static final int ITRP_FIDELITY = 2;
+            /** ITRP Alpha style volumetric cumulus (raymarched deck, its own option set below). */
+            public static final int VOLUMETRIC = 3;
 
             public static final IntSetting MODE =
                     intValue("caustica.rt.clouds", "clouds.mode", ITRP_FIDELITY);
 
             public static final FloatSetting COVERAGE = clampedFloat("caustica.rt.clouds.coverage", "clouds.coverage", 0f, -0.3f, 0.3f);
+            // Volumetric deck (mode 3). Defaults are ITRP Alpha 0.8.x defaults.
+            public static final FloatSetting VOL_ALTITUDE = clampedFloat("caustica.rt.clouds.vol.altitude", "clouds.volumetric.altitude", 500f, 100f, 3000f);
+            public static final FloatSetting VOL_THICKNESS = clampedFloat("caustica.rt.clouds.vol.thickness", "clouds.volumetric.thickness", 450f, 100f, 3000f);
+            public static final FloatSetting VOL_COVERAGE = clampedFloat("caustica.rt.clouds.vol.coverage", "clouds.volumetric.coverage", .28f, .05f, .98f);
+            public static final FloatSetting VOL_RAIN_COVERAGE = clampedFloat("caustica.rt.clouds.vol.rainCoverage", "clouds.volumetric.rain-coverage", .96f, .05f, .98f);
+            public static final FloatSetting VOL_DENSITY = clampedFloat("caustica.rt.clouds.vol.density", "clouds.volumetric.density", 1f, .01f, 3f);
+            public static final FloatSetting VOL_SCALE = clampedFloat("caustica.rt.clouds.vol.scale", "clouds.volumetric.scale", 1f, .1f, 3f);
+            public static final FloatSetting VOL_SUNLIGHT = clampedFloat("caustica.rt.clouds.vol.sunlight", "clouds.volumetric.sunlight", 1f, 0f, 8f);
+            public static final FloatSetting VOL_RAIN_DENSITY = clampedFloat("caustica.rt.clouds.vol.rainDensity", "clouds.volumetric.rain-density", 0f, 0f, 4f);
+            public static final FloatSetting VOL_RAIN_SCALE = clampedFloat("caustica.rt.clouds.vol.rainScale", "clouds.volumetric.rain-scale", 0f, 0f, 4f);
+            public static final FloatSetting VOL_RAIN_SUNLIGHT = clampedFloat("caustica.rt.clouds.vol.rainSunlight", "clouds.volumetric.rain-sunlight", .4f, 0f, 8f);
+            public static final FloatSetting VOL_SKYLIGHT = clampedFloat("caustica.rt.clouds.vol.skylight", "clouds.volumetric.skylight", 1f, 0f, 4f);
+            public static final FloatSetting VOL_BASE_NOISE = clampedFloat("caustica.rt.clouds.vol.baseNoise", "clouds.volumetric.base-noise-scale", .0007f, .0001f, .005f);
+            public static final FloatSetting VOL_DETAIL_NOISE = clampedFloat("caustica.rt.clouds.vol.detailNoise", "clouds.volumetric.detail-noise-scale", .007f, .001f, .05f);
+            public static final FloatSetting VOL_DETAIL_STRENGTH = clampedFloat("caustica.rt.clouds.vol.detailStrength", "clouds.volumetric.detail-strength", 1f, 0f, 3f);
+            public static final FloatSetting VOL_COVERAGE_OFFSET = clampedFloat("caustica.rt.clouds.vol.coverageOffset", "clouds.volumetric.coverage-offset", .68f, 0f, 1f);
+            public static final FloatSetting VOL_QUALITY = clampedFloat("caustica.rt.clouds.vol.quality", "clouds.volumetric.quality", 1f, .4f, 3f);
             public static final FloatSetting DENSITY = clampedFloat("caustica.rt.clouds.density", "clouds.density", 1f, 0f, 2f);
             public static final FloatSetting SIZE = clampedFloat("caustica.rt.clouds.size", "clouds.size", 1f, 0.5f, 2f);
             public static final FloatSetting HEIGHT = clampedFloat("caustica.rt.clouds.height", "clouds.height", 940f, 500f, 1500f);
             public static final FloatSetting BRIGHTNESS = clampedFloat("caustica.rt.clouds.brightness", "clouds.brightness", 1f, 0.25f, 2f);
             public static final FloatSetting BOTTOM = clampedFloat("caustica.rt.clouds.bottom", "clouds.bottom", 1f, 0.25f, 2f);
-            public static final FloatSetting SUNLIGHT = clampedFloat("caustica.rt.clouds.sunlight", "clouds.sunlight", 1f, 0f, 2f);
+            public static final FloatSetting SUNLIGHT = clampedFloat("caustica.rt.clouds.sunlight", "clouds.sunlight", 1f, 0f, 5f);
             public static final FloatSetting SPEED = clampedFloat("caustica.rt.clouds.speed", "clouds.speed", 1f, 0f, 3f);
             public static final FloatSetting EDGE = clampedFloat("caustica.rt.clouds.edge", "clouds.edge", 1f, 0f, 2f);
             public static final FloatSetting CIRRUS = clampedFloat("caustica.rt.clouds.cirrus", "clouds.cirrus", 1f, 0f, 2f);
@@ -869,6 +941,13 @@ public final class CausticaConfig {
              */
             public static final BooleanSetting ITRP =
                     bool("caustica.rt.itrpLook", "look.itrp", true);
+            /** ITRP light colours: warm (torch) emitter green/blue in sRGB, red fixed at 1 (ITRP COLOR_TORCH_G/B). */
+            public static final FloatSetting TORCH_G=clampedFloat("caustica.rt.look.torchG","look.torch-g",.6f,0f,1f);
+            public static final FloatSetting TORCH_B=clampedFloat("caustica.rt.look.torchB","look.torch-b",.25f,0f,1f);
+            /** ITRP look tone curve: 0 = ITRP-PTGI SEUS (default), 1 = ITRP Alpha GT (Gran Turismo). */
+            public static final IntSetting ITRP_TONE=clampedInt("caustica.rt.look.itrpTone","look.itrp-tone",0,0,1);
+            /** ITRP look vignette: 0 = built-in PTGI vignette, >0 = ITRP Alpha VIGNETTE_FALLOFF. */
+            public static final FloatSetting VIGNETTE=clampedFloat("caustica.rt.look.vignette","look.vignette",0f,0f,1.5f);
             /** Caustica (non-ITRP) look view transform: true = upstream ACES 2.0 + default look LMT, false = legacy AgX. */
             public static final BooleanSetting ACES2 =
                     bool("caustica.rt.look.aces2", "look.aces2", true);
@@ -949,6 +1028,9 @@ public final class CausticaConfig {
              * serialisation point, so the cost is small but not zero. Enable while measuring. */
             public static final BooleanSetting GPU_TIMINGS =
                     bool("caustica.rt.gpuTimings", "diagnostics.gpu-timings", false);
+            /** A/B switch for one-sided cross-plant faces (world.rahit facing test). Reset to on at release startup. */
+            public static final BooleanSetting ONE_SIDED_PLANTS =
+                    bool("caustica.rt.oneSidedPlants", "diagnostics.one-sided-plants", true);
 
             private Diagnostics() {
             }

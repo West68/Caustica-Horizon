@@ -4,8 +4,26 @@ pluginManagement {
 			name = "Fabric"
 			url = "https://maven.fabricmc.net/"
 		}
+		maven {
+			name = "KikuGie Releases"
+			url = "https://maven.kikugie.dev/releases"
+		}
 		mavenCentral()
 		gradlePluginPortal()
+	}
+}
+
+plugins {
+	id "dev.kikugie.stonecutter" version "0.9.8"
+}
+
+// Multi-version layout: build.gradle is applied to every versions/<mc> subproject.
+// Shared source lives in src/ (written for the active version); per-version values live in
+// versions/<mc>/gradle.properties. See docs/MULTI_VERSION.md.
+stonecutter {
+	create(rootProject) {
+		versions "26.2", "26.3"
+		vcsVersion = "26.2"
 	}
 }
 

@@ -48,7 +48,7 @@ public final class CausticaClient implements ClientModInitializer {
 		// Same default as Iris' shader toggle.
 		net.minecraft.client.KeyMapping toggleKey = net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper.registerKeyMapping(
 				new net.minecraft.client.KeyMapping("caustica.enhanced.key.toggle", com.mojang.blaze3d.platform.InputConstants.Type.KEYSYM,
-						org.lwjgl.glfw.GLFW.GLFW_KEY_K, net.minecraft.client.KeyMapping.Category.MISC));
+						com.mojang.blaze3d.platform.InputConstants.KEY_K, net.minecraft.client.KeyMapping.Category.MISC));
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			while (toggleKey.consumeClick()) {
 				// Held or mashed keys would tear down and rebuild all of RT for each repeat.
@@ -72,13 +72,14 @@ public final class CausticaClient implements ClientModInitializer {
 		});
 		// Developer tools (performance survey, probes, showcase filming) are not shipped in a release jar.
 		boolean devTools = !dev.comfyfluffy.caustica.CausticaBuild.RELEASE;
-		if (devTools) PerfSweep.init();
+		PerfSweep.init();
 		try { Class.forName("dev.comfyfluffy.caustica.client.PerfAutoBench").getMethod("init").invoke(null); } catch (ReflectiveOperationException ignored) {} // bench jars only
 		if (dev.comfyfluffy.caustica.CausticaBuild.RELEASE) {
 			// Release: developer diagnostics stay off even if an older config switched them on.
 			dev.comfyfluffy.caustica.CausticaConfig.Rt.Composite.DEBUG_VIEW.set(0);
 			dev.comfyfluffy.caustica.CausticaConfig.Rt.FrameStats.ENABLED.set(false);
 			dev.comfyfluffy.caustica.CausticaConfig.Rt.Diagnostics.GPU_TIMINGS.set(false);
+			dev.comfyfluffy.caustica.CausticaConfig.Rt.Diagnostics.ONE_SIDED_PLANTS.set(true);
 		}
 		YsmModelMemory.init();
 		CausticaMod.LOGGER.info("Caustica client initialized");

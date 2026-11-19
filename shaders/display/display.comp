@@ -26,6 +26,7 @@ layout(push_constant) uniform Push {
     vec4 skyAxis;        // x star density, yz celestial rotation axis (x axis component is zero), w rotation angle (the star field's wheel)
     vec4 night;          // x night strength (0 = off), y time (s), z rain, w Milky Way texture ready
     mat4 prevViewProj;   // previous frame's camera-relative view-projection, for sky-mask reprojection
+    vec4 itrpExtra;      // x ITRP tone curve (0 = PTGI SEUS, 1 = Alpha GT), y ITRP Alpha vignette falloff (0 = PTGI vignette)
 } pc;
 
 // Night sky at full output resolution. The RT guide's alpha marks a camera ray that reached the sky
@@ -300,7 +301,40 @@ vec3 itrpTonemap(vec3 color) {
     return clamp(color, 0.0, 1.0);
 }
 
-float itrpVignette(vec2 uv) { return 1.0 - length(uv - vec2(0.5)) / 1.5142; }
+float itrpVignette(vec2 uv) {
+    if (pc.itrpExtra.y > 0.0) {
+        // ITRP Alpha Vignette (roundness 0): 1 / (1 + r^2 f^2)^2 over [-1,1]^2 screen coordinates. Normalised by
+        // the PTGI 1.26 gain applied by the caller so the image centre keeps unit gain.
+        vec2 a = uv * 2.0 - 1.0;
+        float rf = dot(a, a) * pc.itrpExtra.y * pc.itrpExtra.y + 1.0;
+        return 1.0 / (1.26 * rf * rf);
+    }
+    return 1.0 - length(uv - vec2(0.5)) / 1.5142;
+}
+
+// ITRP Alpha 0.8.x 'GT' (Gran Turismo / Uchimura) operator with the pack's constants and its 0.6x pre-scale and
+// 0.9 pre-gamma, reimplemented from the published curve (P 1, a 1, m 0.22, l 0.4, c 1.33, b 0). Emits sRGB.
+vec3 linearToSrgb(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, greaterThan(c, vec3(0.0031308)));
+}
+vec3 itrpGt(vec3 color) {
+    color = pow(max(color, vec3(0.0)) * 0.6, vec3(0.9));
+    const float P = 1.0, a = 1.0, m = 0.22, l = 0.4, c = 1.33, b = 0.0;
+    const float l0 = ((P - m) * l) / a;
+    vec3 L = (m - a * m) + a * color;
+    float T0 = 1.0 / pow(m, c - 1.0) + b;
+    vec3 T = pow(color, vec3(c)) * T0;
+    const float S0 = m + l0;
+    const float S1 = m + a * l0;
+    const float C2 = (a * P) / (P - S1);
+    const float CP = -1.44269502 * C2 / P;
+    vec3 S = P - ((P - S1) / exp2(CP * S0)) * exp2(CP * color);
+    vec3 w0 = 1.0 - smoothstep(0.0, m, color);
+    vec3 w2 = step(vec3(S0), color);
+    vec3 w1 = 1.0 - w0 - w2;
+    return linearToSrgb(T * w0 + L * w1 + S * w2);
+}
 
 bool hasDisplayGrade() {
     return any(notEqual(pc.grade0,vec4(1.0,1.0,1.0,0.0))) || any(notEqual(pc.grade1.xy,vec2(1.0,0.0)));
@@ -321,7 +355,8 @@ vec3 tonemap(vec3 hdr,float exposure,vec2 uv) {
         vec3 excess=max(exposed-1.0,vec3(0.0));
         exposed=min(exposed,vec3(1.0))+excess/(1.0+excess*pc.grade1.z);
     }
-    vec3 encoded=pc.itrpLook!=0?itrpTonemap(exposed*(1.26*itrpVignette(uv))):(pc.aces2!=0?aces2(exposed):agx(exposed));
+    vec3 itrpExposed=exposed*(1.26*itrpVignette(uv));
+    vec3 encoded=pc.itrpLook!=0?(pc.itrpExtra.x>0.5?itrpGt(itrpExposed):itrpTonemap(itrpExposed)):(pc.aces2!=0?aces2(exposed):agx(exposed));
     if(!hasDisplayGrade()) return encoded; // neutral controls preserve the calibrated baseline exactly
     return pow(clamp(gradeLinearDisplay(pow(max(encoded,vec3(0.0)),vec3(2.2))),0.0,1.0),vec3(1.0/2.2));
 }

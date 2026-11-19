@@ -44,9 +44,11 @@ public final class EnhancedOptionsScreen extends OptionsSubScreen {
                 Component.translatable("caustica.enhanced.current." + RtVideoOptions.visualPresetName())));
             list.addSmall(Button.builder(Component.translatable("caustica.enhanced.preset.itrp"), b -> applyPreset(true)).width(150).build(),
                 Button.builder(Component.translatable("caustica.enhanced.preset.original"), b -> applyPreset(false)).width(150).build());
+            list.addBig(Button.builder(Component.translatable("caustica.enhanced.preset.itrpSelect"), b -> {
+                RtVideoOptions.applyVisualPreset("itrp_select"); refresh(); }).width(ROW_WIDTH).build());
+            list.addBig(Button.builder(Component.translatable("caustica.enhanced.perfSweep"), b -> {
+                CausticaConfig.save(); minecraft.gui.setScreen(null); PerfSweep.start(); }).width(ROW_WIDTH).build());
             if (!dev.comfyfluffy.caustica.CausticaBuild.RELEASE) {
-                list.addBig(Button.builder(Component.translatable("caustica.enhanced.perfSweep"), b -> {
-                    CausticaConfig.save(); minecraft.gui.setScreen(null); PerfSweep.start(); }).width(ROW_WIDTH).build());
                 list.addBig(Button.builder(Component.translatable("caustica.enhanced.cinematic"), b -> {
                     CausticaConfig.save(); minecraft.gui.setScreen(null); CinematicDirector.start(); }).width(ROW_WIDTH).build());
             }

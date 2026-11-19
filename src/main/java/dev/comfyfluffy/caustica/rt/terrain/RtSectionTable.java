@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * registry, and published static-instance list here while {@link RtTerrain} retains publication order.
  */
 final class RtSectionTable {
-    private static final int SECTION_ENTRY_BYTES = 32;
+    private static final int SECTION_ENTRY_BYTES = 48; // + index and wave-motion addresses (waving sections)
     RtBuffer buffer;
     int capacity;
     int nextSlot;
@@ -169,6 +169,9 @@ final class RtSectionTable {
         MemoryUtil.memPutInt(base + 20, geom.triBase[1]);
         MemoryUtil.memPutInt(base + 24, geom.triBase[2]);
         MemoryUtil.memPutInt(base + 28, geom.triBase[3]);
+        // Waving foliage: per-vertex motion for RR, gathered through the kept index buffer. 0 = static.
+        MemoryUtil.memPutLong(base + 32, geom.wave != null ? geom.wave.indices().deviceAddress : 0L);
+        MemoryUtil.memPutLong(base + 40, geom.wave != null ? geom.wave.buffers().disp().deviceAddress : 0L);
         markDirty(offset, SECTION_ENTRY_BYTES);
     }
 
@@ -208,6 +211,10 @@ final class RtSectionTable {
         final int sz;
         /** Packed section-local RIS light records (possibly empty); flattened at publish. */
         final float[] lights;
+        /** Non-null for a waving section (see RtWavingPass); owns its kept build inputs. */
+        WaveGeom wave;
+        boolean waveActive; // deformed last frame: needs one more pass to settle when it leaves range
+        boolean waveInitialized; // motion buffer written at least once (it is created uninitialized)
         int slot = -1;
         int instanceIndex = -1;
 
@@ -231,6 +238,17 @@ final class RtSectionTable {
             blas.destroy();
             material.destroy();
             uvs.destroy();
+            if (wave != null) wave.destroy();
+        }
+    }
+
+    /** Kept build inputs + waving buffers of a published waving section. */
+    record WaveGeom(RtBuffer positions, RtBuffer indices, RtSectionBuilder.WaveBuffers buffers,
+                    dev.comfyfluffy.caustica.rt.accel.RtAccel.PreparedBlas blas) {
+        void destroy() {
+            buffers.destroy();
+            indices.destroy();
+            positions.destroy();
         }
     }
 }

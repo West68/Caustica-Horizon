@@ -1,3 +1,4 @@
+//? if <26.3 {
 package dev.comfyfluffy.caustica.mixin;
 
 import com.mojang.blaze3d.platform.GLX;
@@ -80,3 +81,5 @@ public abstract class GlxMixin {
         };
     }
 }
+//?}
+// 26.3 replaced GLFW with SDL; this mixin is excluded there (see mixin_exclude).

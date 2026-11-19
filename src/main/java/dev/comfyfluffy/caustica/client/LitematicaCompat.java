@@ -53,7 +53,9 @@ public final class LitematicaCompat {
             call("piecewiseUpdate",camera,profiler);
             call("scheduleTranslucentSorting",camera.position(),profiler);
             call("capturePreMainValues",state,fog,profiler);
+            //? if <26.3 {
             call("uploadRemainingBuffers",camera,delta,profiler);
+            //?}
             call("piecewisePrepareBlockLayers",VIEW,profiler);
             prepared=true;
         } catch(Throwable t) { fail("prepare",t); }
@@ -72,8 +74,14 @@ public final class LitematicaCompat {
             if(LitematicaMaterials.projection()==null)return;
             target=RtUiOverlay.beginCompositeLayer(main);drawing=true;
             RenderSystem.setProjectionMatrix(LitematicaMaterials.projection().slice(),ProjectionType.PERSPECTIVE);
+            //? if <26.3 {
             call("piecewiseDrawBlockLayerGroup",ChunkSectionLayerGroup.OPAQUE,null);
             call("piecewiseDrawBlockLayerGroup",ChunkSectionLayerGroup.TRANSLUCENT,null);
+            //?} else {
+            /*// Litematica for 26.3 takes the destination target directly.
+            call("piecewiseDrawBlockLayerGroup",target,ChunkSectionLayerGroup.OPAQUE);
+            call("piecewiseDrawBlockLayerGroup",target,ChunkSectionLayerGroup.TRANSLUCENT);
+            *///?}
             drawBlockEntities(main);
             call("piecewiseRenderOverlay",Profiler.get());
             drawBoxes();
@@ -94,6 +102,7 @@ public final class LitematicaCompat {
         call("piecewiseRenderBlockEntities", new com.mojang.blaze3d.vertex.PoseStack(), state, nodes, Profiler.get());
         if (nodes.getSubmitsPerOrder().isEmpty()) return;
         drawingBlockEntities = true;
+        //? if <26.3 {
         RtUiOverlay.beginOutputRedirect(main);
         try (var frame = mc.gameRenderer.featureRenderDispatcher().prepareFrame(nodes)) {
             frame.executeSolid();
@@ -103,6 +112,20 @@ public final class LitematicaCompat {
             RtUiOverlay.endOutputRedirect();
             drawingBlockEntities = false;
         }
+        //?} else {
+        /*// 26.3: the caller owns the render pass, so open it straight on the overlay target.
+        try (var frame = mc.gameRenderer.featureRenderDispatcher().prepareFrame(nodes);
+             RenderPass pass = RenderSystem.getDevice().createCommandEncoder().createRenderPass(
+                     () -> "Caustica Litematica block entities", target.getColorTextureView(), Optional.empty(),
+                     target.getDepthTextureView(), java.util.OptionalDouble.empty())) {
+            RenderSystem.bindDefaultUniforms(pass);
+            frame.executeSolid(pass);
+            frame.executeTranslucent(pass);
+            frame.executeTranslucentAfterTerrain(pass);
+        } finally {
+            drawingBlockEntities = false;
+        }
+        *///?}
     }
 
     public static RenderTarget blockEntityTarget(RenderTarget original) {

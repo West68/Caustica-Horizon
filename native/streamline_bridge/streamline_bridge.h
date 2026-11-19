@@ -347,6 +347,7 @@ SLBRIDGE_EXPORT int32_t slbridge_set_dlssg_options(uint32_t viewport,
 SLBRIDGE_EXPORT int32_t slbridge_get_dlssg_state(uint32_t viewport,
         slbridge_dlssg_state* out_state, const slbridge_dlssg_options* estimate_options);
 
+SLBRIDGE_EXPORT int32_t slbridge_get_dlssd_render_range(uint32_t* out_range4);
 SLBRIDGE_EXPORT int32_t slbridge_get_dlssd_optimal_settings(uint32_t mode,
         uint32_t output_width, uint32_t output_height, uint32_t* out_render_width,
         uint32_t* out_render_height, float* out_sharpness);

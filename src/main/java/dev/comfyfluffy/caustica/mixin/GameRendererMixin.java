@@ -41,6 +41,7 @@ public abstract class GameRendererMixin {
 	@Final
 	private RenderTarget mainRenderTarget;
 
+//? if <26.3 {
 	// Reset the UI overlay's per-frame clear latch at the very start of the frame (before the world, hand,
 	// or GUI render into it).
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V", at = @At("HEAD"))
@@ -228,6 +229,169 @@ public abstract class GameRendererMixin {
 		RtComposite.INSTANCE.captureFgHudless(this.mainRenderTarget);
 		dev.comfyfluffy.caustica.rt.RtUiOverlay.compositeIfUsed();
 	}
+//?} else {
+/*	// 26.3: render()/renderLevel() lost their parameters; the hand and screen effects moved into render3dHud,
+	// and every feature flush opens its own render pass (no global output override), so the UI-overlay
+	// redirect swaps the views handed to createRenderPass instead.
+	@Inject(method = "render()V", at = @At("HEAD"))
+	private void caustica$beginOverlayFrame(CallbackInfo ci) {
+        dev.comfyfluffy.caustica.rt.CausticaLoopProbe.gameRenderBegin();
+		RtUiOverlay.beginFrame();
+		RtFirstPerson.beginFrame();
+		RtComposite.INSTANCE.beginFrame();
+		if (!dev.comfyfluffy.caustica.CausticaBuild.RELEASE) dev.comfyfluffy.caustica.client.CinematicDirector.beginFrame();
+		if (RtReflex.enabled()) {
+			long swapchain = RtReflex.INSTANCE.appliedSwapchain();
+			if (swapchain != 0L
+					&& ((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
+				RtReflex.INSTANCE.marker(device.vkDevice(), swapchain, RtReflex.MARKER_RENDERSUBMIT_START,
+						RtReflex.INSTANCE.currentSimFrameId());
+			}
+		}
+	}
+
+	@Inject(method = "render()V", at = @At("TAIL"))
+	private void caustica$endRtFrameStats(CallbackInfo ci) {
+		RtComposite.INSTANCE.endFrame();
+		if (!dev.comfyfluffy.caustica.CausticaBuild.RELEASE) dev.comfyfluffy.caustica.client.CinematicDirector.endFrame();
+        dev.comfyfluffy.caustica.rt.CausticaLoopProbe.gameRenderEnd();
+	}
+
+	@Inject(method = "render()V",
+			at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GameRenderer;renderLevel()V"))
+	private void caustica$beginWorldScale(CallbackInfo ci) {
+		WorldRenderScaler.INSTANCE.begin(this.mainRenderTarget);
+	}
+
+	@WrapOperation(method = "render3dHud(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/OptionsRenderState;Z)V",
+			at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GameRenderer;renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lcom/mojang/blaze3d/textures/GpuTextureView;)V"))
+	private void caustica$redirectHandToOverlay(GameRenderer self, CameraRenderState cameraState,
+			net.minecraft.client.renderer.state.level.PlayerRenderState playerState,
+			com.mojang.blaze3d.textures.GpuTextureView handDepth, Operation<Void> original) {
+        if (RtFirstPerson.enabled()) {
+            RtFirstPerson.begin();
+            try { original.call(self,cameraState,playerState,handDepth); }
+            finally { RtFirstPerson.end(); }
+            caustica$completeWorld();
+            if (RtFirstPerson.enabled()) return;
+        }
+		boolean redirect = RtUiOverlay.enabled();
+		if (redirect) RtUiOverlay.beginOutputRedirect(this.mainRenderTarget);
+		try {
+			original.call(self, cameraState, playerState, handDepth);
+		} finally {
+			if (redirect) RtUiOverlay.endOutputRedirect();
+		}
+	}
+
+	// The hand pass: honour an active overlay redirect when its render pass is opened.
+	@WrapOperation(method = "renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lcom/mojang/blaze3d/textures/GpuTextureView;)V", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/CommandEncoder;createRenderPass(Ljava/util/function/Supplier;Lcom/mojang/blaze3d/textures/GpuTextureView;Ljava/util/Optional;Lcom/mojang/blaze3d/textures/GpuTextureView;Ljava/util/OptionalDouble;)Lcom/mojang/blaze3d/systems/RenderPass;"))
+	private com.mojang.blaze3d.systems.RenderPass caustica$handPassTarget(com.mojang.blaze3d.systems.CommandEncoder encoder,
+			java.util.function.Supplier<String> label, com.mojang.blaze3d.textures.GpuTextureView color,
+			java.util.Optional<?> clearColor, com.mojang.blaze3d.textures.GpuTextureView depth,
+			java.util.OptionalDouble clearDepth, Operation<com.mojang.blaze3d.systems.RenderPass> original) {
+		return original.call(encoder, label, RtUiOverlay.redirectColor(color), clearColor, RtUiOverlay.redirectDepth(depth), clearDepth);
+	}
+
+    @ModifyArg(method="renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lcom/mojang/blaze3d/textures/GpuTextureView;)V",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/FirstPersonHandsAndItemsRenderer;submitHandsWithItems(FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/level/FirstPersonHandsAndItemsRenderState;)V"),index=2)
+    private SubmitNodeCollector ce$captureHand(SubmitNodeCollector collector){return RtFirstPerson.collector(collector);}
+    @WrapOperation(method="renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lcom/mojang/blaze3d/textures/GpuTextureView;)V",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;renderAllFeatures(Lcom/mojang/blaze3d/systems/RenderPass;Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;)V"))
+    private void ce$skipDuplicateRasterHand(com.mojang.blaze3d.systems.RenderPass pass,
+            net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame frame,Operation<Void> original){if(!RtFirstPerson.collecting())original.call(pass,frame);}
+
+	// Screen effects (fire, underwater, view-blocking overlays): composite the world overlays first, then send
+	// the flush into the UI overlay in HDR. The pass is only opened when there is something to draw.
+	@Inject(method = "render3dHud(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/OptionsRenderState;Z)V",
+			at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/ScreenEffectRenderer;submit(FLnet/minecraft/client/renderer/SubmitNodeCollector;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/level/CameraRenderState;Z)V"))
+	private void caustica$beforeScreenEffects(CameraRenderState cameraState,
+			net.minecraft.client.renderer.state.level.PlayerRenderState playerState,
+			net.minecraft.client.renderer.state.OptionsRenderState options, boolean flag, CallbackInfo ci) {
+        if(!RtComposite.INSTANCE.isHdrPresentActive())RtUiOverlay.compositeIfUsed();
+        RtComposite.INSTANCE.captureStreamlineBeforeUi(this.mainRenderTarget);
+	}
+
+	@WrapOperation(method = "render3dHud(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/OptionsRenderState;Z)V", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/CommandEncoder;createRenderPass(Ljava/util/function/Supplier;Lcom/mojang/blaze3d/textures/GpuTextureView;Ljava/util/Optional;Lcom/mojang/blaze3d/textures/GpuTextureView;Ljava/util/OptionalDouble;)Lcom/mojang/blaze3d/systems/RenderPass;"))
+	private com.mojang.blaze3d.systems.RenderPass caustica$redirectScreenEffectsToOverlay(com.mojang.blaze3d.systems.CommandEncoder encoder,
+			java.util.function.Supplier<String> label, com.mojang.blaze3d.textures.GpuTextureView color,
+			java.util.Optional<?> clearColor, com.mojang.blaze3d.textures.GpuTextureView depth,
+			java.util.OptionalDouble clearDepth, Operation<com.mojang.blaze3d.systems.RenderPass> original) {
+		if (!(RtUiOverlay.enabled() && RtComposite.INSTANCE.isHdrPresentActive()))
+			return original.call(encoder, label, color, clearColor, depth, clearDepth);
+		RtUiOverlay.beginOutputRedirect(this.mainRenderTarget);
+		try {
+			return original.call(encoder, label, RtUiOverlay.redirectColor(color), clearColor, RtUiOverlay.redirectDepth(depth), clearDepth);
+		} finally {
+			RtUiOverlay.endOutputRedirect();
+		}
+	}
+
+	@Inject(method = "render()V",
+			at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/fog/FogRenderer;endFrame()V", shift = At.Shift.AFTER))
+	private void caustica$endWorldScale(CallbackInfo ci) {
+		WorldRenderScaler.INSTANCE.endSafetyNet(this.mainRenderTarget);
+	}
+
+	@ModifyArg(method = "renderLevel()V",
+			at = @At(value = "INVOKE",
+					target = "Lnet/minecraft/client/renderer/ProjectionMatrixBuffer;getBuffer(Lorg/joml/Matrix4f;)Lcom/mojang/blaze3d/buffers/GpuBufferSlice;"),
+			index = 0)
+	private Matrix4f caustica$captureLevelProjection(Matrix4f projection) {
+		if (!VanillaRenderController.rtRuntimeWorkRequested()) {
+			return projection;
+		}
+		var cameraState = this.gameRenderState().levelRenderState.cameraRenderState;
+		RtComposite.INSTANCE.captureFrame(projection, cameraState.viewRotationMatrix,
+				cameraState.pos.x, cameraState.pos.y, cameraState.pos.z);
+		VanillaRenderController.INSTANCE.markProjectionCaptured();
+		return projection;
+	}
+
+    @ModifyArg(method = "render3dHud(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/OptionsRenderState;Z)V",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/ProjectionMatrixBuffer;getBuffer(Lnet/minecraft/client/renderer/Projection;)Lcom/mojang/blaze3d/buffers/GpuBufferSlice;"), index = 0)
+    private net.minecraft.client.renderer.Projection caustica$captureHandProjection(net.minecraft.client.renderer.Projection projection) {
+        RtFirstPerson.captureProjection(projection);
+        return projection;
+    }
+
+	// Primary end-of-window: right after the 3D-HUD projection is set (now the first one in render3dHud)
+	// and before the pre-hand depth clear.
+	@Inject(method = "render3dHud(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/OptionsRenderState;Z)V",
+			at = @At(value = "INVOKE",
+					target = "Lcom/mojang/blaze3d/systems/RenderSystem;setProjectionMatrix(Lcom/mojang/blaze3d/buffers/GpuBufferSlice;Lcom/mojang/blaze3d/ProjectionType;)V",
+					ordinal = 0,
+					shift = At.Shift.AFTER))
+	private void caustica$endWorldScaleBeforeHand(CameraRenderState cameraState,
+			net.minecraft.client.renderer.state.level.PlayerRenderState playerState,
+			net.minecraft.client.renderer.state.OptionsRenderState options, boolean flag, CallbackInfo ci) {
+        if(RtFirstPerson.enabled())return;
+        caustica$completeWorld();
+    }
+    private void caustica$completeWorld() {
+		WorldRenderScaler.INSTANCE.end(this.mainRenderTarget);
+		try {
+			dev.comfyfluffy.caustica.client.RtRasterFallback.draw(this.mainRenderTarget); // includes the Litematica bridge
+			RtWorldOverlay.INSTANCE.compositeIntoUiOverlay(this.mainRenderTarget, RtComposite.INSTANCE.currentGraphicsUse());
+		} finally {
+			RtComposite.INSTANCE.finishGraphicsUse();
+		}
+	}
+
+    @Inject(method = "render()V",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"))
+    private void caustica$compositeBeforeNativeGui(CallbackInfo ci) {
+        if (!dev.comfyfluffy.caustica.rt.RtUiOverlay.redirectGui()) {
+            dev.comfyfluffy.caustica.rt.RtUiOverlay.compositeIfUsed();
+            RtComposite.INSTANCE.captureStreamlineBeforeUi(this.mainRenderTarget);
+        }
+    }
+
+	@Inject(method = "render()V",
+			at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V", shift = At.Shift.AFTER))
+	private void caustica$compositeUiOverlay(CallbackInfo ci) {
+		RtComposite.INSTANCE.captureFgHudless(this.mainRenderTarget);
+		dev.comfyfluffy.caustica.rt.RtUiOverlay.compositeIfUsed();
+	}
+*///?}
 
 	@Shadow
 	public abstract net.minecraft.client.renderer.state.GameRenderState gameRenderState();

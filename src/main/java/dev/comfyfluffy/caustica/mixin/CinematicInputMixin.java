@@ -1,10 +1,10 @@
 package dev.comfyfluffy.caustica.mixin;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import dev.comfyfluffy.caustica.client.CinematicDirector;
 import net.minecraft.client.KeyboardHandler;
 import net.minecraft.client.input.CharacterEvent;
 import net.minecraft.client.input.KeyEvent;
-import org.lwjgl.glfw.GLFW;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -17,8 +17,9 @@ public abstract class CinematicInputMixin {
     private void caustica$cinematicKeys(long window, int action, KeyEvent event, CallbackInfo ci) {
         if (!CinematicDirector.running()) return;
         int mods = event.modifiers();
-        if (action == GLFW.GLFW_PRESS && event.key() == GLFW.GLFW_KEY_X
-                && (mods & GLFW.GLFW_MOD_CONTROL) != 0 && (mods & GLFW.GLFW_MOD_SHIFT) != 0) {
+        // InputConstants mirrors GLFW (<=26.2) or SDL (26.3+) codes, so the same check works on both.
+        if (action == InputConstants.PRESS && event.key() == InputConstants.KEY_X
+                && (mods & InputConstants.MOD_CONTROL) != 0 && (mods & InputConstants.MOD_SHIFT) != 0) {
             CinematicDirector.requestAbort();
         }
         ci.cancel();
@@ -28,4 +29,12 @@ public abstract class CinematicInputMixin {
     private void caustica$cinematicChars(long window, CharacterEvent event, CallbackInfo ci) {
         if (CinematicDirector.running()) ci.cancel();
     }
+
+    //? if >=26.3 {
+    /*// SDL delivers typed text as whole strings instead of per-character events.
+    @Inject(method = "textInput", at = @At("HEAD"), cancellable = true)
+    private void caustica$cinematicText(long window, String text, CallbackInfo ci) {
+        if (CinematicDirector.running()) ci.cancel();
+    }
+    *///?}
 }

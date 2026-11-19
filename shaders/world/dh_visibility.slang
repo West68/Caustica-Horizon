@@ -19,6 +19,12 @@ void dhVisibility(inout Payload payload,EntityGeom g,Prim epr){
                 Ptr<uint,Access.ReadWrite,AddressSpace.Device,Std430DataLayout> counts=Ptr<uint,Access.ReadWrite,AddressSpace.Device,Std430DataLayout>(g.dispAddr);
                 InterlockedAdd(counts[3],1u);
             }
+            // A DH leaf face is a solid rectangle, but the real canopy it stands for is cutout foliage that
+            // lets sunlight through its gaps. Treating it as opaque left the inside of distant crowns pitch black.
+            if(shadow&&(epr.flags&(1u<<20))!=0u) {
+                payload.albedo*=lerp(float3(1),epr.tint.rgb,.3)*.55;
+                IgnoreHit();return;
+            }
             if(shadow&&(epr.flags&(4096u|8192u))!=0u) {
                 payload.albedo*=lerp(float3(1),epr.tint.rgb,(epr.flags&4096u)!=0u?.5:.2);
                 if((epr.flags&4096u)!=0u)payload.hitT=payload.hitT<0?RayTCurrent():min(payload.hitT,RayTCurrent());

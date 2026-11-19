@@ -11,5 +11,11 @@ public final class SchematicOverlayState {
                 Optional.of(BlendFunction.TRANSLUCENT),source[i].format(),ColorTargetState.WRITE_ALL);
         return result;
     }
+    //? if >=26.3 {
+    /*// 26.3 pipelines expose their color targets as a List.
+    public static ColorTargetState[] colors(java.util.List<ColorTargetState> source) {
+        return colors(source.toArray(new ColorTargetState[0]));
+    }
+    *///?}
     private SchematicOverlayState() {}
 }

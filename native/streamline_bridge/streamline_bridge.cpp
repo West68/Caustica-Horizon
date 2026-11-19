@@ -1086,6 +1086,16 @@ SLBRIDGE_EXPORT int32_t slbridge_get_dlssg_state(uint32_t viewport,
     return result;
 }
 
+// Render-size range of the last successful DLSS-RR optimal-settings query (min w,h, max w,h).
+static uint32_t g_dlssdRange[4]{};
+
+// Copies the range above; 0 entries mean no successful query yet.
+SLBRIDGE_EXPORT int32_t slbridge_get_dlssd_render_range(uint32_t* out_range4) {
+    if (!out_range4) return -1;
+    for (int i = 0; i < 4; i++) out_range4[i] = g_dlssdRange[i];
+    return 0;
+}
+
 SLBRIDGE_EXPORT int32_t slbridge_get_dlssd_optimal_settings(uint32_t mode,
         uint32_t output_width, uint32_t output_height, uint32_t* out_render_width,
         uint32_t* out_render_height, float* out_sharpness) {
@@ -1113,6 +1123,10 @@ SLBRIDGE_EXPORT int32_t slbridge_get_dlssd_optimal_settings(uint32_t mode,
         *out_render_width = settings.optimalRenderWidth;
         *out_render_height = settings.optimalRenderHeight;
         *out_sharpness = settings.optimalSharpness;
+        g_dlssdRange[0] = settings.renderWidthMin;
+        g_dlssdRange[1] = settings.renderHeightMin;
+        g_dlssdRange[2] = settings.renderWidthMax;
+        g_dlssdRange[3] = settings.renderHeightMax;
     }
     {
         std::lock_guard lock(g_traceMutex);
