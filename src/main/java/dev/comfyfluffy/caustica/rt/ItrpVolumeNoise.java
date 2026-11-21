@@ -41,11 +41,13 @@ public final class ItrpVolumeNoise {
     public RtVolumeTexture shape() { return shape; }
     public RtVolumeTexture detail() { return detail; }
 
+    /** Also re-arms generation: a resource reload destroys the textures and the next bind must rebuild them. */
     public void destroy() {
         if (shape != null) shape.destroy();
         if (detail != null) detail.destroy();
         shape = null;
         detail = null;
+        attempted = false;
     }
 
     // ---- generation ---------------------------------------------------------------------------------

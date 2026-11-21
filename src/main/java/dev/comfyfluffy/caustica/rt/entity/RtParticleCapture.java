@@ -99,7 +99,7 @@ public final class RtParticleCapture implements VertexConsumer {
     @Override
     public VertexConsumer addVertex(float vx, float vy, float vz) {
         flush(); // finalize the previous vertex (setUv/setColor follow addVertex in the chained protocol)
-        // ITRP Weather_VS: camera-relative wind displacement and world-pinned angular disturbance.
+        // ITRP-style rain: camera-relative wind displacement and world-pinned angular disturbance.
         double angle=(vx+weatherCamX)*3+(vy+weatherCamY)*.5+(vz+weatherCamZ)*3+weatherTime*.2;
         x = vx + ox + (weatherStyle?(float)((.1+Math.sin(angle)*.05)*vy):0);
         y = vy + oy;

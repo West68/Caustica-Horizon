@@ -121,8 +121,12 @@ public final class RtHeldLights {
         anchors.record(hand,RtComposite.frameCounter(),verts,from,to,itemPose,flameTop);
     }
 
+    /** True while the player holds an emitting item in a place that is dark without it (block and sky light <= 7). */
+    private static boolean holdingInDark;
+    public static boolean holdingInDark(){return holdingInDark;}
     public static Frame frame(Minecraft mc,double cx,double cy,double cz,int bx,int by,int bz) {
         syncAnchorContext(mc);
+        holdingInDark=false;
         if(mc.player==null || !CausticaConfig.Rt.Visuals.HELD_LIGHTS.value())return new Frame(ZERO,ZERO,ZERO,ZERO);
         reload(mc);
         float partial=mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
@@ -154,6 +158,10 @@ public final class RtHeldLights {
                         (float)(handY-by),(float)(feet.z-bz)+right.z*side+forward.z*ahead,radius);
             }
             values[hand*2+1]=new Float4(v[1]*power,v[2]*power,v[3]*power,hand==0?CausticaConfig.Rt.Visuals.HELD_SOFTNESS.value():CausticaConfig.Rt.Visuals.HELD_SHADOW_FLOOR.value());
+        }
+        if((values[0].w()>0 || values[2].w()>0) && mc.level!=null) {
+            var eye=net.minecraft.core.BlockPos.containing(mc.player.getEyePosition(partial));
+            holdingInDark=mc.level.getRawBrightness(eye,mc.level.getSkyDarken())<=7;
         }
         return new Frame(values[0],values[1],values[2],values[3]);
     }

@@ -159,6 +159,7 @@ public static const uint TERRAIN_PRIM_IN_LIGHT_BUFFER = 2u;
 // Cutout face with a coincident back face: any-hit accepts it only from the side it faces (RtTerrainMesher).
 public static const uint TERRAIN_PRIM_ONE_SIDED = 4u;
 public static const uint TERRAIN_PRIM_FOLIAGE = 8u;
+public static const uint TERRAIN_PRIM_RELIEF = 16u; // cutout face of a solid object: parallax allowed
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.
 public struct Payload {

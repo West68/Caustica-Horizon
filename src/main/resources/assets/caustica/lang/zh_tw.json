@@ -37,7 +37,7 @@
   "caustica.options.rt.hdrPeak": "HDR 峰值亮度",
   "caustica.options.rt.hdrPeak.tooltip": "高光回落目標的絕對亮度（nits）。請設為顯示器的 HDR 峰值亮度。",
   "caustica.options.rt.dlssQuality": "DLSS 品質",
-  "caustica.options.rt.dlssQuality.tooltip": "DLSS Ray Reconstruction 品質模式。較低品質模式會算繪較少像素並進行更積極的升頻，以獲得更高幀率；較高品質模式會算繪更多像素，以獲得更清晰的影像。僅在啟用 DLSS Ray Reconstruction 時影響畫面。",
+  "caustica.options.rt.dlssQuality.tooltip": "DLSS Ray Reconstruction 品質模式。較低品質模式會算繪較少像素並進行更積極的升頻，以獲得更高幀率；較高品質模式會算繪更多像素，以獲得更清晰的影像。僅在啟用 DLSS Ray Reconstruction 時影響畫面。DLSS 自由解析度開啟時本項不生效，檔位由自由解析度自動選擇。",
   "caustica.options.rt.dlssQuality.3": "超高效能",
   "caustica.options.rt.dlssQuality.0": "效能",
   "caustica.options.rt.dlssQuality.1": "平衡",

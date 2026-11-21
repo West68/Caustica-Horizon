@@ -77,8 +77,9 @@ public final class RtStreamlineRr {
         return CausticaConfig.Rt.DlssRr.ENABLED.value();
     }
 
+    /** Same mode as the NGX path, including the one free resolution picks; the fixed tier alone ignored it. */
     public static int quality() {
-        return CausticaConfig.Rt.DlssRr.QUALITY.value();
+        return RtDlssRr.quality();
     }
 
     private static int renderPreset() {

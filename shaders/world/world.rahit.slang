@@ -138,7 +138,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         float4 texel = entityAlbedoTex[NonUniformResourceIndex(texSlot)].SampleLevel(effectUv, 0.0);
         if((epr.flags&512u)!=0u)texel.a*=dot(bary,float3(epr.aux0&255u,(epr.aux0>>8u)&255u,(epr.aux0>>16u)&255u)/255.0);
         bool stochasticAlpha = instanceKind == PARTICLE_BIT;
-        // ITRP Weather_FS: a rain texel is either part of the streak (alpha >= 0.1) or absent. The
+        // ITRP-style rain: a rain texel is either part of the streak (alpha >= 0.1) or absent. The
         // streak's opacity is applied as a deterministic veil in world.rgen, never as random coverage.
         if (instanceKind == PARTICLE_BIT && (epr.flags & 32768u) != 0u) {
             if (texel.a < 0.1 || (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u) IgnoreHit();

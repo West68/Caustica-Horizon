@@ -1973,7 +1973,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         // off secondary rays, so this only fires at bounce 0; they receive direct light and one diffuse
         // path continuation into the scene, but never appear in shadows/reflections/GI or emit radiance.
         if (material == MATERIAL_PARTICLE && payload.f0.x < -0.5) {
-            // ITRP-PTGI rain (Weather_FS + Volumetric_FS Rain()): color = mix(color, rainColor,
+            // ITRP-style rain veil: color = mix(color, rainColor,
             // saturate(mask * 0.15 * wetness * RAIN_VISIBILITY)), rainColor ~ (skylight + 0.1 sunlight)
             // * 0.01 - a faint dark veil, not a lit sprite. The ray continues to the surface behind,
             // which keeps the camera's guides and primary-surface quality.

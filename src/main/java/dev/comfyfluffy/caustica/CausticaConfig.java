@@ -927,7 +927,7 @@ public final class CausticaConfig {
             public static final FloatSetting SNOW_REFLECTANCE =
                     clampedFloat("caustica.rt.look.snowReflectance", "look.snow-reflectance", 1f, .1f, 1f);
             public static final FloatSetting SUN_RIMS=clampedFloat("caustica.rt.look.sunRims","look.sun-rims",1f,0f,3f);
-            public static final FloatSetting SUN_DISC_SIZE=clampedFloat("caustica.rt.look.sunDiscSize","look.sun-disc-size",1f,.2f,3f);
+            public static final FloatSetting SUN_DISC_SIZE=clampedFloat("caustica.rt.look.sunDiscSize","look.sun-disc-size",1f,.05f,3f); // .052 = real sun (0.27 deg radius)
             public static final FloatSetting NIGHT_BRIGHTNESS=clampedFloat("caustica.rt.look.nightBrightness","look.night-brightness",.6f,.1f,2f);
             public static final FloatSetting SUN_GLOW=clampedFloat("caustica.rt.look.sunGlow","look.sun-glow",1f,0f,3f);
             public static final BooleanSetting NEBULA=bool("caustica.rt.look.nebula","look.nebula",true);
@@ -936,7 +936,7 @@ public final class CausticaConfig {
             public static final FloatSetting TORCH_KELVIN=clampedFloat("caustica.rt.look.torchKelvin","look.torch-kelvin",3000f,1000f,12000f);
             /**
              * View transform: false keeps the official AgX display mapping, true switches the display pass to
-             * the ITRP-PTGI 0.8.31 default curve (SEUSTonemap: Lottes cone-overlap, TONE_CURVE_POWER 2.5,
+             * the ITRP-PTGI 0.8.31 default curve (Lottes cone-overlap, TONE_CURVE_POWER 2.5,
              * GAMMA 2.2). Exposure is applied before either curve, exactly as before.
              */
             public static final BooleanSetting ITRP =
@@ -977,6 +977,9 @@ public final class CausticaConfig {
                     exposureScale("caustica.rt.exposure.adaptUp", "exposure.adapt-up", 0.12f);
             public static final FloatSetting ADAPT_DOWN =
                     exposureScale("caustica.rt.exposure.adaptDown", "exposure.adapt-down", 0.35f);
+            /** Holding a light in a dark place never darkens the exposure below where it was when the light came out. */
+            public static final BooleanSetting HELD_LIGHT_NO_DARKEN =
+                    bool("caustica.rt.exposure.heldLightNoDarken", "exposure.held-light-no-darken", true);
 
             private Exposure() {
             }

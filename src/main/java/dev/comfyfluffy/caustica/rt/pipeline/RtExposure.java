@@ -42,7 +42,7 @@ public final class RtExposure {
                         "exposure histogram");
             }
             if (state == null) {
-                state = ctx.createBuffer(16, VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "exposure state");
+                state = ctx.createBuffer(32, VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "exposure state");
                 resetAutoHistory();
             }
             if (pipeline == null) {

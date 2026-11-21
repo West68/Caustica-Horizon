@@ -113,7 +113,7 @@ final class RtExposurePipeline {
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, resolvePool, "exposure resolve descriptor pool");
             long resolveSet = allocateSet(vk, stack, resolvePool, resolveDsl, "resolve");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, resolveSet, "exposure resolve descriptor set");
-            long resolveLayout = createPipelineLayout(vk, stack, resolveDsl, 36, "resolve");
+            long resolveLayout = createPipelineLayout(vk, stack, resolveDsl, 40, "resolve");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT, resolveLayout, "exposure resolve pipeline layout");
             long resolveModule = loadModule(vk, stack, "exposure_resolve.comp.spv");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, resolveModule, "exposure resolve shader module");
@@ -186,7 +186,7 @@ final class RtExposurePipeline {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, resolvePipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, resolvePipelineLayout, 0,
                     stack.longs(resolveDescriptorSet), null);
-            ByteBuffer push = stack.malloc(36);
+            ByteBuffer push = stack.malloc(40);
             push.putInt(0, pixelCount);
             push.putFloat(4, config.key());
             push.putFloat(8, config.minEv());
@@ -196,6 +196,8 @@ final class RtExposurePipeline {
             push.putFloat(24, frameTimeSeconds);
             push.putFloat(28, config.evBias());
             push.putInt(32,dev.comfyfluffy.caustica.CausticaConfig.Rt.Look.ITRP.value()?1:0);
+            push.putInt(36,dev.comfyfluffy.caustica.CausticaConfig.Rt.Exposure.HELD_LIGHT_NO_DARKEN.value()
+                    && dev.comfyfluffy.caustica.rt.RtHeldLights.holdingInDark()?1:0);
             VK10.vkCmdPushConstants(cmd, resolvePipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, 1, 1, 1);
         }

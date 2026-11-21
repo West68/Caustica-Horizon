@@ -5,7 +5,7 @@
 // average plus a single affine step; the coverage constants are kept because they define the look.
 //
 // Structural facts about the target look:
-//   * The clouds are NOT a volumetric march. PTGI_CloudPlane intersects a single horizontal plane above
+//   * The clouds are NOT a volumetric march. The look is a single horizontal plane intersected above
 //     the camera, evaluates one cloud colour at that point, and alpha-composites it over the sky. That
 //     is already the cheap 2.5D representation, so no low-resolution cloud image is needed and no sky
 //     ray pays for a volume traversal.
@@ -71,7 +71,7 @@ float itrpNoise2D(uint64_t noiseAddr, float2 pos, bool blocky = true) {
     float2 p = floor(pos);
     float2 f = fract(pos);
     if (blocky) {
-    // This is the pack's actual "blocky" mechanism: under PTGI_CLOUDS_BLOCKY it smoothsteps the
+    // This is the pack's actual "blocky" mechanism: in blocky mode it smoothsteps the
     // fractional coordinate three times in a row before the lookup, which pushes the interpolation
     // toward a step function and sharpens every cell boundary. Without it the lookup interpolates
     // linearly and the field reads as smooth streaks. The procedural fallback is an approximation, not the original field.

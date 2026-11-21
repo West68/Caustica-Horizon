@@ -108,6 +108,7 @@ abstract class CompileShaders extends DefaultTask {
 	@Input abstract Property<String> getSpirvVal()
 	@Input abstract Property<String> getSlangc()
 	@Input abstract Property<Boolean> getRtShaderO2()
+	@Input abstract Property<Boolean> getShaderDebug()
 
 	@Inject abstract ExecOperations getExecOps()
 
@@ -134,21 +135,21 @@ abstract class CompileShaders extends DefaultTask {
 				// emits OpExtInstWithForwardRefsKHR (SPV_KHR_relaxed_extended_instruction), which trips a
 				// validation error unless the shaderRelaxedExtendedInstruction device feature is enabled.
 				// -g keeps source-level debug info for Nsight/RenderDoc without needing that extension.
-				commandLine([glslang.get(), "-V", "--target-env", "vulkan1.2", "-g"] + defines
+				commandLine([glslang.get(), "-V", "--target-env", "vulkan1.2"] + (shaderDebug.get() ? ["-g"] : []) + defines
 						+ [src.absolutePath, "-o", spv.absolutePath])
 			}
 			validate(spv)
 		}
 		def compileOneSlang = { File src, File spv, List<String> extra ->
 			execOps.exec {
-				// Embed Slang source and line mappings in SPIR-V for RenderDoc/Nsight source debugging.
+				// With -PcausticaShaderDebug=true: embed Slang source and line mappings for RenderDoc/Nsight.
 				// Optional source-preserving PT compiler experiment. Keep ordinary builds on the
 				// known baseline until an in-game A/B establishes a repeatable GPU-time benefit.
 				def speedOpt = rtShaderO2.get() && src.name in ["world.rgen.slang", "world.rchit.slang"]
 						? ["-O2"] : []
 				commandLine([slangc.get(), src.absolutePath, "-target", "spirv",
 						"-profile", "spirv_1_5", "-matrix-layout-column-major",
-						"-warnings-as-errors", "all", "-warnings-disable", "41012", "-g"] + speedOpt + extra
+						"-warnings-as-errors", "all", "-warnings-disable", "41012"] + (shaderDebug.get() ? ["-g"] : []) + speedOpt + extra
 						+ ["-o", spv.absolutePath])
 			}
 			validate(spv)
@@ -214,6 +215,9 @@ def compileShaders = tasks.register("compileShaders", CompileShaders) {
 	spirvVal = resolveVulkanTool("spirv-val")
 	slangc = resolveVulkanTool("slangc")
 	rtShaderO2 = providers.gradleProperty("causticaRtShaderO2").map { it.toBoolean() }.orElse(false)
+	// Source-level debug info (-g) embeds the full shader source, comments included, in every .spv.
+	// Off for normal/release builds; pass -PcausticaShaderDebug=true for RenderDoc/Nsight source debugging.
+	shaderDebug = providers.gradleProperty("causticaShaderDebug").map { it.toBoolean() }.orElse(false)
 }
 
 def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShaderRecords) {

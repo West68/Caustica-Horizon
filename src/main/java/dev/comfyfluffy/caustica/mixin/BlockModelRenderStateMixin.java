@@ -29,6 +29,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class BlockModelRenderStateMixin implements ContainedBlockSource {
     @Shadow @Nullable private Matrix4fc transformation;
     @Shadow @Nullable private Matrix4fc specialRendererTransformation;
+    @Shadow private net.minecraft.client.renderer.special.SpecialModelRenderer<?> specialRenderer;
 
     @Unique private BlockState caustica$containedState;
 
@@ -42,6 +43,21 @@ public abstract class BlockModelRenderStateMixin implements ContainedBlockSource
         this.caustica$containedState = state;
     }
 
+    @Unique
+    private static boolean caustica$worldModelEmpty(BlockState state) {
+        var model = net.minecraft.client.Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
+        if (model == null) return true;
+        java.util.List<net.minecraft.client.renderer.block.dispatch.BlockStateModelPart> parts = new java.util.ArrayList<>();
+        model.collectParts(net.minecraft.util.RandomSource.create(42L), parts);
+        for (var part : parts) {
+            if (!part.getQuads(null).isEmpty()) return false;
+            for (net.minecraft.core.Direction d : net.minecraft.core.Direction.values()) {
+                if (!part.getQuads(d).isEmpty()) return false;
+            }
+        }
+        return true;
+    }
+
     @Inject(method = "clear", at = @At("HEAD"))
     private void caustica$clearContained(CallbackInfo ci) {
         this.caustica$containedState = null;
@@ -51,6 +67,12 @@ public abstract class BlockModelRenderStateMixin implements ContainedBlockSource
     private void caustica$captureForRt(PoseStack poseStack, SubmitNodeCollector submitNodeCollector,
                                        int externalLightCoords, int overlayCoords, int outlineColor, CallbackInfo ci) {
         if (this.caustica$containedState == null || !(submitNodeCollector instanceof RtEntityCollector rt)) {
+            return;
+        }
+        // Chests (chest minecart contents) have an empty world block model: their geometry IS the special
+        // renderer. Re-meshing the world model drew nothing, so let vanilla submit it; the special renderer
+        // reaches RtEntityCollector.submitModel like a placed chest does.
+        if (this.specialRenderer != null && caustica$worldModelEmpty(this.caustica$containedState)) {
             return;
         }
         // Apply whichever display transform the resolve set (normal vs special path), then re-emit the

@@ -10,6 +10,8 @@ layout(std430, binding = 2, set = 0) buffer ExposureState {
     float previous;
     uint initialized;
     uint lastLook;
+    float holdFloor;   // exposure when a held light came out in the dark
+    uint holdActive;
 } stateBuf;
 
 layout(push_constant) uniform Push {
@@ -22,7 +24,15 @@ layout(push_constant) uniform Push {
     float frameTimeSeconds;
     float evBias;
     int itrpLook;
+    uint heldLock;     // holding a light in the dark: the meter may brighten but never darken below holdFloor
 } pc;
+
+// A held torch lights the ground around the player; metering that made the rest of the night darker.
+float heldFloor(float target, float current) {
+    if (pc.heldLock == 0u) { stateBuf.holdActive = 0u; return target; }
+    if (stateBuf.holdActive == 0u) { stateBuf.holdFloor = current; stateBuf.holdActive = 1u; }
+    return max(target, stateBuf.holdFloor);
+}
 
 const float LOG_MIN = -12.0;
 const float LOG_MAX = 12.0;
@@ -46,6 +56,7 @@ void main() {
         float low=exp2(pc.minEv+pc.evBias),high=exp2(pc.maxEv+pc.evBias);
         target=clamp(target,low,high);
         float previous = clamp(stateBuf.previous,low,high);
+        if (stateBuf.initialized != 0u && stateBuf.lastLook == 1u) target = heldFloor(target, previous);
         float baseRate=target>previous?0.025:0.1;
         float speed=target>previous?pc.adaptUp/0.12:pc.adaptDown/0.35;
         float rate=1.0-pow(1.0-baseRate,clamp(speed,0.01,20.0)*max(pc.frameTimeSeconds,0.0)*60.0);
@@ -82,6 +93,7 @@ void main() {
     target = clamp(target, exp2(pc.minEv), exp2(pc.maxEv));
 
     float prev = stateBuf.initialized == 0u ? target : max(stateBuf.previous, 1.0e-4);
+    if (stateBuf.initialized != 0u) target = heldFloor(target, prev);
     float rate = target > prev ? pc.adaptUp : pc.adaptDown;
     float alpha = stateBuf.initialized == 0u ? 1.0 : 1.0 - exp(-pc.frameTimeSeconds / max(rate, 1.0e-4));
     float exposure = mix(prev, target, clamp(alpha, 0.0, 1.0));

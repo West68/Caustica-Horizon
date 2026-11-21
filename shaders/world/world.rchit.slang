@@ -493,7 +493,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             payload.motionPrev = g.rigidDisp.xyz;
         }
         payload.f0 = float3(0.0, 0.0, 0.0);
-        // Rain marker for world.rgen's ITRP veil: x=-1, y = streak mask (texture alpha, Weather_FS).
+        // Rain marker for world.rgen's ITRP veil: x=-1, y = streak mask (texture alpha).
         // Weather snow marker for world.rgen: z=1 (scattering volume, orientation-independent light).
         if((pr.flags&4096u)!=0u)payload.f0=float3(0.0,0.0,1.0);
         if((pr.flags&32768u)!=0u)payload.f0=float3(-1.0,entityAlbedoTex[NonUniformResourceIndex(pslot)].SampleLevel(puv,particleLod).a,0.0);
@@ -834,9 +834,11 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     // No parallax on cutout layers (grass, flowers, leaves, crops...): a single-sided alpha-tested card
     // has no volume to march into, and a pack height map made each blade show a second, displaced copy
     // of itself — the "two layers of grass". Solid blocks keep their relief.
+    // Cutout faces of solid objects (pack 3D work blocks) are flagged TERRAIN_PRIM_RELIEF and keep it.
     Surface surface = evaluateMaterial(materialHeader, uv, blockLod, payload.albedo, n,
             tp0, tp1, tp2, uv0, uv1, uv2, vdir,
-            materialHeader.params.x, materialHeader.params.y, emission, nonSolid, !nonSolid, (payload.flags & PAYLOAD_CAMERA_MISS)!=0u, false);
+            materialHeader.params.x, materialHeader.params.y, emission, nonSolid,
+            !nonSolid || (pr.flags & TERRAIN_PRIM_RELIEF) != 0u, (payload.flags & PAYLOAD_CAMERA_MISS)!=0u, false);
     // Modded leaves/flowers usually have no LabPBR specular map, so they got no subsurface light and read as
     // flat opaque blocks next to the pack's vanilla foliage. Give tagged foliage a typical foliage SSS instead.
     if((pr.flags&TERRAIN_PRIM_FOLIAGE)!=0u && nonSolid && (materialHeader.features&MATERIAL_FEATURE_SPEC)==0u)
@@ -891,7 +893,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             film=saturate(film*(1.8-surface.porosity)-surface.porosity*.2);
             film*=saturate(dot(n,float3(0,1,0))*.5+.5);
             payload.albedo*=1.0-film*sqrt(surface.porosity)*.4;
-            // ITRP Terrain_FS: the normal map is blended to the flat face as wetness passes 0.5, so soaked
+            // ITRP-style wetness: the normal map is blended to the flat face as wetness passes 0.5, so soaked
             // ground is a level mirror rather than bumpy glints.
             n=normalize(lerp(n,geometricUp,saturate(film*2.0-1.0)));
         }

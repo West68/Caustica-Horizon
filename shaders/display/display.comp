@@ -270,9 +270,9 @@ vec3 aces2(vec3 exposedRec709) {
 }
 
 // ITRP-PTGI 0.8.31 default view transform, reimplemented from the curve shape and the pack's own default
-// constants rather than copied from its GLSL: SEUSTonemap is a Lottes cone-overlap curve with
+// constants rather than copied from its GLSL: the look is a Lottes cone-overlap curve with
 // TONE_CURVE_POWER 2.5 (doubled to 5.0 inside), GAMMA 2.2, cone overlaps RG 0.02 / RB 0.002 / GB 0.008 and
-// neutral output gains. The pack leaves HIGHLIGHT_MAXBRIGHT at 0.0, so its soft-knee block never runs and
+// neutral output gains. The pack keeps its highlight soft-knee disabled by default, so that stage
 // is omitted here. Input is scene-linear radiance times exposure; the final 1/GAMMA step means this curve
 // already emits display-encoded values, so nothing may gamma-encode them again.
 const float ITRP_TONE_POW = 5.0;   // TONE_CURVE_POWER * 2.0

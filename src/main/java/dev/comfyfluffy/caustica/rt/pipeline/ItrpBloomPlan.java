@@ -6,7 +6,7 @@ import java.util.List;
 /** Bounded dual-filter pyramid. All weights are normalized, including tiny/odd viewports. */
 public final class ItrpBloomPlan {
     public static final int MAX_LEVELS=9;
-    // Bloom_FS.glsl BLOOM_EXTENDED, ordinary opaque-pixel branch. The pack default HIGHLIGHT_DIFFUSION_FILTER=1
+    // ITRP-style extended bloom, ordinary opaque-pixel branch. The pack default HIGHLIGHT_DIFFUSION_FILTER=1
     // scales the four finest levels by weightLodN(filter 1)/weightLodN(filter 0) = 2, 1.92, 1.728, 1.5552.
     private static final double[] BASE={2,1.25,.83333333,.75231481,.67515432,.60281636,.53583677,.4744388,.09302722};
     private static final double[] DIFFUSION={2.0/1.0,1.6/.83333333,1.2/.69444444,.9/.5787037,1,1,1,1,1};

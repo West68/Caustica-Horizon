@@ -82,13 +82,14 @@ public final class RtVideoOptions {
                     row(ev("caustica.enhanced.minEv", CausticaConfig.Rt.Exposure.MIN_EV, -80, 20), CausticaConfig.Rt.Exposure.MIN_EV),
                     row(ev("caustica.enhanced.maxEv", CausticaConfig.Rt.Exposure.MAX_EV, -20, 80), CausticaConfig.Rt.Exposure.MAX_EV),
                     row(scalar("adaptUp", CausticaConfig.Rt.Exposure.ADAPT_UP, .01f, 1f), CausticaConfig.Rt.Exposure.ADAPT_UP),
-                    row(scalar("adaptDown", CausticaConfig.Rt.Exposure.ADAPT_DOWN, .01f, 1f), CausticaConfig.Rt.Exposure.ADAPT_DOWN)));
+                    row(scalar("adaptDown", CausticaConfig.Rt.Exposure.ADAPT_DOWN, .01f, 1f), CausticaConfig.Rt.Exposure.ADAPT_DOWN),
+                    row(toggle("caustica.enhanced.heldLightNoDarken", CausticaConfig.Rt.Exposure.HELD_LIGHT_NO_DARKEN), CausticaConfig.Rt.Exposure.HELD_LIGHT_NO_DARKEN)));
             case "clouds" -> List.of(
                 section("celestial",
                     row(sunSize(), CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS),
                     row(degrees("caustica.enhanced.moonSize", CausticaConfig.Rt.Composite.MOON_ANGULAR_RADIUS, 1, 50, 10), CausticaConfig.Rt.Composite.MOON_ANGULAR_RADIUS),
                     row(degrees("caustica.enhanced.sunTilt", CausticaConfig.Rt.Composite.SUN_NOON_SOUTH_TILT, -60, 60, 1), CausticaConfig.Rt.Composite.SUN_NOON_SOUTH_TILT),
-                    row(scalar("sunDiscSize", CausticaConfig.Rt.Look.SUN_DISC_SIZE, .2f, 3f), CausticaConfig.Rt.Look.SUN_DISC_SIZE),
+                    row(scalar("sunDiscSize", CausticaConfig.Rt.Look.SUN_DISC_SIZE, .05f, 3f), CausticaConfig.Rt.Look.SUN_DISC_SIZE),
                     row(sunShape(), CausticaConfig.Rt.Look.SUN_SHAPE),
                     row(scalar("sunGlow", CausticaConfig.Rt.Look.SUN_GLOW, 0f, 3f), CausticaConfig.Rt.Look.SUN_GLOW),
                     row(scalar("sunRims", CausticaConfig.Rt.Look.SUN_RIMS, 0f, 3f), CausticaConfig.Rt.Look.SUN_RIMS),

@@ -903,6 +903,8 @@ public final class RtComposite {
         int[] optimal = rrEnabled ? RtDlssRr.INSTANCE.queryOptimalRenderSize(midW, midH) : null;
         renderW = optimal != null ? optimal[0] : width;
         renderH = optimal != null ? optimal[1] : height;
+        if (freeOut != null) dev.comfyfluffy.caustica.CausticaMod.LOGGER.info("[DLSS-FREE] render={}x{} actual={}% of display (requested {}%)",
+                renderW, renderH, Math.round(100f * renderW / width), CausticaConfig.Rt.DlssRr.FREE_SCALE.value());
         renderSizeRrEnabled = rrEnabled;
         renderSizeSrMode = RtDlssRr.srOnly();
         renderSizeRrQuality = rrQuality;

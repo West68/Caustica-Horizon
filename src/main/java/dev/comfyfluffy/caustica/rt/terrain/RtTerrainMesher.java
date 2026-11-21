@@ -128,6 +128,7 @@ final class RtTerrainMesher {
     private static final float[] EMPTY_LIGHTS = new float[0];
     /** TerrainPrim.flags bit: cutout face with a coincident back face (world_common TERRAIN_PRIM_ONE_SIDED). */
     static final int TERRAIN_PRIM_ONE_SIDED = 4;
+    static final int TERRAIN_PRIM_RELIEF = 16; // cutout face of a solid object: parallax allowed (world.rchit)
     static final int TERRAIN_PRIM_FOLIAGE = 8; // leaves/flowers by tag: SSS fallback when the pack has no specular map
 
     private static void collectLights(FloatArrayList out, Geom geom,
@@ -245,6 +246,10 @@ final class RtTerrainMesher {
                     capture.state = state;
                     capture.pos = m;
                     int waveKind = RtWaving.kind(state);
+                    // Cutout faces of a solid object (resource-pack 3D crafting tables, looms...) keep parallax;
+                    // plants (no collision, waving, leaves/flowers) stay flat to avoid the doubled-blade copy.
+                    capture.reliefBlock = waveKind == RtWaving.NONE && !state.is(BlockTags.LEAVES)
+                            && !state.is(BlockTags.FLOWERS) && !state.getCollisionShape(region, m).isEmpty();
                     if (waveKind != RtWaving.NONE) mesh.waveCandidates = true;
                     if (waveKind != RtWaving.NONE && mesh.waveData) {
                         capture.waveKind = waveKind;
@@ -450,6 +455,7 @@ final class RtTerrainMesher {
         BlockState state;
         BlockPos pos;
         float originX, originY, originZ;
+        boolean reliefBlock; // current block may keep parallax on its cutout faces (TERRAIN_PRIM_RELIEF)
         int waveKind;     // RtWaving kind of the current block (NONE when this section carries no wave data)
         float waveLight;  // ITRP skylight weight of the current block
         private final BlockPos.MutableBlockPos cullPos = new BlockPos.MutableBlockPos();
@@ -489,7 +495,10 @@ final class RtTerrainMesher {
             ChunkSectionLayer layer = quad.chunkLayer();
             q.cutout = layer != ChunkSectionLayer.SOLID;
             q.foliage = state.is(BlockTags.LEAVES) || state.is(BlockTags.FLOWERS);
-            q.translucent = layer == ChunkSectionLayer.TRANSLUCENT
+            q.relief = reliefBlock;
+            // Redstone dust lands in TRANSLUCENT (its sprites have soft-alpha edges), but it is a decal, not glass:
+            // the glass path turns alpha into slab tint, so the black filler around the line drew as a solid band.
+            q.translucent = (layer == ChunkSectionLayer.TRANSLUCENT && !state.is(net.minecraft.world.level.block.Blocks.REDSTONE_WIRE))
                     || (layer != ChunkSectionLayer.SOLID && dev.comfyfluffy.caustica.rt.material.RtMaterials.clearGlass(state));
 
             // Fabric colors are authored albedo. Continuity uses them for already-resolved overlay tint;
@@ -674,7 +683,9 @@ final class RtTerrainMesher {
             // Same sprite on both sides (cross plants): keep only the front face as a two-sided card. The
             // any-hit facing test this replaces darkened the middle of grass clumps, and one card needs no
             // per-ray test at all, keeps its fully-opaque micromap states and halves the triangles.
-            if (a.sprite == b.sprite) { b.dropped = true; return; }
+            // Keep the upward-facing card: flat decals (redstone dust) list the DOWN face first, and keeping it
+            // offset the shading point into the block below, so the dust shaded as shadowed dark maroon.
+            if (a.sprite == b.sprite) { (a.ny < b.ny ? a : b).dropped = true; return; }
             a.oneSided = true;
             b.oneSided = true;
         }
@@ -749,7 +760,8 @@ final class RtTerrainMesher {
                 prim.add(0f);
                 prim.add(Float.intBitsToFloat(q.materialId)); // TerrainPrim.materialId uint bits
                 // flags: bit 0 interpolated sky-access bytes; bit 1 light buffer (RtLightCollector); bit 2 one-sided (world.rahit)
-                prim.add(Float.intBitsToFloat((q.oneSided ? 1 | TERRAIN_PRIM_ONE_SIDED : 1) | (q.foliage ? TERRAIN_PRIM_FOLIAGE : 0)));
+                prim.add(Float.intBitsToFloat((q.oneSided ? 1 | TERRAIN_PRIM_ONE_SIDED : 1) | (q.foliage ? TERRAIN_PRIM_FOLIAGE : 0)
+                        | (q.cutout && q.relief && !q.translucent && !q.oneSided ? TERRAIN_PRIM_RELIEF : 0)));
                 int b=t==0?1:2,c=t==0?2:3;
                 prim.add(Float.intBitsToFloat(q.rainSky[0]|q.rainSky[b]<<8|q.rainSky[c]<<16));
                 prim.add(0f); // aux1
@@ -792,6 +804,7 @@ final class RtTerrainMesher {
         boolean translucent; // TRANSLUCENT layer (stained glass / ice): colored-transmission dielectric
         boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
         boolean foliage; // leaves/flowers tag (TERRAIN_PRIM_FOLIAGE)
+        boolean relief;  // solid-object block: cutout faces keep parallax (TERRAIN_PRIM_RELIEF)
         boolean oneSided; // cutout face with a coincident back face: hit only from the side it faces
         boolean dropped;  // back face of a same-sprite two-sided pair: not emitted (the front card stands for both)
         float tr, tg, tb, emission;
